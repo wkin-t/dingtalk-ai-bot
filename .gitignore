@@ -1,0 +1,47 @@
+# 环境变量文件 (包含敏感信息)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Claude Code / Continue 配置
+.claude/
+.continue/
+
+# Demo 目录 (参考代码)
+demo/
+
+# 1Panel 模板 (实际使用的在服务器 1Panel 管理)
+1panel/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# 数据目录
+data/
+
+# Tailscale 数据
+tailscale_data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db

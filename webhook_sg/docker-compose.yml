@@ -1,0 +1,18 @@
+# sg-webhook 独立部署配置
+# 使用方法：
+#   1. 复制 .env.example 为 .env 并填写配置
+#   2. docker-compose up -d --build
+
+services:
+  sg-webhook:
+    build: .
+    container_name: sg-webhook
+    restart: always
+    ports:
+      - "127.0.0.1:35555:35555"
+    env_file:
+      - .env
+    deploy:
+      resources:
+        limits:
+          memory: 256M
