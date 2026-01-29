@@ -1,0 +1,30 @@
+# Flask 是一个轻量级的 Web 框架，我们用它来创建代理服务
+flask
+# Requests 是一个强大的 HTTP 库
+requests
+# 支持 SOCKS 代理
+requests[socks]
+# python-dotenv 用于读取 .env 文件
+python-dotenv
+# Gunicorn 是一个生产级的 WSGI HTTP 服务器，用于部署 Flask 应用
+gunicorn
+# 钉钉 Stream 模式 SDK (官方 PyPI 包)
+dingtalk-stream
+# 钉钉 OpenAPI SDK
+alibabacloud_dingtalk
+# 异步 HTTP 客户端
+aiohttp
+# aiohttp/websockets SOCKS 支持
+python-socks
+# PySocks 用于 Socket 级代理
+PySocks
+alibabacloud-tea-util
+alibabacloud-tea-openapi
+# Google Gemini 官方 SDK (新版)
+google-genai
+# httpx SOCKS 代理支持 (官方 SDK 底层使用 httpx)
+httpx[socks]
+# Redis 客户端
+redis
+# MySQL 客户端
+pymysql

@@ -1,0 +1,29 @@
+# 依赖包（绝对的 Token 杀手！）
+node_modules/
+venv/
+.venv/
+target/
+build/
+dist/
+out/
+bin/
+obj/
+
+# 锁定文件（行数巨多，毫无意义）
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+Podfile.lock
+composer.lock
+
+# 版本控制
+.git/
+.svn/
+.idea/
+.vscode/
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
