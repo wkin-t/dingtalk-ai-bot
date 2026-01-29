@@ -160,16 +160,9 @@ curl http://localhost:35000/v1/models
 | gemini-3-pro | $2.00 | $12.00 |
 | gemini-flash-lite | $0.10 | $0.40 |
 
-## 安全组 Webhook
+## 相关项目
 
-独立服务，用于动态更新腾讯云安全组规则：
-
-```bash
-# 开门请求
-curl "http://服务器:35555/open-door?key=密码&device=设备名"
-```
-
-详见 [webhook_sg/README.md](webhook_sg/README.md)
+- [security-gate](https://github.com/wkin-t/security-gate) - 腾讯云安全组动态开门服务
 
 ## 依赖
 
