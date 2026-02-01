@@ -3,12 +3,12 @@
 # 依赖: openclaw-gateway (由 1Panel 单独管理，提供 ws://127.0.0.1:18789 Gateway)
 
 services:
-  dingtalk-openclaw:
+  dingtalk-ai-bot-openclaw:
     build:
       context: .
       dockerfile: Dockerfile
-    image: dingtalk-openclaw:local
-    container_name: dingtalk-openclaw
+    image: dingtalk-ai-bot:openclaw
+    container_name: dingtalk-ai-bot-openclaw
     restart: always
     network_mode: "host"
     environment:
