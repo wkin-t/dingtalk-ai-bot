@@ -63,7 +63,7 @@ curl http://localhost:35001/
 2. 进入 "容器" > "编排"
 3. 新建编排:
    - 名称: `dingtalk-gemini`
-   - 路径: `/opt/gemini-stack`
+   - 路径: `/opt/dingtalk-ai-bot`
    - 上传 `docker-compose.yml`
 4. (可选) 重复以上步骤创建 `dingtalk-openclaw` 编排
 
@@ -81,7 +81,7 @@ sudo mkdir -p dingtalk-gemini
 cd dingtalk-gemini
 
 # 链接到代码目录的 docker-compose.yml
-sudo ln -sf /opt/gemini-stack/docker-compose.yml .
+sudo ln -sf /opt/dingtalk-ai-bot/docker-compose.yml .
 
 # 启动服务
 docker-compose up -d --build
@@ -90,7 +90,7 @@ docker-compose up -d --build
 cd /opt/1panel/docker/compose
 sudo mkdir -p dingtalk-openclaw
 cd dingtalk-openclaw
-sudo ln -sf /opt/gemini-stack/docker-compose.openclaw.yml docker-compose.yml
+sudo ln -sf /opt/dingtalk-ai-bot/docker-compose.openclaw.yml docker-compose.yml
 docker-compose up -d --build
 ```
 
@@ -177,7 +177,7 @@ docker rmi dingtalk-openclaw:local
 
 ```bash
 # 拉取最新代码
-cd /opt/gemini-stack
+cd /opt/dingtalk-ai-bot
 git pull
 
 # 重新构建并重启 (Gemini)
