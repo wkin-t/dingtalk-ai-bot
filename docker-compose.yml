@@ -1,5 +1,5 @@
 # 1Panel 管理的 DingTalk Gemini AI 机器人服务
-# 代码位置: /opt/gemini-stack/
+# 代码位置: /opt/dingtalk-ai-bot/
 # 依赖: v2raya (由 1Panel 单独管理，提供 socks5://127.0.0.1:1080 代理)
 
 services:
