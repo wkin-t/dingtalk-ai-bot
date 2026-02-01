@@ -28,3 +28,5 @@ httpx[socks]
 redis
 # MySQL 客户端
 pymysql
+# WebSocket 客户端 (用于 OpenClaw Gateway)
+websockets>=12.0

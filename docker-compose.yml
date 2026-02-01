@@ -1,101 +1,24 @@
+# 1Panel 管理的 DingTalk Gemini AI 机器人服务
+# 代码位置: /opt/gemini-stack/
+# 依赖: v2raya (由 1Panel 单独管理，提供 socks5://127.0.0.1:1080 代理)
+
 services:
-  # 服务 1: v2rayA (科学上网网关)
-  v2raya:
-    image: mzz2017/v2raya:latest  # Docker 会优先使用你 load 进去的本地镜像，不会去拉取
-    container_name: v2raya
+  dingtalk-gemini:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-gemini:local
+    container_name: dingtalk-gemini
     restart: always
-    privileged: true       # v2rayA 需要权限操作内核网络
-    network_mode: "host"   # 【关键】使用宿主机网络，直接监听 10809 和 2017
-    environment:
-      - V2RAYA_LOG_FILE=/tmp/v2raya.log
-    volumes:
-      - /lib/modules:/lib/modules:ro
-      - /etc/resolv.conf:/etc/resolv.conf
-      - /etc/v2raya:/etc/v2raya  # 你的节点订阅信息会存在这里
-    deploy:
-      resources:
-        limits:
-          memory: 512M  # 限制该容器最多用 512M
-
-  # === 新增 Tailscale 服务 ===
-  tailscaled:
-    image: tailscale/tailscale:latest
-    container_name: tailscaled
-    hostname: tencent-docker  # 给你的机器起个名字，在控制台显示
-    restart: always
-    network_mode: "host"            # 必须用 host 模式才能访问宿主机网络
-    privileged: true                # 必须给特权
-    cap_add:                        # 必须添加网络管理权限
-      - NET_ADMIN
-      - NET_RAW
-    volumes:
-      - ./tailscale_data:/var/lib/tailscale # 数据持久化到当前目录
-      - /dev/net/tun:/dev/net/tun           # 必须挂载 tun 设备
-    environment:
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=true
-      # Tailscale Auth Key (从 .env 或环境变量读取)
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      # 👇 改回 127.0.0.1 (对应 v2rayA 的端口 1087/1080)
-      - ALL_PROXY=socks5://127.0.0.1:1080
-      - HTTP_PROXY=http://127.0.0.1:1087
-      - HTTPS_PROXY=http://127.0.0.1:1087
-    deploy:
-      resources:
-        limits:
-          memory: 512M  # 限制该容器最多用 512M
-
-  # === 新增：Gemini Proxy 服务 ===
-  gemini-app:
-    build: .                # 关键：告诉 Docker 使用当前目录的 Dockerfile 构建镜像
-    container_name: gemini-app
-    restart: always
-    # 使用 host 模式，这样可以直接访问宿主机的 v2rayA 代理 (127.0.0.1:1087)
-    # 同时也直接监听宿主机的 35000 端口，不需要 ports 映射
     network_mode: "host"
-    
-    # 加载 .env 文件里的环境变量 (API Key, Secret 等)
+    environment:
+      - AI_BACKEND=gemini
+      - FLASK_PORT=35000
     env_file:
       - .env
-      
-    depends_on:
-      - v2raya              # 逻辑依赖：虽然网络是独立的，但建议等 v2rayA 起来再启动
-      
+    volumes:
+      - ./data:/app/data
     deploy:
       resources:
         limits:
-          memory: 512M  # 限制该容器最多用 512M
-
-  hbbs:
-    container_name: hbbs
-    image: rustdesk/rustdesk-server:latest
-    command: hbbs -r 127.0.0.1:21117 -k _
-    volumes:
-      - ./data:/root
-    network_mode: "host"
-    restart: unless-stopped
-
-  hbbr:
-    container_name: hbbr
-    image: rustdesk/rustdesk-server:latest
-    command: hbbr
-    volumes:
-      - ./data:/root
-    network_mode: "host"
-    restart: unless-stopped
-
-  # === 安全组 Webhook 服务 ===
-  # 敏感信息已移至 .env.sg-webhook 文件
-  sg-webhook:
-    build:
-      context: ./webhook_sg
-    container_name: sg-webhook
-    restart: always
-    ports:
-      - "127.0.0.1:35555:35555"
-    env_file:
-      - .env.sg-webhook
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+          memory: 512M

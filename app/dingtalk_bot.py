@@ -4,7 +4,7 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS
+from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
@@ -413,26 +413,36 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         print(f"✅ 卡片创建成功，ID: {out_track_id}")
 
-        # 智能路由：用模型分析问题复杂度，选择模型、thinking level 和是否联网
-        print(f"🔄 [路由] 开始智能路由分析...")
+        # 智能路由：根据 AI_BACKEND 选择后端
+        print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
         has_images = bool(image_data_list)
-        try:
-            complexity = await analyze_complexity_with_model(content, has_images)
-            print(f"🔄 [路由] 预分析返回: {complexity}")
-        except Exception as e:
-            print(f"❌ [路由] 预分析异常: {e}")
-            import traceback
-            traceback.print_exc()
-            complexity = {
-                "model": "gemini-3-flash-preview",
-                "thinking_level": "low",
-                "need_search": False,
-                "reason": "路由异常，使用默认"
-            }
-        target_model = complexity.get("model", "gemini-3-flash-preview")
-        thinking_level = complexity.get("thinking_level", "low")
-        need_search = complexity.get("need_search", False)
-        print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+
+        if AI_BACKEND == "openclaw":
+            # OpenClaw 模式: 内部处理模型选择
+            target_model = "openclaw"
+            thinking_level = "auto"
+            need_search = False
+            print(f"🎯 OpenClaw 模式: 由 Gateway 自动处理路由")
+        else:
+            # Gemini 模式: 智能路由分析
+            print(f"🔄 [路由] 开始智能路由分析...")
+            try:
+                complexity = await analyze_complexity_with_model(content, has_images)
+                print(f"🔄 [路由] 预分析返回: {complexity}")
+            except Exception as e:
+                print(f"❌ [路由] 预分析异常: {e}")
+                import traceback
+                traceback.print_exc()
+                complexity = {
+                    "model": "gemini-3-flash-preview",
+                    "thinking_level": "low",
+                    "need_search": False,
+                    "reason": "路由异常，使用默认"
+                }
+            target_model = complexity.get("model", "gemini-3-flash-preview")
+            thinking_level = complexity.get("thinking_level", "low")
+            need_search = complexity.get("need_search", False)
+            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
 
         full_response = ""
         full_thinking = ""  # 真实的 thinking 内容
@@ -445,7 +455,24 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         at_header = f"👋 @{sender_name} \n\n"
 
         try:
-            async for chunk in call_gemini_stream(messages, target_model=target_model, thinking_level=thinking_level, enable_search=need_search):
+            # 根据后端选择调用不同的 API
+            if AI_BACKEND == "openclaw":
+                from app.openclaw_client import call_openclaw_stream
+                stream = call_openclaw_stream(
+                    messages,
+                    conversation_id=conversation_id,
+                    sender_id=incoming_message.sender_id,
+                    sender_nick=sender_name
+                )
+            else:
+                stream = call_gemini_stream(
+                    messages,
+                    target_model=target_model,
+                    thinking_level=thinking_level,
+                    enable_search=need_search
+                )
+
+            async for chunk in stream:
                 # 处理使用统计
                 if "usage" in chunk:
                     usage_info = chunk["usage"]
