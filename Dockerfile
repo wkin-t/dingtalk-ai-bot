@@ -27,4 +27,5 @@ COPY . .
 # 使用 gunicorn 启动 Flask 应用，同时启动钉钉 Stream 客户端 (在 main.py 中通过线程启动)
 # --worker-class gthread --threads 10: 使用线程模式，支持并发
 # --timeout 120: 防止长连接超时
-CMD ["gunicorn", "--bind", "0.0.0.0:35000", "--worker-class", "gthread", "--threads", "10", "--timeout", "120", "main:app"]
+# 使用环境变量 FLASK_PORT，默认 35000
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${FLASK_PORT:-35000} --worker-class gthread --threads 10 --timeout 120 main:app"]
