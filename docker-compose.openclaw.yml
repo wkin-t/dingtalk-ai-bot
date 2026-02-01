@@ -1,0 +1,25 @@
+# 1Panel 管理的 DingTalk OpenClaw AI 机器人服务
+# 代码位置: /opt/gemini-stack/
+# 依赖: openclaw-gateway (由 1Panel 单独管理，提供 ws://127.0.0.1:18789 Gateway)
+
+services:
+  dingtalk-openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-openclaw:local
+    container_name: dingtalk-openclaw
+    restart: always
+    network_mode: "host"
+    environment:
+      - AI_BACKEND=openclaw
+      - FLASK_PORT=35001
+      - OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
+    env_file:
+      - .env.openclaw
+    volumes:
+      - ./data-openclaw:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M

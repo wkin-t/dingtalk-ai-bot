@@ -39,6 +39,14 @@ HTTP_PROXY_URL = os.getenv("HTTP_PROXY_URL", "http://127.0.0.1:1087")
 # httpx 支持 socks5 但需要 httpx[socks] 依赖
 HTTPX_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://")
 
+# OpenClaw Gateway 配置
+OPENCLAW_GATEWAY_URL = os.getenv("OPENCLAW_GATEWAY_URL", "ws://openclaw-gateway:18789")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "default")
+
+# AI 后端选择: gemini | openclaw
+AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
+
 # 上下文配置
 MAX_HISTORY_LENGTH = int(os.getenv("MAX_HISTORY_LENGTH", 50)) # 发送给 Gemini 的最大条数
 MAX_STORAGE_LENGTH = int(os.getenv("MAX_STORAGE_LENGTH", 1000)) # 本地存储的最大条数

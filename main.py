@@ -81,6 +81,8 @@ stream_thread = threading.Thread(target=run_stream_in_thread, daemon=True)
 stream_thread.start()
 
 if __name__ == '__main__':
+    # 支持通过环境变量配置端口 (默认 35000)
+    flask_port = int(os.getenv("FLASK_PORT", "35000"))
     print(f"📂 History Data Directory: {os.path.abspath(DATA_DIR)}") # 打印绝对路径
-    print(f"🚀 Proxy running at http://0.0.0.0:35000")
-    app.run(host='0.0.0.0', port=35000, threaded=True)
+    print(f"🚀 Proxy running at http://0.0.0.0:{flask_port}")
+    app.run(host='0.0.0.0', port=flask_port, threaded=True)
