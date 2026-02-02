@@ -262,6 +262,155 @@ class TestCallOpenClawStream:
                 error_response = next(r for r in responses if "error" in r)
                 assert "测试错误消息" in error_response["error"], "错误消息不正确"
 
+    @pytest.mark.asyncio
+    async def test_stream_content_events(self):
+        """验证流式内容事件处理"""
+        messages = [{"role": "user", "content": "你好"}]
+
+        mock_client = Mock()
+        mock_client.agent_id = "test-agent"
+
+        async def mock_rpc_call(*args, **kwargs):
+            # 模拟多个内容块
+            yield {"event": {"params": {"type": "content", "content": "你"}}}
+            yield {"event": {"params": {"type": "content", "content": "好"}}}
+            yield {"event": {"params": {"type": "content", "content": "！"}}}
+            yield {"result": {"usage": {"input_tokens": 5, "output_tokens": 3}}}
+
+        with patch("app.openclaw_client._client", mock_client):
+            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
+                responses = []
+                async for response in call_openclaw_stream(
+                    messages=messages,
+                    conversation_id="test-conv",
+                    sender_id="test-sender"
+                ):
+                    responses.append(response)
+
+                # 验证收到了内容块
+                content_responses = [r for r in responses if "content" in r]
+                assert len(content_responses) == 3, "应该收到 3 个内容块"
+                assert content_responses[0]["content"] == "你"
+                assert content_responses[1]["content"] == "好"
+                assert content_responses[2]["content"] == "！"
+
+                # 验证收到了使用统计
+                usage_responses = [r for r in responses if "usage" in r]
+                assert len(usage_responses) == 1, "应该收到 1 个使用统计"
+                assert usage_responses[0]["usage"]["input_tokens"] == 5
+                assert usage_responses[0]["usage"]["output_tokens"] == 3
+
+    @pytest.mark.asyncio
+    async def test_thinking_events(self):
+        """验证思考内容事件处理"""
+        messages = [{"role": "user", "content": "计算 1+1"}]
+
+        mock_client = Mock()
+        mock_client.agent_id = "test-agent"
+
+        async def mock_rpc_call(*args, **kwargs):
+            # 模拟思考过程
+            yield {"event": {"params": {"type": "thinking", "content": "让我计算一下..."}}}
+            yield {"event": {"params": {"type": "content", "content": "答案是 2"}}}
+            yield {"result": {"usage": {"input_tokens": 10, "output_tokens": 5}}}
+
+        with patch("app.openclaw_client._client", mock_client):
+            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
+                responses = []
+                async for response in call_openclaw_stream(
+                    messages=messages,
+                    conversation_id="test-conv",
+                    sender_id="test-sender"
+                ):
+                    responses.append(response)
+
+                # 验证收到了思考内容
+                thinking_responses = [r for r in responses if "thinking" in r]
+                assert len(thinking_responses) == 1, "应该收到思考内容"
+                assert "让我计算一下" in thinking_responses[0]["thinking"]
+
+    @pytest.mark.asyncio
+    async def test_rpc_error_handling(self):
+        """验证 RPC 错误处理"""
+        messages = [{"role": "user", "content": "test"}]
+
+        mock_client = Mock()
+        mock_client.agent_id = "test-agent"
+
+        async def mock_rpc_call(*args, **kwargs):
+            # 模拟 RPC 错误
+            yield {"error": {"code": -32600, "message": "Invalid request"}}
+
+        with patch("app.openclaw_client._client", mock_client):
+            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
+                responses = []
+                async for response in call_openclaw_stream(
+                    messages=messages,
+                    conversation_id="test-conv",
+                    sender_id="test-sender"
+                ):
+                    responses.append(response)
+
+                # 验证返回了 RPC 错误
+                assert any("error" in r for r in responses), "应该返回错误响应"
+                error_response = next(r for r in responses if "error" in r)
+                assert "OpenClaw RPC Error" in error_response["error"]
+                assert "Invalid request" in error_response["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_user_message_error(self):
+        """验证缺少用户消息时的错误处理"""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "assistant", "content": "Hello!"}
+        ]
+
+        mock_client = Mock()
+        mock_client.agent_id = "test-agent"
+
+        with patch("app.openclaw_client._client", mock_client):
+            responses = []
+            async for response in call_openclaw_stream(
+                messages=messages,
+                conversation_id="test-conv",
+                sender_id="test-sender"
+            ):
+                responses.append(response)
+
+            # 验证返回了错误
+            assert len(responses) == 1, "应该只有一个错误响应"
+            assert "error" in responses[0], "应该返回错误"
+            assert "未找到用户消息" in responses[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_exception_handling_in_stream(self):
+        """验证流式处理中的异常处理"""
+        messages = [{"role": "user", "content": "test"}]
+
+        mock_client = Mock()
+        mock_client.agent_id = "test-agent"
+
+        async def mock_rpc_call(*args, **kwargs):
+            # 模拟异常
+            raise RuntimeError("模拟的运行时错误")
+            yield  # 永远不会执行
+
+        with patch("app.openclaw_client._client", mock_client):
+            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
+                responses = []
+                async for response in call_openclaw_stream(
+                    messages=messages,
+                    conversation_id="test-conv",
+                    sender_id="test-sender"
+                ):
+                    responses.append(response)
+
+                # 验证返回了异常错误
+                assert len(responses) == 1, "应该有一个错误响应"
+                assert "error" in responses[0], "应该返回错误"
+                assert "OpenClaw API Error" in responses[0]["error"]
+                assert "模拟的运行时错误" in responses[0]["error"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
