@@ -55,7 +55,8 @@ class OpenClawClient:
                 self.gateway_url,
                 additional_headers=headers,
                 ping_interval=30,
-                ping_timeout=10
+                ping_timeout=10,
+                proxy=None  # 禁用自动代理检测,OpenClaw Gateway 是内网服务
             )
             print(f"✅ 已连接到 OpenClaw Gateway")
 
