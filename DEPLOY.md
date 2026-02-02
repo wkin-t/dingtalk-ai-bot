@@ -114,10 +114,19 @@ docker-compose up -d --build
 | `DINGTALK_CLIENT_ID` | ✓ | 新钉钉应用 Client ID (与 Gemini 不同) |
 | `DINGTALK_CLIENT_SECRET` | ✓ | 新钉钉应用 Secret |
 | `OPENCLAW_GATEWAY_URL` | ✓ | OpenClaw Gateway 地址 (默认 ws://127.0.0.1:18789) |
-| `OPENCLAW_GATEWAY_TOKEN` | - | Gateway 认证 Token |
+| `OPENCLAW_GATEWAY_TOKEN` | ✓ | Gateway 认证 Token (从 Gateway 的 .env 中获取) |
 | `OPENCLAW_AGENT_ID` | - | Agent ID (默认 default) |
 | `AI_BACKEND` | - | 固定为 `openclaw` |
 | `FLASK_PORT` | - | Flask 端口 (默认 35001) |
+
+**获取 OPENCLAW_GATEWAY_TOKEN**:
+```bash
+# 查看 Gateway 配置的 token
+cat /opt/1panel/docker/compose/openclaw/.env | grep OPENCLAW_GATEWAY_TOKEN
+
+# 复制 token 到 .env.openclaw
+echo "OPENCLAW_GATEWAY_TOKEN=<从上面复制的token>" >> .env.openclaw
+```
 
 ## 数据目录
 
