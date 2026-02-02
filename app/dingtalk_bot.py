@@ -326,15 +326,23 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             history_messages = full_history
             
         # 构造 System Prompt
-        system_prompt = """你是 Gem，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
+        from datetime import datetime, timezone, timedelta
+        # 获取北京时间 (UTC+8)
+        beijing_tz = timezone(timedelta(hours=8))
+        current_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        system_prompt = f"""你是 Gem，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
+
+当前时间: {current_time} (北京时间, UTC+8)
 
 格式规则:
 1. 不要使用 LaTeX 语法（如 $x^2$ 或 $$...$$）。用纯文本或 Unicode 表示数学公式（如 x^2, sqrt(x)）。
 2. 可以使用 Markdown：表格、加粗、斜体、列表、代码块。
 
 上下文感知:
-- 对话历史中包含用户昵称，格式为 '昵称: 消息'。
-- 引用用户发言时，请提及其昵称（如 '正如张三所说...'）。
+- 对话历史中包含用户昵称和时间戳，格式为 '[时间] 昵称: 消息'。
+- 引用用户发言时，可以提及其昵称和时间（如 '正如张三在 14:30 所说...'）。
+- 所有时间均为北京时间 (UTC+8)。
 
 重点:
 - 直接回应最新用户的输入。
@@ -343,7 +351,6 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 输出要求:
 - 直接输出答案。不要输出状态指示器或 '[AILoading]'。
 - 使用中文回答。技术术语可在中文后加英文括号（如：机器学习 (Machine Learning)）。
-- 所有时间均为北京时间。
 
 思考语言:
 - 请使用中文进行思考和推理。你的内部思考过程也应该用中文表达。"""
@@ -357,18 +364,39 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         messages = []
         messages.append({
-            "role": "system", 
+            "role": "system",
             "content": system_prompt
         })
-        
+
+        # 格式化历史消息，添加时间戳信息
+        formatted_history = []
+        for msg in history_messages:
+            formatted_msg = {"role": msg["role"]}
+            content = msg.get("content", "")
+            timestamp = msg.get("timestamp")
+
+            # 如果有时间戳，添加到内容前面
+            if timestamp and msg["role"] == "user":
+                # 用户消息格式: [时间] 原始内容
+                formatted_msg["content"] = f"[{timestamp}] {content}"
+            else:
+                # AI 回复不添加时间戳前缀（保持简洁）
+                formatted_msg["content"] = content
+
+            formatted_history.append(formatted_msg)
+
         if image_data_list:
             if history_messages and history_messages[-1]['role'] == 'user':
                 pass
-            
+
+            from datetime import datetime, timezone, timedelta
+            beijing_tz = timezone(timedelta(hours=8))
+            current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
             sender_nick = incoming_message.sender_nick or "User"
-            
+
             user_message_content = []
-            user_message_content.append({"type": "text", "text": f"{sender_nick}: [图片x{len(image_data_list)}] {content}"})
+            user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"})
             
             for i, img_data in enumerate(image_data_list):
                 b64_image = base64.b64encode(img_data).decode('utf-8')
@@ -378,14 +406,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
                 })
 
-            messages.extend(history_messages)
+            messages.extend(formatted_history)
             messages.append({"role": "user", "content": user_message_content})
-            
+
         else:
             # 无图片时：先添加历史记录，再添加当前用户消息
+            from datetime import datetime, timezone, timedelta
+            beijing_tz = timezone(timedelta(hours=8))
+            current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
             sender_nick = incoming_message.sender_nick or "User"
-            text_content = f"{sender_nick}: {content}"
-            messages.extend(history_messages)
+            text_content = f"[{current_timestamp}] {sender_nick}: {content}"
+            messages.extend(formatted_history)
             messages.append({"role": "user", "content": text_content})
 
         # 初始化 AI 卡片
