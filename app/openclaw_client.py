@@ -72,10 +72,10 @@ class OpenClawClient:
                     "minProtocol": 3,
                     "maxProtocol": 3,
                     "client": {
-                        "id": "openclaw-node",  # 使用标准的 OpenClaw node ID
+                        "id": "openclaw-control-ui",  # 使用标准的 OpenClaw control UI ID
                         "version": "1.0.0",
                         "platform": "linux",
-                        "mode": "headless"
+                        "mode": "api"  # API 模式
                     },
                     "role": "operator",
                     "scopes": []
