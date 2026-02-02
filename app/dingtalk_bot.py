@@ -711,6 +711,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                 full_content = "\n".join(content_list)
 
+                # 如果只有图片没有文字，使用默认提示
+                if not full_content and image_list:
+                    full_content = "请详细描述这张图片的内容，包括主要元素、场景、文字等信息。"
+
                 sender_nick = incoming_message.sender_nick or "User"
                 history_content = full_content
                 if image_list:
@@ -757,7 +761,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if img_data:
                     print(f"✅ 图片下载成功，大小: {len(img_data)} bytes")
                     image_data_list.append(img_data)
-                    content = "请分析这张图片"
+                    content = "请详细描述这张图片的内容，包括主要元素、场景、文字等信息。"
                 else:
                     content = "[图片下载失败]"
             elif msg_type == "richText":
