@@ -299,11 +299,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         return "".join(parts)
 
     async def _update_card_throttled(self, out_track_id: str, content: str, last_update_time: float, is_first: bool) -> float:
-        """节流更新卡片"""
+        """节流更新卡片 - 增加节流间隔以减少 API 压力"""
         import time
         current_time = time.time()
 
-        if is_first or current_time - last_update_time > 0.5:
+        # 增加节流间隔：第一次立即更新，后续至少间隔 1 秒
+        if is_first or current_time - last_update_time > 1.0:
             await self.card_helper.stream_update(out_track_id, content, is_finalize=False, content_key="msgContent")
             return current_time
 
@@ -551,7 +552,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         continue
 
                     current_time = time.time()
-                    if current_time - last_update_time > 0.5:
+                    # 增加节流间隔到 1 秒，减少 API 请求频率
+                    if current_time - last_update_time > 1.0:
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = current_time
 
