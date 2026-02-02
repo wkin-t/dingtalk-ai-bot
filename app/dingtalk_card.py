@@ -50,8 +50,9 @@ class DingTalkCardHelper:
 
         # 运行时配置 (钉钉是国内服务，不需要代理)
         self.runtime = util_models.RuntimeOptions()
-        self.runtime.connect_timeout = 10000  # 10秒
-        self.runtime.read_timeout = 30000     # 30秒
+        self.runtime.connect_timeout = 15000  # 15秒 (增加超时时间)
+        self.runtime.read_timeout = 60000     # 60秒 (增加读取超时)
+        self.runtime.max_attempts = 3         # 最多重试 3 次
 
     async def get_access_token(self, force_refresh: bool = False) -> Optional[str]:
         """获取钉钉 Access Token"""
