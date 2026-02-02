@@ -9,9 +9,13 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 # 禁用输出缓冲，让日志实时打印
 ENV PYTHONUNBUFFERED=1
+# 设置时区为东八区
+ENV TZ=Asia/Shanghai
 
-# 安装系统依赖 (如果需要)
-# RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev && rm -rf /var/lib/apt/lists/*
+# 安装系统依赖和时区数据
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+    rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
 COPY requirements.txt .
