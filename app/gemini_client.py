@@ -75,8 +75,10 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False) 
    - "high": 复杂分析、算法设计
 
 3. need_search:
-   - true: 需要实时信息（天气、新闻、股价、最新事件）
+   - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
    - false: 不需要联网（默认）
+
+重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
 {{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因"}}"""
