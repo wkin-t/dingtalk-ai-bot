@@ -301,6 +301,16 @@ async def call_gemini_stream(
                     continue
 
                 candidate = chunk.candidates[0]
+
+                # 检查 finish_reason - 如果因安全原因被阻止，报告给用户
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                    finish_reason = str(candidate.finish_reason)
+                    if 'SAFETY' in finish_reason:
+                        yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
+                        return
+                    elif finish_reason not in ['STOP', 'MAX_TOKENS', '']:
+                        print(f"⚠️ 异常的 finish_reason: {finish_reason}")
+
                 if not candidate.content or not candidate.content.parts:
                     continue
 
@@ -336,6 +346,11 @@ async def call_gemini_stream(
         # 计算延迟
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+
+        # 检查是否返回了内容
+        if output_tokens == 0:
+            yield {"error": "⚠️ Gemini API 没有返回任何内容。可能原因：\n1. 图片内容触发了安全过滤器\n2. 图片格式不支持或损坏\n3. API 遇到内部错误\n\n请尝试：\n- 更换其他图片\n- 添加文字描述一起发送\n- 稍后重试"}
+            return
 
         # 返回统计信息
         yield {
