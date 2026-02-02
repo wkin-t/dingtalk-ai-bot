@@ -8,7 +8,8 @@ import uuid
 import time
 import asyncio
 import traceback
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
+from functools import wraps
 
 from alibabacloud_dingtalk.oauth2_1_0.client import Client as OAuth2Client
 from alibabacloud_dingtalk.oauth2_1_0 import models as oauth2_models
@@ -22,6 +23,45 @@ from alibabacloud_tea_openapi import models as open_api_models
 from alibabacloud_tea_util import models as util_models
 
 from app.config import DINGTALK_CORP_ID
+
+
+def async_retry(max_attempts: int = 3, base_delay: float = 1.0):
+    """
+    异步重试装饰器
+
+    Args:
+        max_attempts: 最大尝试次数
+        base_delay: 基础延迟时间（秒），每次重试会递增
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    result = await func(*args, **kwargs)
+                    if result is not None:
+                        if attempt > 0:
+                            print(f"✅ {func.__name__} 成功（重试 {attempt} 次后）")
+                        return result
+
+                    # 返回 None，等待后重试
+                    if attempt < max_attempts - 1:
+                        wait_time = base_delay * (attempt + 1)
+                        print(f"⏳ {func.__name__} 返回 None，{wait_time:.1f}秒后重试...")
+                        await asyncio.sleep(wait_time)
+
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        wait_time = base_delay * (attempt + 1)
+                        print(f"⚠️ {func.__name__} 异常（第 {attempt + 1}/{max_attempts} 次），{wait_time:.1f}秒后重试: {e}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        print(f"❌ {func.__name__} 最终失败（已重试 {max_attempts} 次）: {e}")
+                        traceback.print_exc()
+
+            return None
+        return wrapper
+    return decorator
 
 
 def _create_client() -> open_api_models.Config:
@@ -54,6 +94,7 @@ class DingTalkCardHelper:
         self.runtime.read_timeout = 60000     # 60秒 (增加读取超时)
         self.runtime.max_attempts = 3         # 最多重试 3 次
 
+    @async_retry(max_attempts=3, base_delay=1.0)
     async def get_access_token(self, force_refresh: bool = False) -> Optional[str]:
         """获取钉钉 Access Token（带重试机制）"""
         if not force_refresh and self.access_token and time.time() < self.token_expires_at:
@@ -62,62 +103,35 @@ class DingTalkCardHelper:
         loop = asyncio.get_running_loop()
 
         def do_get_token():
-            try:
-                if DINGTALK_CORP_ID:
-                    # 企业内部应用
-                    request = oauth2_models.GetCorpAccessTokenRequest(
-                        suitekey=self.client_id,
-                        suitesecret=self.client_secret,
-                        auth_corpid=DINGTALK_CORP_ID
-                    )
-                    response = self.oauth2_client.get_corp_access_token(request)
-                else:
-                    # 机器人应用
-                    request = oauth2_models.GetAccessTokenRequest(
-                        app_key=self.client_id,
-                        app_secret=self.client_secret
-                    )
-                    response = self.oauth2_client.get_access_token(request)
+            if DINGTALK_CORP_ID:
+                # 企业内部应用
+                request = oauth2_models.GetCorpAccessTokenRequest(
+                    suitekey=self.client_id,
+                    suitesecret=self.client_secret,
+                    auth_corpid=DINGTALK_CORP_ID
+                )
+                response = self.oauth2_client.get_corp_access_token(request)
+            else:
+                # 机器人应用
+                request = oauth2_models.GetAccessTokenRequest(
+                    app_key=self.client_id,
+                    app_secret=self.client_secret
+                )
+                response = self.oauth2_client.get_access_token(request)
 
-                if response.body:
-                    return {
-                        'access_token': response.body.access_token,
-                        'expires_in': response.body.expire_in
-                    }
-                return None
-            except Exception as e:
-                print(f"❌ 获取 AccessToken 失败: {e}")
-                traceback.print_exc()
-                return None
+            if response.body:
+                return {
+                    'access_token': response.body.access_token,
+                    'expires_in': response.body.expire_in
+                }
+            return None
 
-        # 应用层重试逻辑：最多重试 3 次
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                data = await loop.run_in_executor(None, do_get_token)
-                if data:
-                    self.access_token = data['access_token']
-                    self.token_expires_at = time.time() + int(data['expires_in']) - 60
-                    if attempt > 0:
-                        print(f"✅ AccessToken 获取成功（重试 {attempt} 次后），有效期: {data['expires_in']}秒")
-                    else:
-                        print(f"✅ AccessToken 获取成功，有效期: {data['expires_in']}秒")
-                    return self.access_token
-
-                # 如果返回 None，等待后重试
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 1.0  # 递增等待时间：1s, 2s, 3s
-                    print(f"⏳ AccessToken 获取失败，{wait_time}秒后重试...")
-                    await asyncio.sleep(wait_time)
-
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 1.0
-                    print(f"⚠️ AccessToken 异常（第 {attempt + 1}/{max_retries} 次），{wait_time}秒后重试: {e}")
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"❌ AccessToken 获取最终失败（已重试 {max_retries} 次）: {e}")
-                    traceback.print_exc()
+        data = await loop.run_in_executor(None, do_get_token)
+        if data:
+            self.access_token = data['access_token']
+            self.token_expires_at = time.time() + int(data['expires_in']) - 60
+            print(f"✅ AccessToken 获取成功，有效期: {data['expires_in']}秒")
+            return self.access_token
 
         return None
 
@@ -208,36 +222,18 @@ class DingTalkCardHelper:
                 traceback.print_exc()
                 return None
 
-        # 应用层重试逻辑：最多重试 3 次
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
+        @async_retry(max_attempts=3, base_delay=1.0)
+        async def _create_with_retry():
+            result = await loop.run_in_executor(None, do_create)
+
+            if result == '401':
+                print("⚠️ Token 可能过期，刷新重试...")
+                await self.get_access_token(force_refresh=True)
                 result = await loop.run_in_executor(None, do_create)
 
-                if result == '401':
-                    print("⚠️ Token 可能过期，刷新重试...")
-                    await self.get_access_token(force_refresh=True)
-                    result = await loop.run_in_executor(None, do_create)
+            return result if result != '401' else None
 
-                if result and result != '401':
-                    return result
-
-                # 如果失败，等待后重试
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 1.0
-                    print(f"⏳ 卡片创建失败，{wait_time}秒后重试...")
-                    await asyncio.sleep(wait_time)
-
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 1.0
-                    print(f"⚠️ 卡片创建异常（第 {attempt + 1}/{max_retries} 次），{wait_time}秒后重试: {e}")
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"❌ 卡片创建最终失败: {e}")
-                    traceback.print_exc()
-
-        return None
+        return await _create_with_retry()
 
     async def stream_update(
         self,
