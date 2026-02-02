@@ -72,9 +72,9 @@ class OpenClawClient:
                     "minProtocol": 3,
                     "maxProtocol": 3,
                     "client": {
-                        "id": "dingtalk-bot",
+                        "id": "openclaw-node",  # 使用标准的 OpenClaw node ID
                         "version": "1.0.0",
-                        "platform": "python",
+                        "platform": "linux",
                         "mode": "headless"
                     },
                     "role": "operator",
