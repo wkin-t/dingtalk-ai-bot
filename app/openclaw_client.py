@@ -53,7 +53,7 @@ class OpenClawClient:
             print(f"🔗 正在连接 OpenClaw Gateway: {self.gateway_url}")
             self.ws = await websockets.connect(
                 self.gateway_url,
-                extra_headers=headers,
+                additional_headers=headers,
                 ping_interval=30,
                 ping_timeout=10
             )
