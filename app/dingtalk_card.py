@@ -55,7 +55,7 @@ class DingTalkCardHelper:
         self.runtime.max_attempts = 3         # 最多重试 3 次
 
     async def get_access_token(self, force_refresh: bool = False) -> Optional[str]:
-        """获取钉钉 Access Token"""
+        """获取钉钉 Access Token（带重试机制）"""
         if not force_refresh and self.access_token and time.time() < self.token_expires_at:
             return self.access_token
 
@@ -90,18 +90,36 @@ class DingTalkCardHelper:
                 traceback.print_exc()
                 return None
 
-        try:
-            data = await loop.run_in_executor(None, do_get_token)
-            if data:
-                self.access_token = data['access_token']
-                self.token_expires_at = time.time() + int(data['expires_in']) - 60
-                print(f"✅ AccessToken 获取成功，有效期: {data['expires_in']}秒")
-                return self.access_token
-            return None
-        except Exception as e:
-            print(f"❌ 获取 AccessToken 异常: {e}")
-            traceback.print_exc()
-            return None
+        # 应用层重试逻辑：最多重试 3 次
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                data = await loop.run_in_executor(None, do_get_token)
+                if data:
+                    self.access_token = data['access_token']
+                    self.token_expires_at = time.time() + int(data['expires_in']) - 60
+                    if attempt > 0:
+                        print(f"✅ AccessToken 获取成功（重试 {attempt} 次后），有效期: {data['expires_in']}秒")
+                    else:
+                        print(f"✅ AccessToken 获取成功，有效期: {data['expires_in']}秒")
+                    return self.access_token
+
+                # 如果返回 None，等待后重试
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 1.0  # 递增等待时间：1s, 2s, 3s
+                    print(f"⏳ AccessToken 获取失败，{wait_time}秒后重试...")
+                    await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 1.0
+                    print(f"⚠️ AccessToken 异常（第 {attempt + 1}/{max_retries} 次），{wait_time}秒后重试: {e}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"❌ AccessToken 获取最终失败（已重试 {max_retries} 次）: {e}")
+                    traceback.print_exc()
+
+        return None
 
     def _convert_card_data(self, card_data: Dict[str, Any]) -> Dict[str, str]:
         """将卡片数据转换为字符串格式"""
@@ -190,20 +208,36 @@ class DingTalkCardHelper:
                 traceback.print_exc()
                 return None
 
-        try:
-            result = await loop.run_in_executor(None, do_create)
-
-            if result == '401':
-                print("⚠️ Token 可能过期，刷新重试...")
-                await self.get_access_token(force_refresh=True)
+        # 应用层重试逻辑：最多重试 3 次
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
                 result = await loop.run_in_executor(None, do_create)
 
-            return result if result != '401' else None
+                if result == '401':
+                    print("⚠️ Token 可能过期，刷新重试...")
+                    await self.get_access_token(force_refresh=True)
+                    result = await loop.run_in_executor(None, do_create)
 
-        except Exception as e:
-            print(f"❌ 发送卡片异常: {e}")
-            traceback.print_exc()
-            return None
+                if result and result != '401':
+                    return result
+
+                # 如果失败，等待后重试
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 1.0
+                    print(f"⏳ 卡片创建失败，{wait_time}秒后重试...")
+                    await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 1.0
+                    print(f"⚠️ 卡片创建异常（第 {attempt + 1}/{max_retries} 次），{wait_time}秒后重试: {e}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"❌ 卡片创建最终失败: {e}")
+                    traceback.print_exc()
+
+        return None
 
     async def stream_update(
         self,
