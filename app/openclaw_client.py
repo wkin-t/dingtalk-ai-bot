@@ -41,24 +41,62 @@ class OpenClawClient:
         self._receive_task = None
 
     async def connect(self):
-        """建立 WebSocket 连接"""
-        if self.ws and self.ws.open:
-            return
+        """建立 WebSocket 连接并完成握手"""
+        # 检查连接状态 (websockets 16.0 兼容)
+        if self.ws:
+            try:
+                # 尝试 ping 来检查连接是否还活着
+                await asyncio.wait_for(self.ws.ping(), timeout=1.0)
+                return  # 连接正常,直接返回
+            except Exception:
+                # 连接已断开,继续重新连接
+                self.ws = None
 
         try:
-            headers = {}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
-
             print(f"🔗 正在连接 OpenClaw Gateway: {self.gateway_url}")
             self.ws = await websockets.connect(
                 self.gateway_url,
-                additional_headers=headers,
                 ping_interval=30,
                 ping_timeout=10,
                 proxy=None  # 禁用自动代理检测,OpenClaw Gateway 是内网服务
             )
-            print(f"✅ 已连接到 OpenClaw Gateway")
+            print(f"✅ WebSocket 已连接,正在执行握手...")
+
+            # 发送 connect 握手请求 (OpenClaw Gateway 协议要求)
+            self.request_id += 1
+            connect_request = {
+                "type": "req",
+                "id": str(self.request_id),
+                "method": "connect",
+                "params": {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "client": {
+                        "id": "dingtalk-bot",
+                        "version": "1.0.0",
+                        "platform": "python",
+                        "mode": "headless"
+                    },
+                    "role": "operator",
+                    "scopes": []
+                }
+            }
+
+            # 添加认证 token (如果配置了)
+            if self.token:
+                connect_request["params"]["auth"] = {"token": self.token}
+
+            await self.ws.send(json.dumps(connect_request))
+
+            # 等待 hello-ok 响应
+            hello_response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            response_data = json.loads(hello_response)
+
+            if response_data.get("type") == "res" and response_data.get("ok"):
+                protocol_version = response_data.get("payload", {}).get("protocol")
+                print(f"✅ 握手成功 (协议版本: {protocol_version})")
+            else:
+                raise Exception(f"握手失败: {response_data}")
 
             # 启动接收任务
             if self._receive_task is None or self._receive_task.done():
@@ -76,19 +114,26 @@ class OpenClawClient:
                 try:
                     data = json.loads(message)
 
-                    # 处理 JSON-RPC 响应
-                    if "id" in data and data["id"] in self.pending_requests:
-                        queue = self.pending_requests[data["id"]]
-                        await queue.put(data)
+                    # OpenClaw Gateway 响应格式: {"type": "res", "id": "...", "ok": true, "payload": {...}}
+                    if "id" in data and str(data["id"]) in self.pending_requests:
+                        request_id = str(data["id"])
+                        queue = self.pending_requests[request_id]
 
-                    # 处理事件通知 (无 id 字段)
-                    elif "method" in data and data["method"] == "chat":
-                        # 聊天流式事件
-                        params = data.get("params", {})
-                        event_type = params.get("type")
+                        # 转换 OpenClaw 格式到内部格式
+                        if data.get("type") == "res":
+                            if data.get("ok"):
+                                # 成功响应
+                                await queue.put({"result": data.get("payload", {})})
+                            else:
+                                # 错误响应
+                                await queue.put({"error": data.get("error", {"message": "Unknown error"})})
+                        else:
+                            # 原始数据
+                            await queue.put(data)
 
-                        # 根据 session_id 或 conversation_id 找到对应的队列
-                        # 这里简化处理,假设只有一个活跃请求
+                    # 处理事件通知 (无 id 字段或流式事件)
+                    elif data.get("type") == "event" or "method" in data:
+                        # 流式事件分发到所有活跃请求
                         for queue in self.pending_requests.values():
                             await queue.put({"event": data})
 
@@ -135,16 +180,16 @@ class OpenClawClient:
         await self.connect()
 
         self.request_id += 1
-        request_id = self.request_id
+        request_id = str(self.request_id)  # 使用字符串ID
 
         # 创建响应队列
         response_queue = asyncio.Queue()
         self.pending_requests[request_id] = response_queue
 
-        # 发送请求
+        # 发送请求 (OpenClaw Gateway 协议格式)
         request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
+            "type": "req",
+            "id": request_id,  # request_id 已经是字符串
             "method": method,
             "params": params
         }
