@@ -21,6 +21,7 @@ except Exception as e:
 message_buffer = {}
 session_locks = {}  # 会话级锁字典
 processing_sessions = set()  # 正在处理的会话集合
+group_info_cache = {}  # 群信息缓存 (conversation_id -> {"name": str, "timestamp": float})
 
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
@@ -56,6 +57,47 @@ SIMPLE_KEYWORDS = [
     "你好", "hi", "hello", "谢谢", "thanks", "再见", "bye",
     "是什么", "什么是", "定义", "简单",
 ]
+
+
+async def get_cached_group_info(card_helper, conversation_id: str, incoming_message) -> str:
+    """
+    获取群信息（优先级：消息字段 > 缓存 > API 调用）
+
+    Args:
+        card_helper: DingTalkCardHelper 实例
+        conversation_id: 群会话 ID
+        incoming_message: 钉钉消息对象
+
+    Returns:
+        群名称字符串
+    """
+    # 优先级1: 消息自带的群名
+    if hasattr(incoming_message, 'conversation_title') and incoming_message.conversation_title:
+        print(f"✅ 使用消息自带的群信息: {incoming_message.conversation_title}")
+        return incoming_message.conversation_title
+
+    # 优先级2: 内存缓存（24小时有效）
+    if conversation_id in group_info_cache:
+        cached = group_info_cache[conversation_id]
+        if time.time() - cached["timestamp"] < 86400:  # 24小时
+            print(f"✅ 使用缓存的群信息: {cached['name']} (缓存命中)")
+            return cached["name"]
+        else:
+            print(f"⏰ 群信息缓存已过期，重新获取: {conversation_id}")
+
+    # 优先级3: 调用 API（并缓存结果）
+    print(f"📡 调用 API 获取群信息: {conversation_id}")
+    info = await card_helper.get_group_info(conversation_id)
+    group_name = info.title if info and hasattr(info, 'title') else "Unknown Group"
+
+    # 更新缓存
+    group_info_cache[conversation_id] = {
+        "name": group_name,
+        "timestamp": time.time()
+    }
+    print(f"✅ 群信息已缓存: {group_name}")
+
+    return group_name
 
 
 def analyze_complexity(content: str, has_images: bool = False) -> dict:
@@ -738,21 +780,17 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if image_list:
                     history_content += f" [图片x{len(image_list)}]"
 
-                # 获取群信息 (只获取群名)
+                # 获取群信息 (只获取群名，优先使用缓存)
                 group_info = None
                 if incoming_message.conversation_type == '2':  # 群聊
-                    group_name = ""
-
-                    if hasattr(incoming_message, 'conversation_title') and incoming_message.conversation_title:
-                        group_name = incoming_message.conversation_title
-                    else:
-                        info = await self.card_helper.get_group_info(incoming_message.conversation_id)
-                        if info and hasattr(info, 'title'):
-                            group_name = info.title
+                    group_name = await get_cached_group_info(
+                        self.card_helper,
+                        incoming_message.conversation_id,
+                        incoming_message
+                    )
 
                     if group_name:
                         group_info = {'name': group_name}
-                        print(f"✅ 获取到群信息: {group_name}")
 
                 update_history(session_key, history_content, assistant_msg=None, sender_nick=sender_nick)
                 print(f"📥 [DingTalk Stream] 处理合并消息: {history_content} (User: {sender_nick})")
