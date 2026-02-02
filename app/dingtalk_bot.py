@@ -823,10 +823,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 return AckMessage.STATUS_OK, 'OK'
 
             # 检查是否正在处理该会话 (防止并发竞态)
+            # 如果正在处理且没有缓冲区，创建缓冲区让消息排队
             if session_key in processing_sessions and session_key not in message_buffer:
-                # 正在处理中且没有缓冲区，提示用户稍候
-                self.reply_markdown("提示", "⏳ 正在处理上一条消息，请稍候...", incoming_message)
-                return AckMessage.STATUS_OK, 'OK'
+                print(f"⏳ 会话正在处理中，将消息加入缓冲区排队: {session_key}")
+                message_buffer[session_key] = {
+                    "content": [],
+                    "images": [],
+                    "incoming_message": incoming_message,
+                    "at_user_ids": at_user_ids
+                }
 
             if session_key in message_buffer:
                 message_buffer[session_key]["timer"].cancel()
