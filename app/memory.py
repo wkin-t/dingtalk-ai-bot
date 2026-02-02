@@ -116,6 +116,11 @@ def update_history(
             print(f"⚠️ 数据库写入失败，降级到文件: {e}")
 
     # 降级：文件存储
+    from datetime import datetime, timezone, timedelta
+    # 使用北京时间 (UTC+8)
+    beijing_tz = timezone(timedelta(hours=8))
+    timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
     file_path = _get_file_path(session_key)
     lock = _get_file_lock(session_key)
 
@@ -133,11 +138,21 @@ def update_history(
         # 记录用户消息
         if user_msg:
             content = f"{sender_nick}: {user_msg}" if sender_nick else user_msg
-            history.append({"role": "user", "content": content})
+            history.append({
+                "role": "user",
+                "content": content,
+                "timestamp": timestamp,
+                "sender_nick": sender_nick
+            })
 
         # 记录 AI 回复
         if assistant_msg:
-            history.append({"role": "assistant", "content": assistant_msg})
+            history.append({
+                "role": "assistant",
+                "content": assistant_msg,
+                "timestamp": timestamp,
+                "sender_nick": None
+            })
 
         # 保持存储长度限制
         if len(history) > MAX_STORAGE_LENGTH:

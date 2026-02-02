@@ -244,7 +244,12 @@ class HistoryStorage:
             # 转换为消息格式 (需要反转顺序)
             messages = []
             for row in reversed(rows):
-                msg = {"role": row["role"], "content": row["content"]}
+                msg = {
+                    "role": row["role"],
+                    "content": row["content"],
+                    "timestamp": row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("created_at") else None,
+                    "sender_nick": row.get("sender_nick")
+                }
                 messages.append(msg)
 
             # 3. 回填 Redis 缓存
@@ -289,8 +294,18 @@ class HistoryStorage:
                 cached = self.redis.get(cache_key)
                 messages = json.loads(cached) if cached else []
 
-                # 追加新消息
-                messages.append({"role": role, "content": content})
+                # 追加新消息（包含时间戳）
+                from datetime import datetime, timezone, timedelta
+                # 使用北京时间 (UTC+8)
+                beijing_tz = timezone(timedelta(hours=8))
+                timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+                messages.append({
+                    "role": role,
+                    "content": content,
+                    "timestamp": timestamp,
+                    "sender_nick": sender_nick
+                })
 
                 # 限制缓存大小
                 if len(messages) > 200:
