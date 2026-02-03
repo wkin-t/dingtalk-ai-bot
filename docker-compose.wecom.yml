@@ -1,0 +1,26 @@
+# 1Panel 管理的企业微信 Gemini AI 机器人服务
+# 代码位置: /opt/dingtalk-ai-bot/
+# 依赖: v2raya (由 1Panel 单独管理，提供 socks5://127.0.0.1:1080 代理)
+# 要求: Nginx 反向代理 HTTPS -> 35002 (/api/wecom/callback)
+
+services:
+  dingtalk-ai-bot-wecom:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-ai-bot:wecom
+    container_name: dingtalk-ai-bot-wecom
+    restart: always
+    network_mode: "host"
+    environment:
+      - AI_BACKEND=gemini
+      - PLATFORM=both  # 同时支持钉钉和企业微信
+      - FLASK_PORT=35002
+    env_file:
+      - .env.wecom
+    volumes:
+      - ./data-wecom:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
