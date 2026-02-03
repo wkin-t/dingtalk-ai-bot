@@ -13,6 +13,16 @@ DINGTALK_CLIENT_SECRET = os.getenv("DINGTALK_CLIENT_SECRET")
 DINGTALK_CORP_ID = os.getenv("DINGTALK_CORP_ID") # 新增 CorpId
 DINGTALK_COOL_APP_CODE = os.getenv("DINGTALK_COOL_APP_CODE") # 新增 CoolAppCode
 
+# 企业微信配置
+WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
+WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID", "")
+WECOM_SECRET = os.getenv("WECOM_SECRET", "")
+WECOM_TOKEN = os.getenv("WECOM_TOKEN", "")
+WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", "")
+
+# 平台选择: dingtalk | wecom | both
+PLATFORM = os.getenv("PLATFORM", "dingtalk")
+
 # 代理设置 (优先读取环境变量)
 # 默认假设 v2rayA 的 SOCKS5 端口是 1080
 DEFAULT_PROXY_HOST = "172.16.0.8"
