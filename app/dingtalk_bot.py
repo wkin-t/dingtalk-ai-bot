@@ -886,11 +886,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     "content": [],
                     "images": [],
                     "incoming_message": incoming_message,
-                    "at_user_ids": at_user_ids
+                    "at_user_ids": at_user_ids,
+                    "timer": None  # 初始化 timer 为 None，防止后续 KeyError
                 }
 
             if session_key in message_buffer:
-                message_buffer[session_key]["timer"].cancel()
+                # 安全取消已有的 timer (可能为 None)
+                existing_timer = message_buffer[session_key].get("timer")
+                if existing_timer is not None:
+                    existing_timer.cancel()
             else:
                 message_buffer[session_key] = {
                     "content": [],
