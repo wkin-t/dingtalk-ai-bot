@@ -55,7 +55,11 @@ requests.Session.__init__ = _retry_session_init
 import threading
 import dingtalk_stream
 from app import app
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET
+from app.config import (
+    DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET,
+    WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_SECRET,
+    PLATFORM
+)
 from app.dingtalk_bot import GeminiBotHandler
 from app.memory import DATA_DIR # 导入数据目录
 
@@ -76,9 +80,32 @@ def run_stream_in_thread():
     except Exception as e:
         print(f"❌ 钉钉 Stream 线程异常退出: {e}")
 
-# 启动 Stream 客户端 (全局启动，适配 Gunicorn)
-stream_thread = threading.Thread(target=run_stream_in_thread, daemon=True)
-stream_thread.start()
+def register_wecom_webhook():
+    """注册企业微信 Webhook 路由"""
+    if not all([WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_SECRET]):
+        print("⚠️ 未配置企业微信参数，跳过注册企业微信 Webhook")
+        return
+
+    print("🚀 正在注册企业微信 Webhook 路由...")
+    from app.wecom.callback import wecom_bp, set_message_handler
+    from app.wecom.bot import WeComBotHandler
+
+    # 注册蓝图
+    app.register_blueprint(wecom_bp)
+
+    # 设置消息处理器
+    wecom_handler = WeComBotHandler()
+    set_message_handler(wecom_handler)
+
+    print("✅ 企业微信 Webhook 已注册: /api/wecom/callback")
+
+# 根据配置启动服务
+if PLATFORM in ["dingtalk", "both"]:
+    stream_thread = threading.Thread(target=run_stream_in_thread, daemon=True)
+    stream_thread.start()
+
+if PLATFORM in ["wecom", "both"]:
+    register_wecom_webhook()
 
 if __name__ == '__main__':
     # 支持通过环境变量配置端口 (默认 35000)

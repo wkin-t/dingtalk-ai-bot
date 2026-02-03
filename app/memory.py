@@ -38,9 +38,24 @@ def _get_file_lock(session_key: str) -> threading.Lock:
         return _file_locks[session_key]
 
 
-def get_session_key(conversation_id: str, sender_id: str = None) -> str:
-    """获取会话键 (只用 conversation_id，实现群聊上下文共享)"""
-    return conversation_id
+def get_session_key(conversation_id: str, sender_id: str = None, platform: str = "dingtalk") -> str:
+    """
+    获取会话键 (只用 conversation_id，实现群聊上下文共享)
+
+    Args:
+        conversation_id: 会话 ID
+        sender_id: 发送者 ID (保留参数兼容性)
+        platform: 平台标识 (dingtalk | wecom)
+
+    Returns:
+        带平台前缀的会话键，避免不同平台会话冲突
+    """
+    # 如果 conversation_id 已经带平台前缀，直接返回
+    if conversation_id.startswith("dingtalk_") or conversation_id.startswith("wecom_"):
+        return conversation_id
+
+    # 否则添加平台前缀
+    return f"{platform}_{conversation_id}"
 
 
 def _get_file_path(session_key: str) -> str:

@@ -30,3 +30,5 @@ redis
 pymysql
 # WebSocket 客户端 (用于 OpenClaw Gateway)
 websockets>=12.0
+# 企业微信消息加解密
+pycryptodome
