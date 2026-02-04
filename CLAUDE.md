@@ -151,6 +151,23 @@ docker-compose -f docker-compose.wecom.yml up -d --build
 docker logs -f dingtalk-ai-bot-wecom
 ```
 
+### 自动部署 (腾讯云)
+
+通过 SSH 远程部署到腾讯云服务器：
+
+```bash
+# 使用 SSH 配置别名连接并部署
+ssh tencent_cloud_server "cd /opt/dingtalk-ai-bot && git pull origin master && cd /opt/1panel/docker && docker-compose -f docker-compose.wecom.yml up -d --build"
+
+# 查看日志
+ssh tencent_cloud_server "docker logs -f dingtalk-ai-bot-wecom"
+```
+
+**部署路径说明：**
+- 代码仓库：`/opt/dingtalk-ai-bot`
+- Docker 编排文件：`/opt/1panel/docker/docker-compose.wecom.yml`
+- 使用 `gh` 命令拉取代码（需要提前配置 GitHub CLI）
+
 ### 企业微信额外配置
 
 1. **Nginx 反向代理**: `https://域名/api/wecom/callback` -> `127.0.0.1:35002`
