@@ -743,33 +743,35 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 pass
 
     async def process_buffered_messages(self, session_key):
-        await asyncio.sleep(2.0)
-
-        if session_key not in message_buffer:
+        try:
+            await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            print(f"⏹️ 定时器被取消（会话 {session_key[-8:]}），消息已合并到新缓冲区")
             return
 
-        # 获取或创建会话锁
+        # 获取或创建会话锁（在 sleep 之前检查，避免重复处理）
         if session_key not in session_locks:
             session_locks[session_key] = asyncio.Lock()
 
         async with session_locks[session_key]:
             # 再次检查，防止在等待锁期间被其他任务处理
             if session_key not in message_buffer:
+                print(f"⚠️ 缓冲区已被其他任务处理: {session_key[-8:]}")
                 return
 
             # 标记正在处理
             processing_sessions.add(session_key)
 
             try:
-                data = message_buffer[session_key]
-                del message_buffer[session_key]
-
+                data = message_buffer.pop(session_key)
                 content_list = data["content"]
                 image_list = data["images"]
                 incoming_message = data["incoming_message"]
                 at_user_ids = data["at_user_ids"]
 
                 full_content = "\n".join(content_list)
+
+                print(f"📦 [Buffer] 合并了 {len(content_list)} 条消息: {content_list}")
 
                 # 如果只有图片没有文字，使用默认提示
                 if not full_content and image_list:
@@ -878,38 +880,33 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     self.reply_markdown("系统提示", "⚠️ 统计功能不可用", incoming_message)
                 return AckMessage.STATUS_OK, 'OK'
 
-            # 检查是否正在处理该会话 (防止并发竞态)
-            # 如果正在处理且没有缓冲区，创建缓冲区让消息排队
-            if session_key in processing_sessions and session_key not in message_buffer:
-                print(f"⏳ 会话正在处理中，将消息加入缓冲区排队: {session_key}")
+            # 消息缓冲逻辑
+            if session_key in message_buffer:
+                # 已有缓冲区: 取消旧 timer，追加新消息
+                existing_timer = message_buffer[session_key].get("timer")
+                if existing_timer is not None:
+                    existing_timer.cancel()
+            else:
+                # 新建缓冲区
                 message_buffer[session_key] = {
                     "content": [],
                     "images": [],
                     "incoming_message": incoming_message,
                     "at_user_ids": at_user_ids,
-                    "timer": None  # 初始化 timer 为 None，防止后续 KeyError
+                    "timer": None
                 }
 
-            if session_key in message_buffer:
-                # 安全取消已有的 timer (可能为 None)
-                existing_timer = message_buffer[session_key].get("timer")
-                if existing_timer is not None:
-                    existing_timer.cancel()
-            else:
-                message_buffer[session_key] = {
-                    "content": [],
-                    "images": [],
-                    "incoming_message": incoming_message, 
-                    "at_user_ids": at_user_ids
-                }
-            
+            # 追加消息内容
             if content:
                 message_buffer[session_key]["content"].append(content)
             if image_data_list:
                 message_buffer[session_key]["images"].extend(image_data_list)
-            
+
+            # 更新元数据 (使用最新消息的上下文)
             message_buffer[session_key]["incoming_message"] = incoming_message
-            
+            message_buffer[session_key]["at_user_ids"] = at_user_ids
+
+            # 启动/重启计时器
             task = asyncio.create_task(self.process_buffered_messages(session_key))
             message_buffer[session_key]["timer"] = task
 
