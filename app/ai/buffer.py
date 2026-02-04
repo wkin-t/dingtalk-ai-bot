@@ -39,34 +39,28 @@ class MessageBuffer:
             metadata: 元数据 (platform, user_id, etc.)
             processor: 消息处理函数
         """
-        # 检查是否正在处理该会话 (防止并发竞态)
-        if session_key in self.processing_sessions and session_key not in self.buffers:
-            print(f"⏳ 会话正在处理中，将消息加入缓冲区排队: {session_key}")
+        # 消息缓冲逻辑
+        if session_key in self.buffers:
+            # 已有缓冲区: 取消旧 timer，追加新消息
+            existing_timer = self.buffers[session_key].get("timer")
+            if existing_timer is not None:
+                existing_timer.cancel()
+        else:
+            # 新建缓冲区
             self.buffers[session_key] = {
                 "content": [],
                 "metadata": metadata,
                 "timer": None
             }
 
-        if session_key in self.buffers:
-            # 取消已有的 timer
-            existing_timer = self.buffers[session_key].get("timer")
-            if existing_timer is not None:
-                existing_timer.cancel()
-        else:
-            self.buffers[session_key] = {
-                "content": [],
-                "metadata": metadata
-            }
-
-        # 添加消息
+        # 追加消息内容
         if content:
             self.buffers[session_key]["content"].append(content)
 
-        # 更新元数据
+        # 更新元数据 (使用最新消息的上下文)
         self.buffers[session_key]["metadata"] = metadata
 
-        # 启动定时器
+        # 启动/重启定时器
         task = asyncio.create_task(self._process_async(session_key, processor))
         self.buffers[session_key]["timer"] = task
 
