@@ -182,4 +182,4 @@ curl http://localhost:35000/v1/models
 
 ## License
 
-MIT License
+MIT License. See `LICENSE`.
