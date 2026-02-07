@@ -2,9 +2,14 @@
 """
 企业微信 Webhook 回调处理
 """
+import time
 from flask import Blueprint, request, make_response
 from app.wecom.crypto import WXBizMsgCrypt
-from app.config import WECOM_TOKEN, WECOM_ENCODING_AES_KEY, WECOM_CORP_ID
+from app.config import (
+    WECOM_BOT_TOKEN,
+    WECOM_BOT_ENCODING_AES_KEY,
+    WECOM_BOT_RECEIVE_ID,
+)
 
 # 创建蓝图
 wecom_bp = Blueprint('wecom', __name__, url_prefix='/api/wecom')
@@ -32,7 +37,7 @@ def callback():
     nonce = request.args.get('nonce', '')
 
     # 初始化加解密工具
-    crypto = WXBizMsgCrypt(WECOM_TOKEN, WECOM_ENCODING_AES_KEY, WECOM_CORP_ID)
+    crypto = WXBizMsgCrypt(WECOM_BOT_TOKEN, WECOM_BOT_ENCODING_AES_KEY, WECOM_BOT_RECEIVE_ID)
 
     # GET: URL 验证
     if request.method == 'GET':
@@ -46,19 +51,21 @@ def callback():
 
     # POST: 接收消息
     elif request.method == 'POST':
-        encrypt_msg = request.data.decode('utf-8')
+        raw_body = request.data.decode('utf-8', errors='ignore')
         try:
             # 解密消息
-            msg_dict = crypto.decrypt_msg(msg_signature, timestamp, nonce, encrypt_msg)
+            msg_dict = crypto.decrypt_msg(msg_signature, timestamp, nonce, raw_body)
             print(f"📩 [企业微信] 收到消息: {msg_dict}")
 
             # 调用消息处理器
             if message_handler:
                 response_msg = message_handler.handle_message(msg_dict)
                 if response_msg:
-                    # 加密回复
-                    encrypted_response = crypto.encrypt_msg(response_msg, nonce, timestamp)
-                    return make_response(encrypted_response, 200, {'Content-Type': 'application/xml'})
+                    # 企业微信机器人回调响应为加密 JSON
+                    safe_nonce = nonce or "nonce"
+                    safe_timestamp = timestamp or str(int(time.time()))
+                    encrypted_response = crypto.encrypt_msg(response_msg, safe_nonce, safe_timestamp)
+                    return make_response(encrypted_response, 200, {'Content-Type': 'text/plain; charset=utf-8'})
 
             # 无需回复时返回 success
             return make_response('success', 200)

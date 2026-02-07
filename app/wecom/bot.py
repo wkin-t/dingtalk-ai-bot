@@ -1,168 +1,167 @@
 # -*- coding: utf-8 -*-
 """
-企业微信机器人消息处理器
+企业微信机器人消息处理器（机器人回调直返模式）
 """
-import time
 import asyncio
-import xml.etree.ElementTree as ET
+import json
+import random
+import re
+import string
 from typing import Optional
-from app.wecom.message import WeComMessageSender
-from app.memory import get_session_key, get_history, update_history, clear_history
+
 from app.ai.handler import AIHandler
+from app.memory import get_session_key, update_history, clear_history
 
 
 class WeComBotHandler:
     """企业微信机器人消息处理器"""
 
     def __init__(self):
-        self.message_sender = WeComMessageSender()
-        self.message_buffer = {}  # 消息缓冲: {session_key: {"content": [], "user_id": str, "timer": task}}
         self.ai_handler = AIHandler(platform="wecom")
 
     def handle_message(self, msg_dict: dict) -> Optional[str]:
         """
-        处理企业微信消息
-
-        Args:
-            msg_dict: 解密后的消息字典
-
-        Returns:
-            回复消息 XML (可选)
+        处理企业微信回调消息并返回 stream 明文 JSON（由回调层加密）
         """
-        msg_type = msg_dict.get('MsgType', '')
+        msg_type = (msg_dict.get("msgtype") or msg_dict.get("MsgType") or "").lower()
 
-        # 只处理文本消息
-        if msg_type != 'text':
-            print(f"⚠️ 暂不支持的消息类型: {msg_type}")
+        if msg_type == "event" or msg_dict.get("Event"):
+            print(f"ℹ️ [企业微信] 忽略事件消息: {msg_dict}")
             return None
 
-        # 提取消息内容
-        from_user = msg_dict.get('FromUserName', '')
-        content = msg_dict.get('Content', '').strip()
-        conversation_id = f"wecom_{from_user}"  # 企业微信会话 ID
+        if msg_type == "stream":
+            # 当前实现为一次性回复（finish=true），不维护长任务拉取状态
+            return None
 
-        print(f"📩 [企业微信] 收到文本消息: {content} (From: {from_user})")
+        if msg_type != "text":
+            print(f"⚠️ [企业微信] 暂不支持的消息类型: {msg_type}")
+            return None
 
-        # 获取会话 key (添加 wecom 前缀,避免与钉钉冲突)
+        from_user = self._extract_sender_id(msg_dict)
+        conversation_id = self._extract_conversation_id(msg_dict, from_user)
+        content = self._extract_text_content(msg_dict)
+        content = self._normalize_content(content)
+
+        if not content:
+            print("⚠️ [企业微信] 文本内容为空，忽略")
+            return None
+
         session_key = get_session_key(conversation_id, from_user)
 
-        # 处理特殊命令
         if content in ["/clear", "清空上下文", "🧹 清空记忆"]:
             clear_history(session_key)
-            self.message_sender.send_text(from_user, "🧹 你的上下文已清空")
-            return None
+            stream_id = self._new_stream_id()
+            return self._build_text_stream(stream_id, "🧹 上下文已清空", True)
 
-        # 缓冲消息 (2秒合并)
-        if session_key not in self.message_buffer:
-            self.message_buffer[session_key] = {
-                "content": [],
-                "user_id": from_user,
-                "timer": None
-            }
+        update_history(session_key, content, assistant_msg=None, sender_nick=from_user)
+        print(f"📩 [企业微信] 收到文本消息: {content} (From: {from_user})")
 
-        # 取消现有定时器
-        if self.message_buffer[session_key]["timer"]:
-            self.message_buffer[session_key]["timer"].cancel()
+        response = self._call_ai(
+            content=content,
+            session_key=session_key,
+            user_id=from_user,
+            sender_nick=from_user,
+        )
 
-        # 添加消息到缓冲区
-        self.message_buffer[session_key]["content"].append(content)
+        stream_id = self._new_stream_id()
+        return self._build_text_stream(stream_id, response, True)
 
-        # 启动 2 秒定时器
-        import threading
-        timer = threading.Timer(2.0, self._process_buffered_messages, args=[session_key])
-        timer.start()
-        self.message_buffer[session_key]["timer"] = timer
-
-        # 不立即回复 (等待缓冲合并)
-        return None
-
-    def _process_buffered_messages(self, session_key: str):
-        """处理缓冲的消息"""
-        if session_key not in self.message_buffer:
-            return
-
-        data = self.message_buffer.pop(session_key)
-        content_list = data["content"]
-        user_id = data["user_id"]
-
-        # 合并消息
-        full_content = "\n".join(content_list)
-        print(f"📥 [企业微信] 处理合并消息: {full_content} (User: {user_id})")
-
-        # 记录用户消息
-        update_history(session_key, full_content, assistant_msg=None, sender_nick=user_id)
-
-        # 发送 "思考中" 提示
-        self.message_sender.send_text(user_id, "🤔 AI 正在思考中...")
-
-        # 调用统一 AI 处理层 (同步包装异步调用)
+    def _call_ai(self, content: str, session_key: str, user_id: str, sender_nick: str) -> str:
         try:
-            # 创建事件循环运行异步函数
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            async def complete_callback(response: str, thinking: str, usage: dict):
-                """完成回调 - 发送完整回复"""
-                # 构建回复内容
-                if thinking:
-                    # 如果有思考过程，添加折叠块
-                    thinking_brief = thinking[:100].replace("\n", " ").strip()
-                    if len(thinking) > 100:
-                        thinking_brief += "..."
-                    reply_content = f"**🧠 思考过程:**\n{thinking_brief}\n\n---\n\n{response}"
-                else:
-                    reply_content = response
-
-                # 发送 Markdown 消息
-                self.message_sender.send_markdown(user_id, reply_content)
-
-            # 运行 AI 处理
-            ai_response = loop.run_until_complete(
-                self.ai_handler.process_message(
-                    content=full_content,
-                    session_key=session_key,
-                    user_id=user_id,
-                    sender_nick=user_id,
-                    image_data_list=None,
-                    group_info=None,
-                    stream_callback=None,  # 企业微信不支持流式更新
-                    complete_callback=complete_callback
+            try:
+                asyncio.set_event_loop(loop)
+                ai_response = loop.run_until_complete(
+                    self.ai_handler.process_message(
+                        content=content,
+                        session_key=session_key,
+                        user_id=user_id,
+                        sender_nick=sender_nick,
+                        image_data_list=None,
+                        group_info=None,
+                        stream_callback=None,
+                        complete_callback=None,
+                    )
                 )
-            )
+            finally:
+                loop.close()
 
-            loop.close()
-
-            print(f"✅ [企业微信] AI 回复发送完成")
-
+            cleaned = (ai_response or "").strip()
+            return cleaned or "我暂时没有生成有效回复，请稍后重试。"
         except Exception as e:
             print(f"❌ [企业微信] AI 处理失败: {e}")
             import traceback
+
             traceback.print_exc()
-            self.message_sender.send_text(user_id, f"❌ 系统异常: {str(e)}")
+            return f"系统异常：{e}"
 
-    def _build_text_reply(self, to_user: str, content: str) -> str:
-        """
-        构建文本回复 XML
+    @staticmethod
+    def _new_stream_id(length: int = 12) -> str:
+        chars = string.ascii_letters + string.digits
+        return "".join(random.choice(chars) for _ in range(length))
 
-        Args:
-            to_user: 接收用户
-            content: 文本内容
-
-        Returns:
-            XML 字符串
-        """
-        timestamp = int(time.time())
-        xml_template = """<xml>
-<ToUserName><![CDATA[{to_user}]]></ToUserName>
-<FromUserName><![CDATA[{from_user}]]></FromUserName>
-<CreateTime>{create_time}</CreateTime>
-<MsgType><![CDATA[text]]></MsgType>
-<Content><![CDATA[{content}]]></Content>
-</xml>"""
-
-        return xml_template.format(
-            to_user=to_user,
-            from_user=self.message_sender.corp_id,
-            create_time=timestamp,
-            content=content
+    @staticmethod
+    def _extract_sender_id(msg_dict: dict) -> str:
+        return (
+            msg_dict.get("from")
+            or msg_dict.get("FromUserName")
+            or msg_dict.get("FromUserId")
+            or msg_dict.get("SenderId")
+            or msg_dict.get("UserId")
+            or "unknown_user"
         )
+
+    @staticmethod
+    def _extract_conversation_id(msg_dict: dict, from_user: str) -> str:
+        conv = (
+            msg_dict.get("conversation_id")
+            or msg_dict.get("chatid")
+            or msg_dict.get("ChatId")
+            or msg_dict.get("ConversationId")
+            or msg_dict.get("SessionId")
+            or msg_dict.get("ExternalChatId")
+            or from_user
+        )
+        return f"wecom_{conv}"
+
+    @staticmethod
+    def _extract_text_content(msg_dict: dict) -> str:
+        content = msg_dict.get("Content")
+        if isinstance(content, str):
+            return content.strip()
+
+        text = msg_dict.get("text")
+        if isinstance(text, dict):
+            value = text.get("content") or text.get("Content") or ""
+            if isinstance(value, str):
+                return value.strip()
+
+        text2 = msg_dict.get("Text")
+        if isinstance(text2, dict):
+            value = text2.get("content") or text2.get("Content") or ""
+            if isinstance(value, str):
+                return value.strip()
+
+        return ""
+
+    @staticmethod
+    def _normalize_content(content: str) -> str:
+        value = (content or "").strip()
+        if not value:
+            return ""
+
+        # 去掉开头 @机器人 名称，避免干扰模型理解
+        value = re.sub(r"^@\S+\s*", "", value)
+        return value.strip()
+
+    @staticmethod
+    def _build_text_stream(stream_id: str, content: str, finish: bool) -> str:
+        payload = {
+            "msgtype": "stream",
+            "stream": {
+                "id": stream_id,
+                "finish": bool(finish),
+                "content": content,
+            },
+        }
+        return json.dumps(payload, ensure_ascii=False)
