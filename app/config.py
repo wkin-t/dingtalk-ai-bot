@@ -13,12 +13,22 @@ DINGTALK_CLIENT_SECRET = os.getenv("DINGTALK_CLIENT_SECRET")
 DINGTALK_CORP_ID = os.getenv("DINGTALK_CORP_ID") # 新增 CorpId
 DINGTALK_COOL_APP_CODE = os.getenv("DINGTALK_COOL_APP_CODE") # 新增 CoolAppCode
 
-# 企业微信配置
+# 企业微信机器人配置 (新)
+WECOM_BOT_WEBHOOK_KEY = os.getenv("WECOM_BOT_WEBHOOK_KEY", "")
+WECOM_BOT_WEBHOOK_URL = os.getenv("WECOM_BOT_WEBHOOK_URL", "")
+WECOM_BOT_TOKEN = os.getenv("WECOM_BOT_TOKEN", os.getenv("WECOM_TOKEN", ""))
+WECOM_BOT_ENCODING_AES_KEY = os.getenv(
+    "WECOM_BOT_ENCODING_AES_KEY",
+    os.getenv("WECOM_ENCODING_AES_KEY", "")
+)
+WECOM_BOT_RECEIVE_ID = os.getenv("WECOM_BOT_RECEIVE_ID", "")
+
+# 企业微信应用配置 (兼容旧配置，逐步废弃)
 WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
 WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID", "")
 WECOM_SECRET = os.getenv("WECOM_SECRET", "")
-WECOM_TOKEN = os.getenv("WECOM_TOKEN", "")
-WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", "")
+WECOM_TOKEN = os.getenv("WECOM_TOKEN", WECOM_BOT_TOKEN)
+WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", WECOM_BOT_ENCODING_AES_KEY)
 
 # 平台选择: dingtalk | wecom | both
 PLATFORM = os.getenv("PLATFORM", "dingtalk")

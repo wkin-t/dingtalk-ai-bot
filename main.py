@@ -57,7 +57,7 @@ import dingtalk_stream
 from app import app
 from app.config import (
     DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET,
-    WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_SECRET,
+    WECOM_BOT_TOKEN, WECOM_BOT_ENCODING_AES_KEY,
     PLATFORM
 )
 from app.dingtalk_bot import GeminiBotHandler
@@ -82,10 +82,9 @@ def run_stream_in_thread():
 
 def register_wecom_webhook():
     """注册企业微信 Webhook 路由"""
-    if not all([WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_SECRET]):
-        print("⚠️ 未配置企业微信参数，跳过注册企业微信 Webhook")
+    if not all([WECOM_BOT_TOKEN, WECOM_BOT_ENCODING_AES_KEY]):
+        print("⚠️ 未配置 WECOM_BOT_TOKEN/WECOM_BOT_ENCODING_AES_KEY，跳过注册企业微信 Webhook")
         return
-
     print("🚀 正在注册企业微信 Webhook 路由...")
     from app.wecom.callback import wecom_bp, set_message_handler
     from app.wecom.bot import WeComBotHandler
