@@ -12,6 +12,7 @@ from app.config import (
     WECOM_BOT_TOKEN,
     WECOM_BOT_ENCODING_AES_KEY,
     WECOM_BOT_RECEIVE_ID,
+    WECOM_BOT_REPLY_MODE,
 )
 
 # 创建蓝图
@@ -195,8 +196,10 @@ def callback():
             msg_dict = crypto.decrypt_msg(msg_signature, timestamp, nonce, raw_body)
             print(f"📩 [企业微信] 收到消息: {msg_dict}")
 
-            # 机器人模式（新）：优先异步 response_url 回推，避免回调超时导致丢消息
-            if msg_dict.get("response_url"):
+            # 机器人模式：根据配置选择回包方式
+            # response_url: 异步主动回复（仅支持非流式）
+            # passive_stream: 回调内加密返回（支持 stream/stream_with_template_card）
+            if msg_dict.get("response_url") and WECOM_BOT_REPLY_MODE == "response_url":
                 threading.Thread(
                     target=_async_respond_via_response_url,
                     args=(msg_dict,),
@@ -204,7 +207,7 @@ def callback():
                 ).start()
                 return make_response('success', 200)
 
-            # 兼容模式（旧）：同步回调内加密应答
+            # 被动回包模式（含旧兼容）：同步回调内加密应答
             if message_handler:
                 response_msg = message_handler.handle_message(msg_dict)
                 if response_msg:
