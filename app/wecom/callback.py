@@ -27,6 +27,102 @@ def set_message_handler(handler):
     message_handler = handler
 
 
+def _truncate_utf8(content: str, max_bytes: int = 20480) -> str:
+    """按 UTF-8 字节长度截断字符串（企业微信 markdown.content 上限 20480 字节）。"""
+    if not content:
+        return ""
+    encoded = content.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return content
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _template_card_to_markdown(template_card: dict) -> str:
+    """将模板卡片降级为 markdown 文本，用于群聊主动回复场景。"""
+    if not isinstance(template_card, dict):
+        return ""
+
+    lines = []
+    main_title = template_card.get("main_title")
+    if isinstance(main_title, dict):
+        title = (main_title.get("title") or "").strip()
+        if title:
+            lines.append(f"**{title}**")
+
+    sub_title = (template_card.get("sub_title_text") or "").strip()
+    if sub_title:
+        lines.append(sub_title)
+
+    quote_area = template_card.get("quote_area")
+    if isinstance(quote_area, dict):
+        quote_text = (quote_area.get("quote_text") or "").strip()
+        if quote_text:
+            lines.append(f"> {quote_text}")
+
+    return "\n\n".join(lines)
+
+
+def _extract_payload_content(payload_dict: dict) -> str:
+    """从 stream/markdown/template_card 里提取可展示文本。"""
+    if not isinstance(payload_dict, dict):
+        return ""
+
+    stream = payload_dict.get("stream")
+    if isinstance(stream, dict):
+        content = stream.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    markdown = payload_dict.get("markdown")
+    if isinstance(markdown, dict):
+        content = markdown.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    template_card = payload_dict.get("template_card")
+    if isinstance(template_card, dict):
+        return _template_card_to_markdown(template_card).strip()
+
+    text = payload_dict.get("text")
+    if isinstance(text, dict):
+        content = text.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    return ""
+
+
+def _to_active_reply_payload(msg_dict: dict, payload_dict: dict) -> dict:
+    """
+    将本地处理结果转换为 response_url 可接受的主动回复格式。
+    参考官方文档：
+    - 主动回复支持 markdown
+    - template_card 主动回复仅支持单聊
+    """
+    msgtype = str(payload_dict.get("msgtype") or "").lower()
+    chattype = str(msg_dict.get("chattype") or "").lower()
+
+    if msgtype == "markdown":
+        content = _extract_payload_content(payload_dict)
+        return {"msgtype": "markdown", "markdown": {"content": _truncate_utf8(content)}}
+
+    if msgtype == "template_card" and chattype == "single":
+        template_card = payload_dict.get("template_card")
+        if isinstance(template_card, dict):
+            return {"msgtype": "template_card", "template_card": template_card}
+
+    # stream / stream_with_template_card / template_card(群聊) / text 等统一降级为 markdown
+    content = _extract_payload_content(payload_dict)
+    if not content:
+        content = "已收到消息，处理中。"
+    return {
+        "msgtype": "markdown",
+        "markdown": {
+            "content": _truncate_utf8(content),
+        },
+    }
+
+
 def _async_respond_via_response_url(msg_dict: dict):
     """企业微信机器人模式：通过 response_url 异步回推消息。"""
     if not message_handler:
@@ -41,11 +137,27 @@ def _async_respond_via_response_url(msg_dict: dict):
         if not stream_payload:
             return
         payload_dict = json.loads(stream_payload)
-        resp = requests.post(response_url, json=payload_dict, timeout=10)
-        if resp.status_code != 200:
-            print(f"❌ [企业微信] response_url 回推失败: status={resp.status_code}, body={resp.text[:200]}")
+        active_payload = _to_active_reply_payload(msg_dict, payload_dict)
+        resp = requests.post(response_url, json=active_payload, timeout=10)
+
+        resp_json = {}
+        try:
+            resp_json = resp.json()
+        except Exception:
+            pass
+
+        errcode = resp_json.get("errcode")
+        errmsg = resp_json.get("errmsg") or resp.text[:200]
+        if resp.status_code != 200 or (errcode is not None and errcode != 0):
+            print(
+                f"❌ [企业微信] response_url 回推失败: status={resp.status_code}, "
+                f"errcode={errcode}, errmsg={errmsg}, payload={json.dumps(active_payload, ensure_ascii=False)[:280]}"
+            )
             return
-        print("✅ [企业微信] response_url 回推成功")
+        print(
+            f"✅ [企业微信] response_url 回推成功: msgtype={active_payload.get('msgtype')}, "
+            f"errcode={errcode}, errmsg={errmsg}"
+        )
     except Exception as e:
         print(f"❌ [企业微信] response_url 回推异常: {e}")
 
