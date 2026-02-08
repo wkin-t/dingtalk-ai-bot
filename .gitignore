@@ -10,6 +10,7 @@
 
 # Demo 目录 (参考代码)
 demo/
+demo/wxwork/aibot_demo_python/
 
 # 1Panel 模板 (实际使用的在服务器 1Panel 管理)
 1panel/

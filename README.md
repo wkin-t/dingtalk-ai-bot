@@ -3,6 +3,8 @@
 钉钉 & 企业微信 AI 机器人，基于 Google Gemini API，支持智能路由、Thinking 模式、实时搜索等高级特性。
 
 > **新增**: 支持企业微信内部群,统一 AI 处理层,钉钉/企业微信会话隔离。详见 [企业微信部署指南](./WECOM_DEPLOYMENT.md)
+>
+> **客户群方案设计**: 见 [WECOM_CUSTOMER_GROUP_DESIGN.md](./WECOM_CUSTOMER_GROUP_DESIGN.md)
 
 ## 核心功能
 
