@@ -62,14 +62,12 @@ class TestOpenClawClient:
             assert "proxy" in call_args[1], "缺少 proxy 参数"
             assert call_args[1]["proxy"] is None, "proxy 参数必须为 None"
 
-            # 验证: 其他必要参数也存在
-            assert "additional_headers" in call_args[1], "缺少 additional_headers 参数"
             assert "ping_interval" in call_args[1], "缺少 ping_interval 参数"
             assert "ping_timeout" in call_args[1], "缺少 ping_timeout 参数"
 
     @pytest.mark.asyncio
     async def test_websocket_connect_with_authorization_header(self, client):
-        """验证连接时正确设置 Authorization 头"""
+        """验证连接时正确在握手请求中携带 auth token"""
         mock_websocket = AsyncMock()
         mock_websocket.open = True
         mock_websocket.recv = AsyncMock(
@@ -84,11 +82,11 @@ class TestOpenClawClient:
 
             await client.connect()
 
-            # 验证 Authorization 头
-            call_args = mock_connect.call_args
-            headers = call_args[1]["additional_headers"]
-            assert "Authorization" in headers, "缺少 Authorization 头"
-            assert headers["Authorization"] == "Bearer test-token-123", "Authorization 头格式不正确"
+            # 验证握手请求携带 auth token
+            sent_payload = json.loads(mock_websocket.send.call_args[0][0])
+            assert sent_payload["method"] == "connect", "首个请求应为 connect 握手"
+            assert "auth" in sent_payload["params"], "握手请求缺少 auth 字段"
+            assert sent_payload["params"]["auth"]["token"] == "test-token-123", "auth token 不正确"
 
     @pytest.mark.asyncio
     async def test_singleton_pattern(self):
