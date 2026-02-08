@@ -1,0 +1,10 @@
+# Global default owner
+* @wkin-t
+
+# Security-sensitive files
+.github/workflows/* @wkin-t
+.github/dependabot.yml @wkin-t
+SECURITY.md @wkin-t
+Dockerfile @wkin-t
+docker-compose*.yml @wkin-t
+app/wecom/* @wkin-t
