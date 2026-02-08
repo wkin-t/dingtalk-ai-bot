@@ -22,6 +22,13 @@ WECOM_BOT_ENCODING_AES_KEY = os.getenv(
     os.getenv("WECOM_ENCODING_AES_KEY", "")
 )
 WECOM_BOT_RECEIVE_ID = os.getenv("WECOM_BOT_RECEIVE_ID", "")
+WECOM_BOT_REPLY_MODE = os.getenv("WECOM_BOT_REPLY_MODE", "response_url").strip().lower()
+if WECOM_BOT_REPLY_MODE not in {"response_url", "passive_stream"}:
+    WECOM_BOT_REPLY_MODE = "response_url"
+
+WECOM_BOT_STREAM_STYLE = os.getenv("WECOM_BOT_STREAM_STYLE", "stream").strip().lower()
+if WECOM_BOT_STREAM_STYLE not in {"stream", "stream_with_template_card"}:
+    WECOM_BOT_STREAM_STYLE = "stream"
 
 # 企业微信应用配置 (兼容旧配置，逐步废弃)
 WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
