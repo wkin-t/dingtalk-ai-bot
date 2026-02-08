@@ -37,17 +37,23 @@ pip install -r requirements.txt
 
 ### Step 2: 配置环境变量
 
-编辑 `.env` 文件,添加企业微信配置:
+编辑 `.env` 文件,添加企业微信机器人配置:
 
 ```env
-# 企业微信配置
-WECOM_CORP_ID=ww1234567890abcdef
-WECOM_AGENT_ID=1000002
-WECOM_SECRET=your_wecom_secret
-
-# 回调配置 (自定义)
-WECOM_TOKEN=your_custom_token_min_3_chars
-WECOM_ENCODING_AES_KEY=your_43_char_base64_encoding_aes_key
+# 企业微信机器人回调验签配置
+WECOM_BOT_TOKEN=your_custom_token_min_3_chars
+WECOM_BOT_ENCODING_AES_KEY=your_43_char_base64_encoding_aes_key
+# 可选：严格校验 receive_id，不确定时留空
+WECOM_BOT_RECEIVE_ID=
+# 机器人发消息 webhook（二选一）
+WECOM_BOT_WEBHOOK_KEY=your_wecom_bot_webhook_key
+# WECOM_BOT_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+# 回包模式:
+# - response_url: 主动回复（稳定，群聊不支持流式卡片）
+# - passive_stream: 被动回包（支持 stream / stream_with_template_card）
+WECOM_BOT_REPLY_MODE=passive_stream
+# 被动流式样式（仅 passive_stream 生效）
+WECOM_BOT_STREAM_STYLE=stream_with_template_card
 
 # 平台选择
 PLATFORM=both  # dingtalk | wecom | both
@@ -102,8 +108,8 @@ python main.py
 | 字段 | 值 |
 |------|------|
 | **URL** | `https://your-domain.com/api/wecom/callback` |
-| **Token** | 你的 `WECOM_TOKEN` |
-| **EncodingAESKey** | 你的 `WECOM_ENCODING_AES_KEY` |
+| **Token** | 你的 `WECOM_BOT_TOKEN` |
+| **EncodingAESKey** | 你的 `WECOM_BOT_ENCODING_AES_KEY` |
 
 4. 点击 **保存** 并验证
    - 如果验证成功,说明回调配置正确
@@ -139,7 +145,7 @@ curl "http://localhost:35000/api/wecom/callback?msg_signature=xxx&timestamp=xxx&
 **常见原因**:
 - HTTPS 证书未配置或过期
 - Nginx 反向代理配置错误
-- `WECOM_TOKEN` 或 `WECOM_ENCODING_AES_KEY` 填写错误
+- `WECOM_BOT_TOKEN` 或 `WECOM_BOT_ENCODING_AES_KEY` 填写错误
 - 防火墙未开放 80/443 端口
 
 ### 2. 收不到消息
@@ -186,7 +192,7 @@ docker logs -f gemini-app | grep "AIHandler"
 |------|------|----------|
 | **外部群/客户群** | ✅ 支持 | ❌ 不支持 |
 | **消息接收方式** | Stream 长连接 | HTTPS 回调 |
-| **流式卡片更新** | ✅ 实时更新 | ❌ 完整回复 |
+| **流式卡片更新** | ✅ 实时更新 | ✅ 支持（`passive_stream` 模式） |
 | **发送频率限制** | 相对宽松 | 20条/分钟/机器人 |
 | **部署要求** | 无需公网 IP | 需要 HTTPS 域名 |
 
@@ -219,10 +225,10 @@ docker logs -f gemini-app | grep "AIHandler"
 
 ### Q: 企业微信支持流式更新吗?
 
-**A**: 不支持。企业微信不支持类似钉钉的流式卡片更新。目前实现方案:
-1. 发送 "🤔 AI 正在思考中..."
-2. 后台完整生成 AI 回复
-3. 发送完整的 Markdown 消息
+**A**: 支持，但需要使用被动回包模式。配置如下：
+1. `WECOM_BOT_REPLY_MODE=passive_stream`
+2. `WECOM_BOT_STREAM_STYLE=stream` 或 `stream_with_template_card`
+3. 回调 URL 继续使用 `/api/wecom/callback`
 
 ### Q: 能否同时支持钉钉和企业微信?
 
