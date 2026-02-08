@@ -41,6 +41,9 @@ class TestOpenClawClient:
         """
         mock_websocket = AsyncMock()
         mock_websocket.open = True
+        mock_websocket.recv = AsyncMock(
+            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
+        )
 
         with patch("app.openclaw_client.websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_connect.return_value = mock_websocket
@@ -69,6 +72,9 @@ class TestOpenClawClient:
         """验证连接时正确设置 Authorization 头"""
         mock_websocket = AsyncMock()
         mock_websocket.open = True
+        mock_websocket.recv = AsyncMock(
+            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
+        )
 
         with patch("app.openclaw_client.websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_connect.return_value = mock_websocket
@@ -100,6 +106,9 @@ class TestOpenClawClient:
         mock_websocket = AsyncMock()
         mock_websocket.open = True
         mock_websocket.send = AsyncMock()
+        mock_websocket.recv = AsyncMock(
+            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
+        )
 
         # 模拟响应队列
         response_queue = asyncio.Queue()
