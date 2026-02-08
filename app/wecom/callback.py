@@ -2,8 +2,11 @@
 """
 企业微信 Webhook 回调处理
 """
+import json
+import threading
 import time
 from flask import Blueprint, request, make_response
+import requests
 from app.wecom.crypto import WXBizMsgCrypt
 from app.config import (
     WECOM_BOT_TOKEN,
@@ -22,6 +25,29 @@ def set_message_handler(handler):
     """设置消息处理器"""
     global message_handler
     message_handler = handler
+
+
+def _async_respond_via_response_url(msg_dict: dict):
+    """企业微信机器人模式：通过 response_url 异步回推消息。"""
+    if not message_handler:
+        return
+
+    response_url = msg_dict.get("response_url")
+    if not response_url:
+        return
+
+    try:
+        stream_payload = message_handler.handle_message(msg_dict)
+        if not stream_payload:
+            return
+        payload_dict = json.loads(stream_payload)
+        resp = requests.post(response_url, json=payload_dict, timeout=10)
+        if resp.status_code != 200:
+            print(f"❌ [企业微信] response_url 回推失败: status={resp.status_code}, body={resp.text[:200]}")
+            return
+        print("✅ [企业微信] response_url 回推成功")
+    except Exception as e:
+        print(f"❌ [企业微信] response_url 回推异常: {e}")
 
 
 @wecom_bp.route('/callback', methods=['GET', 'POST'])
@@ -57,7 +83,16 @@ def callback():
             msg_dict = crypto.decrypt_msg(msg_signature, timestamp, nonce, raw_body)
             print(f"📩 [企业微信] 收到消息: {msg_dict}")
 
-            # 调用消息处理器
+            # 机器人模式（新）：优先异步 response_url 回推，避免回调超时导致丢消息
+            if msg_dict.get("response_url"):
+                threading.Thread(
+                    target=_async_respond_via_response_url,
+                    args=(msg_dict,),
+                    daemon=True,
+                ).start()
+                return make_response('success', 200)
+
+            # 兼容模式（旧）：同步回调内加密应答
             if message_handler:
                 response_msg = message_handler.handle_message(msg_dict)
                 if response_msg:
