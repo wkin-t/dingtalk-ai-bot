@@ -52,7 +52,18 @@ class OpenClawClient:
                 # 连接已断开,继续重新连接
                 self.ws = None
 
+        env_backup = {}
+        proxy_vars = [
+            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+            "ALL_PROXY", "all_proxy", "SOCKS_PROXY", "socks_proxy",
+        ]
         try:
+            # OpenClaw Gateway 通常是本地/内网服务，不应通过代理连接
+            for var in proxy_vars:
+                if var in os.environ:
+                    env_backup[var] = os.environ[var]
+                    del os.environ[var]
+
             print(f"🔗 正在连接 OpenClaw Gateway: {self.gateway_url}")
             self.ws = await websockets.connect(
                 self.gateway_url,
@@ -106,6 +117,10 @@ class OpenClawClient:
         except Exception as e:
             print(f"❌ 连接 OpenClaw Gateway 失败: {e}")
             raise
+        finally:
+            # 恢复环境变量
+            for var, value in env_backup.items():
+                os.environ[var] = value
 
     async def _receive_messages(self):
         """后台接收消息任务"""
