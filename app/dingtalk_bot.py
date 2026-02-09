@@ -487,16 +487,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         formatted_history = []
         for msg in history_messages:
             formatted_msg = {"role": msg["role"]}
-            content = msg.get("content", "")
+            msg_content = msg.get("content", "")  # 改为 msg_content，避免覆盖参数 content
             timestamp = msg.get("timestamp")
 
             # 如果有时间戳，添加到内容前面
             if timestamp and msg["role"] == "user":
                 # 用户消息格式: [时间] 原始内容
-                formatted_msg["content"] = f"[{timestamp}] {content}"
+                formatted_msg["content"] = f"[{timestamp}] {msg_content}"
             else:
                 # AI 回复不添加时间戳前缀（保持简洁）
-                formatted_msg["content"] = content
+                formatted_msg["content"] = msg_content
 
             formatted_history.append(formatted_msg)
 
