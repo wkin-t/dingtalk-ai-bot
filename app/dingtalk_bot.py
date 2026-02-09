@@ -754,9 +754,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             ]
             
             final_content = at_header + clean_response
-            
-            # 记录历史 (使用 update_history 写入文件)
-            update_history(session_key, user_msg=None, assistant_msg=full_response)
+
+            # 记录历史：现在同时保存用户消息和助手消息
+            sender_nick = incoming_message.sender_nick or "User"
+            history_content = content
+            if image_data_list:
+                history_content += f" [图片x{len(image_data_list)}]"
+            update_history(session_key, user_msg=history_content, assistant_msg=full_response, sender_nick=sender_nick)
             
             await self.card_helper.stream_update(
                 out_track_id,
@@ -862,7 +866,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     if group_name:
                         group_info = {'name': group_name}
 
-                update_history(session_key, history_content, assistant_msg=None, sender_nick=sender_nick)
+                # 不再提前保存用户消息，延迟到 AI 回复后保存（避免历史记录中包含当前正在处理的消息）
                 print(f"📥 [DingTalk Stream] 处理合并消息: {history_content} (User: {sender_nick})")
 
                 await self.handle_gemini_stream(incoming_message, full_content, incoming_message.conversation_id, at_user_ids, image_list, group_info)
