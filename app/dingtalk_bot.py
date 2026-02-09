@@ -863,9 +863,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 消息去重：检查是否已处理过此消息
             message_id = incoming_message.message_id
+            print(f"🔍 [去重调试] message_id={message_id}, type={type(message_id)}")
             if message_id and _is_message_processed(message_id):
                 print(f"⚠️ [去重] 消息已处理过，跳过: {message_id}")
                 return AckMessage.STATUS_OK, 'OK'
+            elif message_id:
+                print(f"✅ [去重] 新消息，已加入缓存: {message_id}")
+            else:
+                print(f"⚠️ [去重警告] message_id 为空，无法去重！")
 
             msg_type = incoming_message.message_type
             content = ""
