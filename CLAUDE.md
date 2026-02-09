@@ -122,56 +122,8 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - 回复使用中文
 - 代码注释使用中文
 
----
+## 部署
 
-## 部署流程
+使用 `/deploy` skill 进行自动部署。详见 `.claude/skills/deploy.md`
 
-### 服务选择
-
-| 服务 | compose 文件 | 环境文件 | 端口 |
-|------|-------------|----------|------|
-| 钉钉 Gemini | `docker-compose.yml` | `.env` | 35000 |
-| 钉钉 OpenClaw | `docker-compose.openclaw.yml` | `.env.openclaw` | 35001 |
-| 企业微信+钉钉 | `docker-compose.wecom.yml` | `.env.wecom` | 35002 |
-
-### 标准部署步骤
-
-```bash
-# 1. 拉取代码
-cd /opt/dingtalk-ai-bot && git pull origin master
-
-# 2. 配置环境变量
-cp .env.wecom.example .env.wecom
-vim .env.wecom  # 编辑配置
-
-# 3. 部署
-docker-compose -f docker-compose.wecom.yml up -d --build
-
-# 4. 查看日志
-docker logs -f dingtalk-ai-bot-wecom
-```
-
-### 自动部署 (腾讯云)
-
-通过 SSH 远程部署到腾讯云服务器：
-
-```bash
-# 使用 SSH 配置别名连接并部署
-ssh tencent_cloud_server "cd /opt/dingtalk-ai-bot && git pull origin master && cd /opt/1panel/docker && docker-compose -f docker-compose.wecom.yml up -d --build"
-
-# 查看日志
-ssh tencent_cloud_server "docker logs -f dingtalk-ai-bot-wecom"
-```
-
-**部署路径说明：**
-- 代码仓库：`/opt/dingtalk-ai-bot`
-- Docker 编排文件：`/opt/1panel/docker/docker-compose.wecom.yml`
-- 使用 `gh` 命令拉取代码（需要提前配置 GitHub CLI）
-
-### 企业微信额外配置
-
-1. **Nginx 反向代理**: `https://域名/api/wecom/callback` -> `127.0.0.1:35002`
-2. **HTTPS 证书**: 在 1Panel 中申请 Let's Encrypt 证书
-3. **企业微信后台**: 填入回调 URL、Token、EncodingAESKey
-
-详见 [WECOM_DEPLOYMENT.md](./WECOM_DEPLOYMENT.md)
+企业微信版本需要额外配置 Nginx 反向代理和 HTTPS 证书，详见 [WECOM_DEPLOYMENT.md](./WECOM_DEPLOYMENT.md)
