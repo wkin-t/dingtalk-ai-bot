@@ -404,6 +404,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
     async def handle_gemini_stream(self, incoming_message, content, conversation_id, at_user_ids, image_data_list=None, group_info=None):
         print(f"🚀 开始处理 Gemini 请求: {content} (User: {incoming_message.sender_id})")
+        print(f"🔍 [调试] handle_gemini_stream 接收到的 content 参数: '{content}'")
         if image_data_list:
             print(f"🖼️ 收到图片数量: {len(image_data_list)}")
         
@@ -530,6 +531,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
             sender_nick = incoming_message.sender_nick or "User"
+            print(f"🔍 [调试] 构造当前消息 - sender_nick='{sender_nick}', content='{content}'")
             text_content = f"[{current_timestamp}] {sender_nick}: {content}"
             messages.extend(formatted_history)
             messages.append({"role": "user", "content": text_content})
