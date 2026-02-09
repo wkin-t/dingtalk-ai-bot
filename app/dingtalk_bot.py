@@ -23,6 +23,12 @@ session_locks = {}  # 会话级锁字典
 processing_sessions = set()  # 正在处理的会话集合
 group_info_cache = {}  # 群信息缓存 (conversation_id -> {"name": str, "timestamp": float})
 
+# 消息去重缓存 (message_id -> timestamp)
+# 使用 dict 存储最近处理过的消息 ID，定期清理过期条目
+processed_messages = {}
+MESSAGE_ID_CACHE_SIZE = 1000  # 最多缓存 1000 条
+MESSAGE_ID_TTL = 300  # 消息 ID 缓存 5 分钟
+
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
     # 代码相关
@@ -57,6 +63,50 @@ SIMPLE_KEYWORDS = [
     "你好", "hi", "hello", "谢谢", "thanks", "再见", "bye",
     "是什么", "什么是", "定义", "简单",
 ]
+
+
+def _cleanup_expired_message_ids():
+    """清理过期的消息 ID 缓存"""
+    global processed_messages
+    current_time = time.time()
+
+    # 移除超过 TTL 的消息 ID
+    expired_ids = [msg_id for msg_id, timestamp in processed_messages.items()
+                   if current_time - timestamp > MESSAGE_ID_TTL]
+
+    for msg_id in expired_ids:
+        processed_messages.pop(msg_id, None)
+
+    # 如果缓存超过上限，移除最旧的条目
+    if len(processed_messages) > MESSAGE_ID_CACHE_SIZE:
+        sorted_items = sorted(processed_messages.items(), key=lambda x: x[1])
+        excess_count = len(processed_messages) - MESSAGE_ID_CACHE_SIZE
+        for msg_id, _ in sorted_items[:excess_count]:
+            processed_messages.pop(msg_id, None)
+
+
+def _is_message_processed(message_id: str) -> bool:
+    """
+    检查消息是否已处理过
+
+    Args:
+        message_id: 钉钉消息 ID
+
+    Returns:
+        True 如果消息已处理，False 否则
+    """
+    global processed_messages
+
+    # 清理过期条目 (每次检查时执行，性能开销很小)
+    _cleanup_expired_message_ids()
+
+    # 检查是否已处理
+    if message_id in processed_messages:
+        return True
+
+    # 标记为已处理
+    processed_messages[message_id] = time.time()
+    return False
 
 
 async def get_cached_group_info(card_helper, conversation_id: str, incoming_message) -> str:
@@ -810,7 +860,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
             incoming_message = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
-            
+
+            # 消息去重：检查是否已处理过此消息
+            message_id = incoming_message.message_id
+            if message_id and _is_message_processed(message_id):
+                print(f"⚠️ [去重] 消息已处理过，跳过: {message_id}")
+                return AckMessage.STATUS_OK, 'OK'
+
             msg_type = incoming_message.message_type
             content = ""
             image_data_list = [] 
