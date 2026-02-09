@@ -534,6 +534,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             messages.extend(formatted_history)
             messages.append({"role": "user", "content": text_content})
 
+            # 调试：打印发送给 Gemini 的完整消息
+            print(f"🔍 [调试] 发送给 Gemini 的历史记录数量: {len(formatted_history)}")
+            if formatted_history:
+                print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
+            print(f"🔍 [调试] 当前消息: {text_content}")
+
         # 初始化 AI 卡片
         thinking_text = random.choice(self.thinking_phrases)
         
