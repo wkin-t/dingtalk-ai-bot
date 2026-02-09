@@ -124,6 +124,15 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 
 ## 部署
 
-使用 `/deploy` skill 进行自动部署。详见 `.claude/skills/deploy.md`
+```bash
+# 部署 Gemini 版本（默认）
+/deploy
 
-企业微信版本需要额外配置 Nginx 反向代理和 HTTPS 证书，详见 [WECOM_DEPLOYMENT.md](./WECOM_DEPLOYMENT.md)
+# 部署 OpenClaw 版本
+/deploy openclaw
+
+# 部署企业微信版本
+/deploy wecom
+```
+
+详见 `.claude/skills/deploy.md`。企业微信版本需额外配置 Nginx 和 HTTPS，详见 [WECOM_DEPLOYMENT.md](./WECOM_DEPLOYMENT.md)
