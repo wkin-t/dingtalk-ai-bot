@@ -122,8 +122,8 @@ def update_history(
     if USE_DATABASE:
         try:
             if user_msg:
-                content = f"{sender_nick}: {user_msg}" if sender_nick else user_msg
-                history_storage.add_message(session_key, "user", content, sender_nick)
+                # 只保存纯文本内容，不拼接昵称（读取时会拼接）
+                history_storage.add_message(session_key, "user", user_msg, sender_nick)
             if assistant_msg:
                 history_storage.add_message(session_key, "assistant", assistant_msg)
             return
@@ -152,10 +152,10 @@ def update_history(
 
         # 记录用户消息
         if user_msg:
-            content = f"{sender_nick}: {user_msg}" if sender_nick else user_msg
+            # 只保存纯文本内容，不拼接昵称（读取时会拼接）
             history.append({
                 "role": "user",
-                "content": content,
+                "content": user_msg,
                 "timestamp": timestamp,
                 "sender_nick": sender_nick
             })
