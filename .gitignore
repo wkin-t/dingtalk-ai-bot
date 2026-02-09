@@ -46,3 +46,16 @@ tailscale_data/
 # 系统文件
 .DS_Store
 Thumbs.db
+NUL
+
+# 测试覆盖率
+.coverage
+.hypothesis/
+htmlcov/
+.pytest_cache/
+
+# GitHub Actions（如果是本地测试生成的）
+.github/
+
+# 内部修复文档（包含服务器路径等敏感信息）
+FIX_*.md
