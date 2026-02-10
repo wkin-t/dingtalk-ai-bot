@@ -814,28 +814,28 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             except:
                 pass
 
-    async def process_buffered_messages(self, session_key):
+    async def process_buffered_messages(self, buffer_key):
         try:
             await asyncio.sleep(2.0)
         except asyncio.CancelledError:
-            print(f"⏹️ 定时器被取消（会话 {session_key[-8:]}），消息已合并到新缓冲区")
+            print(f"⏹️ 定时器被取消（缓冲 {buffer_key[-8:]}），消息已合并到新缓冲区")
             return
 
         # 获取或创建会话锁（在 sleep 之前检查，避免重复处理）
-        if session_key not in session_locks:
-            session_locks[session_key] = asyncio.Lock()
+        if buffer_key not in session_locks:
+            session_locks[buffer_key] = asyncio.Lock()
 
-        async with session_locks[session_key]:
+        async with session_locks[buffer_key]:
             # 再次检查，防止在等待锁期间被其他任务处理
-            if session_key not in message_buffer:
-                print(f"⚠️ 缓冲区已被其他任务处理: {session_key[-8:]}")
+            if buffer_key not in message_buffer:
+                print(f"⚠️ 缓冲区已被其他任务处理: {buffer_key[-8:]}")
                 return
 
             # 标记正在处理
-            processing_sessions.add(session_key)
+            processing_sessions.add(buffer_key)
 
             try:
-                data = message_buffer.pop(session_key)
+                data = message_buffer.pop(buffer_key)
                 content_list = data["content"]
                 image_list = data["images"]
                 incoming_message = data["incoming_message"]
@@ -843,7 +843,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                 full_content = "\n".join(content_list)
 
-                print(f"📦 [Buffer] 合并了 {len(content_list)} 条消息: {content_list}")
+                print(f"📦 [Buffer] 合并了 {len(content_list)} 条消息 (用户: {incoming_message.sender_nick}): {content_list}")
 
                 # 如果只有图片没有文字，使用默认提示
                 if not full_content and image_list:
@@ -872,7 +872,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 await self.handle_gemini_stream(incoming_message, full_content, incoming_message.conversation_id, at_user_ids, image_list, group_info)
             finally:
                 # 清除正在处理标记
-                processing_sessions.discard(session_key)
+                processing_sessions.discard(buffer_key)
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -924,8 +924,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 return AckMessage.STATUS_OK, 'OK'
 
             sender_id = incoming_message.sender_staff_id or incoming_message.sender_id
-            conversation_id = incoming_message.conversation_id 
+            conversation_id = incoming_message.conversation_id
             session_key = get_session_key(conversation_id, sender_id)
+            # 缓冲区使用独立的 key（含 sender_id），避免群聊中不同用户的消息被合并
+            buffer_key = f"{session_key}_{sender_id}"
 
             should_reply = False
             if incoming_message.conversation_type == '1': 
@@ -963,15 +965,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     self.reply_markdown("系统提示", "⚠️ 统计功能不可用", incoming_message)
                 return AckMessage.STATUS_OK, 'OK'
 
-            # 消息缓冲逻辑
-            if session_key in message_buffer:
+            # 消息缓冲逻辑 (使用 buffer_key 隔离不同用户)
+            if buffer_key in message_buffer:
                 # 已有缓冲区: 取消旧 timer，追加新消息
-                existing_timer = message_buffer[session_key].get("timer")
+                existing_timer = message_buffer[buffer_key].get("timer")
                 if existing_timer is not None:
                     existing_timer.cancel()
             else:
                 # 新建缓冲区
-                message_buffer[session_key] = {
+                message_buffer[buffer_key] = {
                     "content": [],
                     "images": [],
                     "incoming_message": incoming_message,
@@ -981,17 +983,17 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 追加消息内容
             if content:
-                message_buffer[session_key]["content"].append(content)
+                message_buffer[buffer_key]["content"].append(content)
             if image_data_list:
-                message_buffer[session_key]["images"].extend(image_data_list)
+                message_buffer[buffer_key]["images"].extend(image_data_list)
 
             # 更新元数据 (使用最新消息的上下文)
-            message_buffer[session_key]["incoming_message"] = incoming_message
-            message_buffer[session_key]["at_user_ids"] = at_user_ids
+            message_buffer[buffer_key]["incoming_message"] = incoming_message
+            message_buffer[buffer_key]["at_user_ids"] = at_user_ids
 
             # 启动/重启计时器
-            task = asyncio.create_task(self.process_buffered_messages(session_key))
-            message_buffer[session_key]["timer"] = task
+            task = asyncio.create_task(self.process_buffered_messages(buffer_key))
+            message_buffer[buffer_key]["timer"] = task
 
         except Exception as e:
             print(f"💥 [DingTalk Stream] Process 异常: {e}")
