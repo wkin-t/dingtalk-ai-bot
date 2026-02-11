@@ -70,6 +70,8 @@ HTTPX_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://")
 OPENCLAW_GATEWAY_URL = os.getenv("OPENCLAW_GATEWAY_URL", "ws://openclaw-gateway:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "default")
+# OpenClaw HTTP API (OpenAI 兼容端点，经过 Safeline WAF)
+OPENCLAW_HTTP_URL = os.getenv("OPENCLAW_HTTP_URL", "http://172.17.0.1:48789/v1/chat/completions")
 
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
