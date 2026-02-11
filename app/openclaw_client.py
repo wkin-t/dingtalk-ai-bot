@@ -1,268 +1,107 @@
 # -*- coding: utf-8 -*-
 """
 OpenClaw Gateway WebSocket 客户端
-提供与 gemini_client.py 一致的流式接口
+兼容 OpenClaw Gateway Protocol v3 (challenge-response 握手 + chat.send 流式)
+
+协议流程:
+1. 连接 WebSocket
+2. 服务端发送 connect.challenge (含 nonce)
+3. 客户端发送 connect 请求 (含 token 认证)
+4. 服务端响应 hello-ok
+5. 客户端发送 chat.send 请求
+6. 通过 event:chat 事件接收流式内容
 """
 import os
 import json
 import asyncio
+import uuid
 import time
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, AsyncGenerator
 import websockets
-from websockets.exceptions import WebSocketException
 from app.config import OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_TOKEN, OPENCLAW_AGENT_ID
 
 
-class OpenClawClient:
-    """OpenClaw Gateway WebSocket 客户端 (单例模式)"""
+# 代理环境变量列表 (OpenClaw Gateway 是内网服务，需临时移除)
+_PROXY_VARS = [
+    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+    "ALL_PROXY", "all_proxy", "SOCKS_PROXY", "socks_proxy",
+]
 
-    _instance = None
-    _lock = asyncio.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+async def _create_connection(gateway_url: str, token: str) -> "websockets.WebSocketClientProtocol":
+    """
+    创建 WebSocket 连接并完成 Protocol v3 challenge-response 握手
 
-    def __init__(self):
-        if self._initialized:
-            return
+    流程:
+    1. Server → connect.challenge {nonce, ts}
+    2. Client → connect {auth.token, client metadata}
+    3. Server → hello-ok {protocol, features, snapshot}
+    """
+    env_backup = {}
+    try:
+        # 临时移除代理，避免内网连接走代理
+        for var in _PROXY_VARS:
+            if var in os.environ:
+                env_backup[var] = os.environ[var]
+                del os.environ[var]
 
-        self.ws = None
-        self.gateway_url = OPENCLAW_GATEWAY_URL
-        self.token = OPENCLAW_GATEWAY_TOKEN
-        self.agent_id = OPENCLAW_AGENT_ID
-        self.request_id = 0
-        self.pending_requests = {}  # {request_id: asyncio.Queue}
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 5
-        self._initialized = True
-        self._receive_task = None
+        # 从 ws:// URL 构造 Origin 头 (Gateway 要求 Origin 校验)
+        origin = gateway_url.replace("ws://", "http://").replace("wss://", "https://")
 
-    async def connect(self):
-        """建立 WebSocket 连接并完成握手"""
-        # 检查连接状态 (websockets 16.0 兼容)
-        if self.ws:
-            try:
-                # 尝试 ping 来检查连接是否还活着
-                await asyncio.wait_for(self.ws.ping(), timeout=1.0)
-                return  # 连接正常,直接返回
-            except Exception:
-                # 连接已断开,继续重新连接
-                self.ws = None
+        print(f"🔗 正在连接 OpenClaw Gateway: {gateway_url}")
+        ws = await websockets.connect(
+            gateway_url,
+            ping_interval=30,
+            ping_timeout=10,
+            additional_headers={"Origin": origin},
+            proxy=None,
+        )
 
-        env_backup = {}
-        proxy_vars = [
-            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-            "ALL_PROXY", "all_proxy", "SOCKS_PROXY", "socks_proxy",
-        ]
-        try:
-            # OpenClaw Gateway 通常是本地/内网服务，不应通过代理连接
-            for var in proxy_vars:
-                if var in os.environ:
-                    env_backup[var] = os.environ[var]
-                    del os.environ[var]
+        # Step 1: 等待 connect.challenge
+        challenge_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        challenge = json.loads(challenge_raw)
+        if challenge.get("event") != "connect.challenge":
+            raise Exception(f"期望 connect.challenge，收到: {challenge}")
+        print("✅ 收到 connect.challenge")
 
-            print(f"🔗 正在连接 OpenClaw Gateway: {self.gateway_url}")
-            self.ws = await websockets.connect(
-                self.gateway_url,
-                ping_interval=30,
-                ping_timeout=10,
-                proxy=None  # 禁用自动代理检测,OpenClaw Gateway 是内网服务
-            )
-            print(f"✅ WebSocket 已连接,正在执行握手...")
-
-            # 发送 connect 握手请求 (OpenClaw Gateway 协议要求)
-            self.request_id += 1
-            connect_request = {
-                "type": "req",
-                "id": str(self.request_id),
-                "method": "connect",
-                "params": {
-                    "minProtocol": 3,
-                    "maxProtocol": 3,
-                    "client": {
-                        "id": "openclaw-control-ui",  # 使用标准的 OpenClaw control UI ID
-                        "version": "1.0.0",
-                        "platform": "linux",
-                        "mode": "api"  # API 模式
-                    },
-                    "role": "operator",
-                    "scopes": []
-                }
-            }
-
-            # 添加认证 token (如果配置了)
-            if self.token:
-                connect_request["params"]["auth"] = {"token": self.token}
-
-            await self.ws.send(json.dumps(connect_request))
-
-            # 等待 hello-ok 响应
-            hello_response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
-            response_data = json.loads(hello_response)
-
-            if response_data.get("type") == "res" and response_data.get("ok"):
-                protocol_version = response_data.get("payload", {}).get("protocol")
-                print(f"✅ 握手成功 (协议版本: {protocol_version})")
-            else:
-                raise Exception(f"握手失败: {response_data}")
-
-            # 启动接收任务
-            if self._receive_task is None or self._receive_task.done():
-                self._receive_task = asyncio.create_task(self._receive_messages())
-
-            self.reconnect_attempts = 0
-        except Exception as e:
-            print(f"❌ 连接 OpenClaw Gateway 失败: {e}")
-            raise
-        finally:
-            # 恢复环境变量
-            for var, value in env_backup.items():
-                os.environ[var] = value
-
-    async def _receive_messages(self):
-        """后台接收消息任务"""
-        try:
-            async for message in self.ws:
-                try:
-                    data = json.loads(message)
-
-                    # OpenClaw Gateway 响应格式: {"type": "res", "id": "...", "ok": true, "payload": {...}}
-                    if "id" in data and str(data["id"]) in self.pending_requests:
-                        request_id = str(data["id"])
-                        queue = self.pending_requests[request_id]
-
-                        # 转换 OpenClaw 格式到内部格式
-                        if data.get("type") == "res":
-                            if data.get("ok"):
-                                # 成功响应
-                                await queue.put({"result": data.get("payload", {})})
-                            else:
-                                # 错误响应
-                                await queue.put({"error": data.get("error", {"message": "Unknown error"})})
-                        else:
-                            # 原始数据
-                            await queue.put(data)
-
-                    # 处理事件通知 (无 id 字段或流式事件)
-                    elif data.get("type") == "event" or "method" in data:
-                        # 流式事件分发到所有活跃请求
-                        for queue in self.pending_requests.values():
-                            await queue.put({"event": data})
-
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ 解析 WebSocket 消息失败: {e}")
-                except Exception as e:
-                    print(f"⚠️ 处理 WebSocket 消息异常: {e}")
-
-        except WebSocketException as e:
-            print(f"⚠️ WebSocket 连接断开: {e}")
-            await self._reconnect()
-        except Exception as e:
-            print(f"❌ 接收消息任务异常: {e}")
-
-    async def _reconnect(self):
-        """自动重连"""
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            print(f"❌ 重连次数超过限制 ({self.max_reconnect_attempts}),放弃重连")
-            return
-
-        self.reconnect_attempts += 1
-        wait_time = min(2 ** self.reconnect_attempts, 30)  # 指数退避,最多 30 秒
-        print(f"🔄 {wait_time}秒后尝试第 {self.reconnect_attempts} 次重连...")
-        await asyncio.sleep(wait_time)
-
-        try:
-            await self.connect()
-        except Exception as e:
-            print(f"⚠️ 重连失败: {e}")
-            await self._reconnect()
-
-    async def call_rpc(self, method: str, params: dict, stream: bool = False) -> AsyncGenerator[dict, None]:
-        """
-        调用 JSON-RPC 方法
-
-        Args:
-            method: RPC 方法名
-            params: 参数
-            stream: 是否流式返回
-
-        Yields:
-            RPC 响应或事件
-        """
-        await self.connect()
-
-        self.request_id += 1
-        request_id = str(self.request_id)  # 使用字符串ID
-
-        # 创建响应队列
-        response_queue = asyncio.Queue()
-        self.pending_requests[request_id] = response_queue
-
-        # 发送请求 (OpenClaw Gateway 协议格式)
-        request = {
+        # Step 2: 发送 connect 请求
+        connect_req = {
             "type": "req",
-            "id": request_id,  # request_id 已经是字符串
-            "method": method,
-            "params": params
+            "id": "0",
+            "method": "connect",
+            "params": {
+                "minProtocol": 3,
+                "maxProtocol": 3,
+                "client": {
+                    "id": "openclaw-control-ui",
+                    "version": "1.0.0",
+                    "platform": "linux",
+                    "mode": "webchat"
+                },
+                "role": "operator",
+                "scopes": [],
+                "auth": {"token": token}
+            }
         }
+        await ws.send(json.dumps(connect_req))
 
-        try:
-            await self.ws.send(json.dumps(request))
+        # Step 3: 等待 hello-ok
+        hello_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        hello = json.loads(hello_raw)
+        if not (hello.get("type") == "res" and hello.get("ok")):
+            error_msg = hello.get("error", {}).get("message", str(hello))
+            raise Exception(f"握手失败: {error_msg}")
 
-            if stream:
-                # 流式响应: 持续接收事件,直到收到结束标记
-                while True:
-                    try:
-                        response = await asyncio.wait_for(response_queue.get(), timeout=60.0)
+        protocol = hello.get("payload", {}).get("protocol")
+        print(f"✅ 握手成功 (协议版本: {protocol})")
+        return ws
 
-                        # 处理事件
-                        if "event" in response:
-                            yield response["event"]
-
-                        # 处理最终响应
-                        elif "result" in response:
-                            yield response
-                            break
-
-                        # 处理错误
-                        elif "error" in response:
-                            yield response
-                            break
-
-                    except asyncio.TimeoutError:
-                        print("⚠️ 等待响应超时")
-                        yield {"error": {"code": -1, "message": "Response timeout"}}
-                        break
-            else:
-                # 非流式: 等待单个响应
-                response = await asyncio.wait_for(response_queue.get(), timeout=30.0)
-                yield response
-
-        finally:
-            # 清理
-            if request_id in self.pending_requests:
-                del self.pending_requests[request_id]
-
-    async def close(self):
-        """关闭连接"""
-        if self._receive_task:
-            self._receive_task.cancel()
-            try:
-                await self._receive_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.ws:
-            await self.ws.close()
-            self.ws = None
-            print("✅ OpenClaw Gateway 连接已关闭")
-
-
-# 全局客户端实例
-_client = OpenClawClient()
+    except Exception as e:
+        print(f"❌ 连接 OpenClaw Gateway 失败: {e}")
+        raise
+    finally:
+        for var, value in env_backup.items():
+            os.environ[var] = value
 
 
 async def call_openclaw_stream(
@@ -274,6 +113,9 @@ async def call_openclaw_stream(
     """
     调用 OpenClaw Gateway 进行流式对话
 
+    每次请求创建独立 WebSocket 连接，完成后关闭。
+    避免持久连接的事件路由复杂性，对话级别的延迟开销可忽略。
+
     Args:
         messages: OpenAI 格式的消息列表
         conversation_id: 会话 ID
@@ -281,17 +123,15 @@ async def call_openclaw_stream(
         sender_nick: 发送者昵称
 
     Yields:
-        {"content": "..."}  - 正常回复内容
-        {"thinking": "..."}  - 思考内容 (如果启用)
-        {"error": "..."}  - 错误信息
-        {"usage": {...}}  - 使用统计
+        {"content": "..."}   - 正式回复内容 (增量文本)
+        {"thinking": "..."}  - 思考内容 (增量文本)
+        {"error": "..."}     - 错误信息
+        {"usage": {...}}     - 使用统计
     """
     print(f"📡 正在请求 OpenClaw Gateway (conversation_id={conversation_id})...")
 
     start_time = time.time()
-    input_tokens = 0
-    output_tokens = 0
-    full_content = ""
+    ws = None
 
     try:
         # 提取最后一条用户消息
@@ -302,7 +142,6 @@ async def call_openclaw_stream(
                 if isinstance(content, str):
                     user_message = content
                 elif isinstance(content, list):
-                    # 提取文本部分
                     for item in content:
                         if item.get("type") == "text":
                             user_message = item.get("text", "")
@@ -313,67 +152,118 @@ async def call_openclaw_stream(
             yield {"error": "未找到用户消息"}
             return
 
-        # 调用 chat RPC
-        params = {
-            "agent_id": _client.agent_id,
-            "session_id": conversation_id,
-            "message": user_message,
-            "sender_id": sender_id,
-            "sender_name": sender_nick,
-            "stream": True
+        # 建立连接
+        ws = await _create_connection(OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_TOKEN)
+
+        # 构造 sessionKey: agent:<agentId>:<conversationId>
+        agent_id = OPENCLAW_AGENT_ID or "main"
+        session_key = f"agent:{agent_id}:{conversation_id}"
+
+        # 发送 chat.send 请求
+        chat_req = {
+            "type": "req",
+            "id": "1",
+            "method": "chat.send",
+            "params": {
+                "sessionKey": session_key,
+                "message": user_message,
+                "idempotencyKey": str(uuid.uuid4())
+            }
         }
+        await ws.send(json.dumps(chat_req))
+        print(f"🔄 已发送 chat.send (sessionKey={session_key})")
 
-        async for response in _client.call_rpc("chat", params, stream=True):
-            # 处理事件
-            if "event" in response:
-                event = response["event"]
-                params = event.get("params", {})
-                event_type = params.get("type")
+        # 读取流式响应
+        # 策略: 锁定第一个产生文本内容的 runId，忽略其他 run 的事件
+        active_run_id = None    # 正在追踪的 runId
+        last_text = ""          # 已累积的文本 (用于计算增量)
+        last_thinking = ""      # 已累积的思考文本
+        got_content = False     # 是否已收到过文本内容
 
-                if event_type == "thinking":
-                    # 思考内容
-                    thinking_content = params.get("content", "")
-                    if thinking_content:
-                        yield {"thinking": thinking_content}
-
-                elif event_type == "content":
-                    # 正常回复内容
-                    content = params.get("content", "")
-                    if content:
-                        full_content += content
-                        yield {"content": content}
-
-                elif event_type == "error":
-                    # 错误事件
-                    error_msg = params.get("message", "Unknown error")
-                    yield {"error": error_msg}
-                    return
-
-            # 处理最终响应
-            elif "result" in response:
-                result = response["result"]
-                # 提取 token 统计
-                usage = result.get("usage", {})
-                input_tokens = usage.get("input_tokens", 0)
-                output_tokens = usage.get("output_tokens", 0)
-
-            # 处理 RPC 错误
-            elif "error" in response:
-                error_info = response["error"]
-                error_msg = error_info.get("message", "Unknown RPC error")
-                yield {"error": f"OpenClaw RPC Error: {error_msg}"}
+        while True:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=120.0)
+            except asyncio.TimeoutError:
+                print("⚠️ 等待 OpenClaw 响应超时 (120s)")
+                yield {"error": "响应超时"}
                 return
 
-        # 计算延迟
-        latency_ms = int((time.time() - start_time) * 1000)
-        print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+            data = json.loads(raw)
+            msg_type = data.get("type", "")
 
-        # 返回统计信息
+            # 处理 RPC 响应 (chat.send 的确认)
+            if msg_type == "res" and data.get("id") == "1":
+                if not data.get("ok"):
+                    error = data.get("error", {})
+                    error_msg = error.get("message", str(error))
+                    print(f"❌ chat.send 失败: {error_msg}")
+                    yield {"error": f"OpenClaw Error: {error_msg}"}
+                    return
+                status = data.get("payload", {}).get("status")
+                print(f"✅ chat.send 已接受 (status={status})")
+                continue
+
+            # 处理 chat 事件
+            if msg_type == "event" and data.get("event") == "chat":
+                params = data.get("params", {})
+
+                # 只处理匹配 sessionKey 的事件
+                if params.get("sessionKey") != session_key:
+                    continue
+
+                state = params.get("state", "")
+                run_id = params.get("runId", "")
+                message_data = params.get("message", {})
+                content_parts = message_data.get("content", [])
+
+                # 跳过没有消息内容的事件 (如初始 run 的路由确认)
+                if not content_parts:
+                    continue
+
+                # 锁定第一个产生内容的 run
+                if active_run_id is None:
+                    active_run_id = run_id
+                    print(f"🎯 锁定内容 runId: {run_id}")
+
+                # 只处理锁定的 run 的事件
+                if run_id != active_run_id:
+                    continue
+
+                # 解析内容 (content_parts 是累积式的，需要计算增量)
+                for part in content_parts:
+                    part_type = part.get("type", "")
+                    text = part.get("text", "")
+
+                    if part_type == "text" and text:
+                        # 计算增量: 累积文本 - 已发送文本
+                        if len(text) > len(last_text):
+                            delta = text[len(last_text):]
+                            yield {"content": delta}
+                            last_text = text
+                            got_content = True
+
+                    elif part_type == "thinking" and text:
+                        # 思考内容也是累积式的
+                        if len(text) > len(last_thinking):
+                            delta = text[len(last_thinking):]
+                            yield {"thinking": delta}
+                            last_thinking = text
+
+                # state=final 且已有内容 → 本轮对话结束
+                if state == "final" and got_content:
+                    break
+
+            # 忽略其他事件类型 (health, presence, tick 等)
+
+        # 输出统计
+        latency_ms = int((time.time() - start_time) * 1000)
+        print(f"✅ OpenClaw 流式响应结束 | 延迟: {latency_ms}ms, 内容长度: {len(last_text)}")
+
         yield {
             "usage": {
-                "model": f"openclaw-{_client.agent_id}",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                "model": f"openclaw-{agent_id}",
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "latency_ms": latency_ms
             }
         }
@@ -383,7 +273,14 @@ async def call_openclaw_stream(
         print(f"❌ OpenClaw API 错误: {error_msg}")
         yield {"error": f"OpenClaw API Error: {error_msg}"}
 
+    finally:
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
 
 async def close_openclaw_client():
-    """关闭 OpenClaw 客户端连接"""
-    await _client.close()
+    """关闭 OpenClaw 客户端连接 (兼容旧接口，当前为空操作)"""
+    pass
