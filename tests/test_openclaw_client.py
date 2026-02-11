@@ -1,422 +1,488 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw 客户端单元测试
+OpenClaw HTTP 客户端单元测试
 
 测试目标:
-1. 验证 WebSocket 连接时正确传递 proxy=None 参数 (回归测试)
-2. 验证单例模式正确性
-3. 验证重连逻辑
-4. 验证 RPC 调用格式
+1. _parse_sse_delta() 纯函数测试
+2. call_openclaw_stream() SSE 流式响应测试 (mock aiohttp)
+3. 错误处理 (HTTP 错误、超时、JSON 解析失败)
+4. close_openclaw_client() 兼容接口
 """
 import pytest
 import asyncio
 import json
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
-from app.openclaw_client import OpenClawClient, call_openclaw_stream
+from unittest.mock import patch, AsyncMock, MagicMock
+from app.openclaw_client import _parse_sse_delta, call_openclaw_stream, close_openclaw_client
 
 
-class TestOpenClawClient:
-    """OpenClaw 客户端测试套件"""
+# ─── _parse_sse_delta 纯函数测试 ─────────────────────────────────
 
-    @pytest.fixture
-    def client(self):
-        """创建测试客户端实例"""
-        # 重置单例状态以确保测试隔离
-        OpenClawClient._instance = None
-        client = OpenClawClient()
-        yield client
-        # 清理
-        if client.ws:
-            asyncio.run(client.close())
+class TestParseSSEDelta:
+    """_parse_sse_delta 纯函数测试"""
 
-    @pytest.mark.asyncio
-    async def test_websocket_connect_with_proxy_none(self, client):
-        """
-        回归测试: 验证 WebSocket 连接时正确传递 proxy=None 参数
+    def _make_state(self):
+        return {
+            "model": "openclaw-main",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "content_len": 0,
+            "thinking_len": 0,
+        }
 
-        问题背景: websockets 15.0+ 在存在代理环境变量时会自动检测代理,
-        导致 additional_headers 参数被错误传递给底层 asyncio API
+    def test_content_delta(self):
+        """解析 content delta"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"content": "Hello"}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == [{"content": "Hello"}]
+        assert state["content_len"] == 5
 
-        预期: websockets.connect() 调用时必须包含 proxy=None 参数
-        """
-        mock_websocket = AsyncMock()
-        mock_websocket.open = True
-        mock_websocket.recv = AsyncMock(
-            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
-        )
+    def test_thinking_via_reasoning_content(self):
+        """解析 reasoning_content (Claude 格式)"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"reasoning_content": "让我想想..."}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == [{"thinking": "让我想想..."}]
+        assert state["thinking_len"] == len("让我想想...")
 
-        with patch("app.openclaw_client.websockets.connect", new_callable=AsyncMock) as mock_connect:
-            mock_connect.return_value = mock_websocket
+    def test_thinking_via_thinking_field(self):
+        """解析 thinking 字段 (备用格式)"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"thinking": "分析中..."}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == [{"thinking": "分析中..."}]
 
-            # 执行连接
-            await client.connect()
+    def test_reasoning_content_priority_over_thinking(self):
+        """reasoning_content 优先于 thinking"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"reasoning_content": "RC", "thinking": "TK"}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        # reasoning_content 非空时优先
+        assert len(chunks) == 1
+        assert chunks[0] == {"thinking": "RC"}
 
-            # 验证: 必须调用了 websockets.connect
-            assert mock_connect.called, "websockets.connect 未被调用"
+    def test_both_thinking_and_content(self):
+        """同时有思考和内容"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"reasoning_content": "思考", "content": "回复"}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert len(chunks) == 2
+        assert {"thinking": "思考"} in chunks
+        assert {"content": "回复"} in chunks
 
-            # 验证: 第一个参数是 gateway_url
-            call_args = mock_connect.call_args
-            assert call_args[0][0] == client.gateway_url, "gateway_url 参数不正确"
+    def test_empty_choices(self):
+        """choices 为空"""
+        state = self._make_state()
+        data = {"choices": []}
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == []
 
-            # 验证: 关键参数 - proxy=None 必须存在
-            assert "proxy" in call_args[1], "缺少 proxy 参数"
-            assert call_args[1]["proxy"] is None, "proxy 参数必须为 None"
+    def test_no_choices(self):
+        """没有 choices 字段"""
+        state = self._make_state()
+        data = {"id": "chatcmpl_xxx"}
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == []
 
-            assert "ping_interval" in call_args[1], "缺少 ping_interval 参数"
-            assert "ping_timeout" in call_args[1], "缺少 ping_timeout 参数"
+    def test_empty_delta(self):
+        """delta 为空 (如 role-only chunk)"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"role": "assistant"}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == []
 
-    @pytest.mark.asyncio
-    async def test_websocket_connect_with_authorization_header(self, client):
-        """验证连接时正确在握手请求中携带 auth token"""
-        mock_websocket = AsyncMock()
-        mock_websocket.open = True
-        mock_websocket.recv = AsyncMock(
-            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
-        )
+    def test_model_extraction(self):
+        """从 data 中提取 model 名"""
+        state = self._make_state()
+        data = {
+            "model": "claude-opus-4-6",
+            "choices": [{"delta": {"content": "hi"}}]
+        }
+        _parse_sse_delta(data, state)
+        assert state["model"] == "claude-opus-4-6"
 
-        with patch("app.openclaw_client.websockets.connect", new_callable=AsyncMock) as mock_connect:
-            mock_connect.return_value = mock_websocket
+    def test_usage_extraction(self):
+        """提取 usage 统计"""
+        state = self._make_state()
+        data = {
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            "choices": []
+        }
+        _parse_sse_delta(data, state)
+        assert state["input_tokens"] == 100
+        assert state["output_tokens"] == 50
 
-            # 设置 token
-            client.token = "test-token-123"
+    def test_empty_content_ignored(self):
+        """空字符串 content 不产生 chunk"""
+        state = self._make_state()
+        data = {
+            "choices": [{"delta": {"content": ""}}]
+        }
+        chunks = _parse_sse_delta(data, state)
+        assert chunks == []
 
-            await client.connect()
+    def test_content_len_accumulates(self):
+        """content_len 正确累加"""
+        state = self._make_state()
+        _parse_sse_delta({"choices": [{"delta": {"content": "AB"}}]}, state)
+        _parse_sse_delta({"choices": [{"delta": {"content": "CDE"}}]}, state)
+        assert state["content_len"] == 5
 
-            # 验证握手请求携带 auth token
-            sent_payload = json.loads(mock_websocket.send.call_args[0][0])
-            assert sent_payload["method"] == "connect", "首个请求应为 connect 握手"
-            assert "auth" in sent_payload["params"], "握手请求缺少 auth 字段"
-            assert sent_payload["params"]["auth"]["token"] == "test-token-123", "auth token 不正确"
 
-    @pytest.mark.asyncio
-    async def test_singleton_pattern(self):
-        """验证单例模式: 多次创建返回同一实例"""
-        OpenClawClient._instance = None
+# ─── mock 辅助 ─────────────────────────────────────────────────
 
-        client1 = OpenClawClient()
-        client2 = OpenClawClient()
+def _make_sse_lines(events: list[str]) -> list[bytes]:
+    """将 SSE data 字符串列表转为 readline() 返回的 bytes 列表"""
+    lines = []
+    for event in events:
+        lines.append(f"data: {event}\n\n".encode("utf-8"))
+    return lines
 
-        assert client1 is client2, "单例模式失效: 创建了多个实例"
 
-    @pytest.mark.asyncio
-    async def test_rpc_call_format(self, client):
-        """验证 JSON-RPC 调用格式正确性"""
-        mock_websocket = AsyncMock()
-        mock_websocket.open = True
-        mock_websocket.send = AsyncMock()
-        mock_websocket.recv = AsyncMock(
-            return_value='{"type":"res","ok":true,"payload":{"protocol":3}}'
-        )
+def _make_sse_chunk(delta: dict, model: str = "openclaw", **extra) -> str:
+    """构造单个 SSE data JSON"""
+    obj = {
+        "id": "chatcmpl_test",
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": delta}],
+        **extra
+    }
+    return json.dumps(obj)
 
-        # 模拟响应队列
-        response_queue = asyncio.Queue()
-        await response_queue.put({"jsonrpc": "2.0", "id": 1, "result": {"success": True}})
 
-        with patch("app.openclaw_client.websockets.connect", new_callable=AsyncMock) as mock_connect:
-            mock_connect.return_value = mock_websocket
-            await client.connect()
+class MockStreamReader:
+    """模拟 aiohttp StreamReader 的 readline()"""
 
-            # 创建 RPC 调用
-            client.pending_requests[1] = response_queue
+    def __init__(self, lines: list[bytes]):
+        self._lines = list(lines)
+        self._index = 0
 
-            # 发送请求
-            method = "chat"
-            params = {"message": "test", "agent_id": "test-agent"}
+    async def readline(self):
+        if self._index >= len(self._lines):
+            return b""
+        line = self._lines[self._index]
+        self._index += 1
+        return line
 
-            request = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": method,
-                "params": params
-            }
 
-            await client.ws.send(json.dumps(request))
+class MockResponse:
+    """模拟 aiohttp 响应"""
 
-            # 验证发送的数据
-            sent_data = json.loads(mock_websocket.send.call_args[0][0])
-            assert sent_data["jsonrpc"] == "2.0", "JSON-RPC 版本不正确"
-            assert sent_data["id"] == 1, "请求 ID 不正确"
-            assert sent_data["method"] == method, "方法名不正确"
-            assert sent_data["params"] == params, "参数不正确"
+    def __init__(self, status: int, lines: list[bytes] = None, text: str = ""):
+        self.status = status
+        self.content = MockStreamReader(lines or [])
+        self._text = text
 
-    @pytest.mark.asyncio
-    async def test_reconnect_logic(self, client):
-        """验证重连逻辑: 连接失败时触发重连"""
-        mock_websocket = AsyncMock()
-        mock_websocket.open = True
+    async def text(self):
+        return self._text
 
-        # 第一次连接失败,第二次成功
-        connect_attempts = 0
+    async def __aenter__(self):
+        return self
 
-        async def mock_connect_side_effect(*args, **kwargs):
-            nonlocal connect_attempts
-            connect_attempts += 1
-            if connect_attempts == 1:
-                raise ConnectionError("模拟连接失败")
-            return mock_websocket
+    async def __aexit__(self, *args):
+        pass
 
-        with patch("app.openclaw_client.websockets.connect", side_effect=mock_connect_side_effect):
-            with patch("asyncio.sleep", new_callable=AsyncMock):  # 跳过等待时间
-                try:
-                    await client.connect()
-                except ConnectionError:
-                    # 第一次连接应该失败
-                    assert connect_attempts == 1, "第一次连接应该失败"
 
-                    # 触发重连
-                    await client._reconnect()
+class MockSession:
+    """模拟 aiohttp.ClientSession"""
 
-                    # 第二次应该成功
-                    assert client.ws is not None, "重连后应该有 WebSocket 实例"
-                    assert connect_attempts == 2, "应该尝试了两次连接"
+    def __init__(self, response: MockResponse):
+        self._response = response
+        self.post_kwargs = None
 
+    def post(self, url, **kwargs):
+        self.post_kwargs = {"url": url, **kwargs}
+        return self._response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+# ─── call_openclaw_stream 集成测试 ──────────────────────────────
 
 class TestCallOpenClawStream:
-    """call_openclaw_stream 函数测试套件"""
+    """call_openclaw_stream SSE 流式测试"""
 
     @pytest.mark.asyncio
-    async def test_extract_user_message_from_string(self):
-        """验证从字符串格式的消息中提取用户输入"""
+    async def test_normal_stream_content(self):
+        """正常流式内容"""
+        lines = _make_sse_lines([
+            _make_sse_chunk({"role": "assistant"}),
+            _make_sse_chunk({"content": "你"}),
+            _make_sse_chunk({"content": "好"}),
+            _make_sse_chunk({"content": "！"}),
+            "[DONE]",
+        ])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "你好"}],
+                    conversation_id="conv-1",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        content_chunks = [c for c in chunks if "content" in c]
+        assert len(content_chunks) == 3
+        assert content_chunks[0]["content"] == "你"
+        assert content_chunks[1]["content"] == "好"
+        assert content_chunks[2]["content"] == "！"
+
+        # 最后应有 usage
+        usage_chunks = [c for c in chunks if "usage" in c]
+        assert len(usage_chunks) == 1
+        assert "latency_ms" in usage_chunks[0]["usage"]
+
+    @pytest.mark.asyncio
+    async def test_stream_with_thinking(self):
+        """流式带思考内容"""
+        lines = _make_sse_lines([
+            _make_sse_chunk({"reasoning_content": "让我想想"}),
+            _make_sse_chunk({"reasoning_content": "..."}),
+            _make_sse_chunk({"content": "答案是2"}),
+            "[DONE]",
+        ])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "1+1=?"}],
+                    conversation_id="conv-2",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        thinking_chunks = [c for c in chunks if "thinking" in c]
+        assert len(thinking_chunks) == 2
+        assert thinking_chunks[0]["thinking"] == "让我想想"
+
+        content_chunks = [c for c in chunks if "content" in c]
+        assert len(content_chunks) == 1
+        assert content_chunks[0]["content"] == "答案是2"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_usage_in_last_chunk(self):
+        """最后一个 SSE chunk 包含 usage"""
+        last_chunk = {
+            "id": "chatcmpl_test",
+            "object": "chat.completion.chunk",
+            "model": "claude-opus-4-6",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        }
+        lines = _make_sse_lines([
+            _make_sse_chunk({"content": "Hi"}),
+            json.dumps(last_chunk),
+            "[DONE]",
+        ])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "hi"}],
+                    conversation_id="conv-3",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        usage = [c for c in chunks if "usage" in c][0]["usage"]
+        assert usage["model"] == "claude-opus-4-6"
+        assert usage["input_tokens"] == 100
+        assert usage["output_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_http_error_status(self):
+        """HTTP 非 200 状态码"""
+        mock_resp = MockResponse(500, text="Internal Server Error")
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-err",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert "error" in chunks[0]
+        assert "500" in chunks[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_http_401_unauthorized(self):
+        """HTTP 401 认证失败"""
+        mock_resp = MockResponse(401, text="Unauthorized: invalid token")
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-auth",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        assert "error" in chunks[0]
+        assert "401" in chunks[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_in_sse(self):
+        """SSE 包含无效 JSON (应跳过继续)"""
+        lines = _make_sse_lines([
+            "{invalid json}",
+            _make_sse_chunk({"content": "OK"}),
+            "[DONE]",
+        ])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-bad",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        content = [c for c in chunks if "content" in c]
+        assert len(content) == 1
+        assert content[0]["content"] == "OK"
+
+    @pytest.mark.asyncio
+    async def test_connection_error(self):
+        """aiohttp 连接错误"""
+        import aiohttp
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(side_effect=aiohttp.ClientError("Connection refused"))
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-conn",
+                    sender_id="user-1",
+                ):
+                    chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert "error" in chunks[0]
+        assert "HTTP Error" in chunks[0]["error"] or "API Error" in chunks[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_request_body_format(self):
+        """验证请求体格式正确 (OpenAI 兼容)"""
+        lines = _make_sse_lines(["[DONE]"])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
         messages = [
-            {"role": "system", "content": "You are a helpful assistant"},
-            {"role": "user", "content": "Hello, world!"}
+            {"role": "system", "content": "You are a bot"},
+            {"role": "user", "content": "Hi"},
         ]
 
-        # 模拟客户端和流式响应
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            yield {"result": {"usage": {"input_tokens": 10, "output_tokens": 20}}}
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                # 收集所有响应
-                responses = []
-                async for response in call_openclaw_stream(
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                async for _ in call_openclaw_stream(
                     messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender",
-                    sender_nick="TestUser"
+                    conversation_id="conv-fmt",
+                    sender_id="user-1",
                 ):
-                    responses.append(response)
+                    pass
 
-                # 验证至少有一个响应
-                assert len(responses) > 0, "应该有响应返回"
+        # 验证 POST 请求的参数
+        assert mock_session.post_kwargs is not None
+        body = mock_session.post_kwargs["json"]
+        assert body["model"] == "openclaw"
+        assert body["stream"] is True
+        assert body["messages"] == messages
+
+        headers = mock_session.post_kwargs["headers"]
+        assert "Bearer" in headers["Authorization"]
 
     @pytest.mark.asyncio
-    async def test_extract_user_message_from_list(self):
-        """验证从列表格式的消息中提取用户输入 (多模态消息)"""
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请描述这张图片"},
-                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
-                ]
-            }
-        ]
+    async def test_proxy_none_passed(self):
+        """验证请求不走代理 (proxy=None)"""
+        lines = _make_sse_lines(["[DONE]"])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
 
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(method, params, stream=False):
-            # 验证提取的消息正确
-            assert params["message"] == "请描述这张图片", "应该提取文本部分"
-            yield {"result": {"usage": {"input_tokens": 10, "output_tokens": 20}}}
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                async for _ in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-proxy",
+                    sender_id="user-1",
                 ):
-                    responses.append(response)
+                    pass
+
+        assert mock_session.post_kwargs["proxy"] is None
 
     @pytest.mark.asyncio
-    async def test_handle_error_event(self):
-        """验证错误事件处理"""
-        messages = [{"role": "user", "content": "test"}]
+    async def test_empty_stream(self):
+        """空 SSE 流 (直接 [DONE])"""
+        lines = _make_sse_lines(["[DONE]"])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
 
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            # 模拟错误事件
-            yield {
-                "event": {
-                    "params": {
-                        "type": "error",
-                        "message": "测试错误消息"
-                    }
-                }
-            }
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                chunks = []
+                async for chunk in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-empty",
+                    sender_id="user-1",
                 ):
-                    responses.append(response)
+                    chunks.append(chunk)
 
-                # 验证返回了错误
-                assert any("error" in r for r in responses), "应该返回错误响应"
-                error_response = next(r for r in responses if "error" in r)
-                assert "测试错误消息" in error_response["error"], "错误消息不正确"
+        # 只有 usage
+        assert len(chunks) == 1
+        assert "usage" in chunks[0]
+        assert chunks[0]["usage"]["content_len"] if "content_len" in chunks[0]["usage"] else True
+
+
+# ─── close_openclaw_client ──────────────────────────────────────
+
+class TestCloseOpenClawClient:
 
     @pytest.mark.asyncio
-    async def test_stream_content_events(self):
-        """验证流式内容事件处理"""
-        messages = [{"role": "user", "content": "你好"}]
-
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            # 模拟多个内容块
-            yield {"event": {"params": {"type": "content", "content": "你"}}}
-            yield {"event": {"params": {"type": "content", "content": "好"}}}
-            yield {"event": {"params": {"type": "content", "content": "！"}}}
-            yield {"result": {"usage": {"input_tokens": 5, "output_tokens": 3}}}
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
-                ):
-                    responses.append(response)
-
-                # 验证收到了内容块
-                content_responses = [r for r in responses if "content" in r]
-                assert len(content_responses) == 3, "应该收到 3 个内容块"
-                assert content_responses[0]["content"] == "你"
-                assert content_responses[1]["content"] == "好"
-                assert content_responses[2]["content"] == "！"
-
-                # 验证收到了使用统计
-                usage_responses = [r for r in responses if "usage" in r]
-                assert len(usage_responses) == 1, "应该收到 1 个使用统计"
-                assert usage_responses[0]["usage"]["input_tokens"] == 5
-                assert usage_responses[0]["usage"]["output_tokens"] == 3
-
-    @pytest.mark.asyncio
-    async def test_thinking_events(self):
-        """验证思考内容事件处理"""
-        messages = [{"role": "user", "content": "计算 1+1"}]
-
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            # 模拟思考过程
-            yield {"event": {"params": {"type": "thinking", "content": "让我计算一下..."}}}
-            yield {"event": {"params": {"type": "content", "content": "答案是 2"}}}
-            yield {"result": {"usage": {"input_tokens": 10, "output_tokens": 5}}}
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
-                ):
-                    responses.append(response)
-
-                # 验证收到了思考内容
-                thinking_responses = [r for r in responses if "thinking" in r]
-                assert len(thinking_responses) == 1, "应该收到思考内容"
-                assert "让我计算一下" in thinking_responses[0]["thinking"]
-
-    @pytest.mark.asyncio
-    async def test_rpc_error_handling(self):
-        """验证 RPC 错误处理"""
-        messages = [{"role": "user", "content": "test"}]
-
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            # 模拟 RPC 错误
-            yield {"error": {"code": -32600, "message": "Invalid request"}}
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
-                ):
-                    responses.append(response)
-
-                # 验证返回了 RPC 错误
-                assert any("error" in r for r in responses), "应该返回错误响应"
-                error_response = next(r for r in responses if "error" in r)
-                assert "OpenClaw RPC Error" in error_response["error"]
-                assert "Invalid request" in error_response["error"]
-
-    @pytest.mark.asyncio
-    async def test_no_user_message_error(self):
-        """验证缺少用户消息时的错误处理"""
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant"},
-            {"role": "assistant", "content": "Hello!"}
-        ]
-
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        with patch("app.openclaw_client._client", mock_client):
-            responses = []
-            async for response in call_openclaw_stream(
-                messages=messages,
-                conversation_id="test-conv",
-                sender_id="test-sender"
-            ):
-                responses.append(response)
-
-            # 验证返回了错误
-            assert len(responses) == 1, "应该只有一个错误响应"
-            assert "error" in responses[0], "应该返回错误"
-            assert "未找到用户消息" in responses[0]["error"]
-
-    @pytest.mark.asyncio
-    async def test_exception_handling_in_stream(self):
-        """验证流式处理中的异常处理"""
-        messages = [{"role": "user", "content": "test"}]
-
-        mock_client = Mock()
-        mock_client.agent_id = "test-agent"
-
-        async def mock_rpc_call(*args, **kwargs):
-            # 模拟异常
-            raise RuntimeError("模拟的运行时错误")
-            yield  # 永远不会执行
-
-        with patch("app.openclaw_client._client", mock_client):
-            with patch.object(mock_client, "call_rpc", side_effect=mock_rpc_call):
-                responses = []
-                async for response in call_openclaw_stream(
-                    messages=messages,
-                    conversation_id="test-conv",
-                    sender_id="test-sender"
-                ):
-                    responses.append(response)
-
-                # 验证返回了异常错误
-                assert len(responses) == 1, "应该有一个错误响应"
-                assert "error" in responses[0], "应该返回错误"
-                assert "OpenClaw API Error" in responses[0]["error"]
-                assert "模拟的运行时错误" in responses[0]["error"]
+    async def test_close_is_noop(self):
+        """close 是空操作，不抛异常"""
+        await close_openclaw_client()
 
 
 if __name__ == "__main__":
