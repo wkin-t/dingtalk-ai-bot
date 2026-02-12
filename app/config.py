@@ -4,14 +4,63 @@ from dotenv import load_dotenv
 # 加载 .env 文件
 load_dotenv()
 
+
+def _get_int(name: str, default: int) -> int:
+    """安全读取 int 环境变量。"""
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_float(name: str, default: float) -> float:
+    """安全读取 float 环境变量。"""
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    """安全读取 bool 环境变量。"""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Google Gemini API Key
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # 钉钉配置
 DINGTALK_CLIENT_ID = os.getenv("DINGTALK_CLIENT_ID")
 DINGTALK_CLIENT_SECRET = os.getenv("DINGTALK_CLIENT_SECRET")
-DINGTALK_CORP_ID = os.getenv("DINGTALK_CORP_ID") # 新增 CorpId
-DINGTALK_COOL_APP_CODE = os.getenv("DINGTALK_COOL_APP_CODE") # 新增 CoolAppCode
+DINGTALK_CORP_ID = os.getenv("DINGTALK_CORP_ID")  # 新增 CorpId
+DINGTALK_COOL_APP_CODE = os.getenv("DINGTALK_COOL_APP_CODE")  # 新增 CoolAppCode
+
+# 钉钉 API 抗抖动配置
+DINGTALK_FORCE_DIRECT = _get_bool("DINGTALK_FORCE_DIRECT", True)
+DINGTALK_RETRY_ATTEMPTS = max(1, _get_int("DINGTALK_RETRY_ATTEMPTS", 5))
+DINGTALK_RETRY_BASE_DELAY = max(0.1, _get_float("DINGTALK_RETRY_BASE_DELAY", 0.8))
+DINGTALK_RETRY_MAX_DELAY = max(
+    DINGTALK_RETRY_BASE_DELAY,
+    _get_float("DINGTALK_RETRY_MAX_DELAY", 8.0),
+)
+DINGTALK_RETRY_JITTER = max(0.0, _get_float("DINGTALK_RETRY_JITTER", 0.35))
+DINGTALK_CONNECT_TIMEOUT_MS = max(1000, _get_int("DINGTALK_CONNECT_TIMEOUT_MS", 15000))
+DINGTALK_READ_TIMEOUT_MS = max(1000, _get_int("DINGTALK_READ_TIMEOUT_MS", 60000))
+DINGTALK_RUNTIME_MAX_ATTEMPTS = max(1, _get_int("DINGTALK_RUNTIME_MAX_ATTEMPTS", 2))
+DINGTALK_FILE_DOWNLOAD_TIMEOUT = max(5, _get_int("DINGTALK_FILE_DOWNLOAD_TIMEOUT", 30))
+DINGTALK_TOKEN_EARLY_REFRESH_SEC = max(
+    30,
+    _get_int("DINGTALK_TOKEN_EARLY_REFRESH_SEC", 120),
+)
 
 # 企业微信机器人配置 (新)
 WECOM_BOT_WEBHOOK_KEY = os.getenv("WECOM_BOT_WEBHOOK_KEY", "")
