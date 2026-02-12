@@ -118,11 +118,22 @@ class MySQLClient:
                             `role` ENUM('user', 'assistant', 'system') NOT NULL,
                             `content` MEDIUMTEXT NOT NULL,
                             `sender_nick` VARCHAR(255) DEFAULT NULL,
+                            `bot_id` VARCHAR(50) DEFAULT NULL,
                             `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             INDEX `idx_session_key` (`session_key`),
                             INDEX `idx_created_at` (`created_at`)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """)
+
+                    # 兼容旧表：自动添加 bot_id 列（如果不存在）
+                    try:
+                        cursor.execute("""
+                            ALTER TABLE `conversation_history`
+                            ADD COLUMN `bot_id` VARCHAR(50) DEFAULT NULL AFTER `sender_nick`
+                        """)
+                        print("✅ 已为 conversation_history 表添加 bot_id 列")
+                    except Exception:
+                        pass  # 列已存在，忽略
 
                     # 用户配置表
                     cursor.execute("""
@@ -230,7 +241,7 @@ class HistoryStorage:
             with MySQLClient.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT role, content, sender_nick, created_at
+                        SELECT role, content, sender_nick, bot_id, created_at
                         FROM conversation_history
                         WHERE session_key = %s
                         ORDER BY created_at DESC
@@ -248,7 +259,8 @@ class HistoryStorage:
                     "role": row["role"],
                     "content": row["content"],
                     "timestamp": row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("created_at") else None,
-                    "sender_nick": row.get("sender_nick")
+                    "sender_nick": row.get("sender_nick"),
+                    "bot_id": row.get("bot_id")
                 }
                 messages.append(msg)
 
@@ -270,7 +282,8 @@ class HistoryStorage:
         session_key: str,
         role: str,
         content: str,
-        sender_nick: Optional[str] = None
+        sender_nick: Optional[str] = None,
+        bot_id: Optional[str] = None
     ):
         """添加消息到历史"""
         cache_key = self._get_cache_key(session_key)
@@ -280,9 +293,9 @@ class HistoryStorage:
             with MySQLClient.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO conversation_history (session_key, role, content, sender_nick)
-                        VALUES (%s, %s, %s, %s)
-                    """, (session_key, role, content, sender_nick))
+                        INSERT INTO conversation_history (session_key, role, content, sender_nick, bot_id)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (session_key, role, content, sender_nick, bot_id))
                 conn.commit()
         except Exception as e:
             print(f"⚠️ MySQL 写入失败: {e}")
@@ -304,7 +317,8 @@ class HistoryStorage:
                     "role": role,
                     "content": content,
                     "timestamp": timestamp,
-                    "sender_nick": sender_nick
+                    "sender_nick": sender_nick,
+                    "bot_id": bot_id
                 })
 
                 # 限制缓存大小

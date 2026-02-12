@@ -7,7 +7,7 @@ import time
 from typing import Optional, Dict, List, Callable
 from datetime import datetime, timezone, timedelta
 from app.config import (
-    MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND,
+    MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND, BOT_ID,
     get_model_pricing
 )
 from app.memory import get_history, update_history
@@ -194,7 +194,10 @@ class AIHandler:
         month = current_date.month
         day = current_date.day
 
-        system_prompt = f"""你是 Gem，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
+        # 根据 AI_BACKEND 动态设置 bot 名称
+        bot_name = {"gemini": "Gem", "openclaw": "Claw"}.get(AI_BACKEND, "Gem")
+
+        system_prompt = f"""你是 {bot_name}，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
 
 ⏰ 重要时间信息（请务必记住）:
 - 今天是: {year} 年 {month} 月 {day} 日
@@ -210,6 +213,8 @@ class AIHandler:
 - 对话历史中包含用户昵称和时间戳，格式为 '[时间] 昵称: 消息'。
 - 引用用户发言时，可以提及其昵称和时间（如 '正如张三在 14:30 所说...'）。
 - 所有时间均为北京时间 (UTC+8)。
+- AI 回复可能带有来源标签 [Gem] 或 [Claw]，表示由不同 AI 助手生成。
+- 你是 {bot_name}，回复不需要添加来源标签。
 
 重点:
 - 直接回应最新用户的输入。
@@ -246,14 +251,19 @@ class AIHandler:
         formatted_history = []
         for msg in history_messages:
             formatted_msg = {"role": msg["role"]}
-            content = msg.get("content", "")
+            msg_content = msg.get("content", "")
             timestamp = msg.get("timestamp")
 
             # 如果有时间戳，添加到内容前面
             if timestamp and msg["role"] == "user":
-                formatted_msg["content"] = f"[{timestamp}] {content}"
+                formatted_msg["content"] = f"[{timestamp}] {msg_content}"
+            elif msg["role"] == "assistant" and msg.get("bot_id"):
+                # assistant 消息有 bot_id 时，加来源标签
+                msg_bot_id = msg["bot_id"]
+                bot_label = {"gemini": "Gem", "openclaw": "Claw"}.get(msg_bot_id, msg_bot_id)
+                formatted_msg["content"] = f"[{bot_label}] {msg_content}"
             else:
-                formatted_msg["content"] = content
+                formatted_msg["content"] = msg_content
 
             formatted_history.append(formatted_msg)
 
