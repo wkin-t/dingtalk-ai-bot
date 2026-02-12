@@ -65,12 +65,17 @@ allowed-tools:
 
    根据服务类型选择对应的命令（代码路径: `/opt/1panel/docker/compose/dingtalk-ai-bot`）：
 
-   - **gemini（默认）：**
+   - **同时部署 gemini 和 openclaw（推荐）：**
+     ```bash
+     ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose up -d --build && docker-compose -f docker-compose.openclaw.yml up -d --build"
+     ```
+
+   - **仅 gemini：**
      ```bash
      ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose up -d --build"
      ```
 
-   - **openclaw：**
+   - **仅 openclaw：**
      ```bash
      ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.openclaw.yml up -d --build"
      ```
@@ -79,6 +84,8 @@ allowed-tools:
      ```bash
      ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.wecom.yml up -d --build"
      ```
+
+   **默认行为：** 如果 $ARGUMENTS 为空或 "gemini"，同时部署 gemini 和 openclaw
 
 5. **查看服务状态：**
    ```bash
