@@ -219,6 +219,69 @@ class HistoryStorage:
     def _get_cache_key(self, session_key: str) -> str:
         return f"{HISTORY_KEY_PREFIX}{session_key}"
 
+    def _check_duplicate_user_message(
+        self,
+        session_key: str,
+        content: str,
+        bot_id: Optional[str]
+    ) -> Optional[Dict]:
+        """
+        检查用户消息是否在最近 5 秒内已被保存（去重）
+
+        Args:
+            session_key: 会话键
+            content: 消息内容
+            bot_id: 当前机器人 ID
+
+        Returns:
+            如果找到重复消息，返回 {"id": int, "bot_id": str}，否则返回 None
+        """
+        try:
+            with MySQLClient.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, bot_id
+                        FROM conversation_history
+                        WHERE session_key = %s
+                          AND role = 'user'
+                          AND content = %s
+                          AND created_at > NOW() - INTERVAL 5 SECOND
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """, (session_key, content))
+                    row = cursor.fetchone()
+
+                    if row:
+                        existing_id = row["id"]
+                        existing_bot_id = row["bot_id"]
+
+                        # 如果当前 bot_id 已经在列表中，跳过
+                        if existing_bot_id and bot_id:
+                            existing_bots = set(existing_bot_id.split(','))
+                            if bot_id in existing_bots:
+                                return {"id": existing_id, "bot_id": existing_bot_id}
+
+                            # 合并 bot_id
+                            existing_bots.add(bot_id)
+                            merged_bot_id = ','.join(sorted(existing_bots))
+
+                            # 更新数据库中的 bot_id
+                            cursor.execute("""
+                                UPDATE conversation_history
+                                SET bot_id = %s
+                                WHERE id = %s
+                            """, (merged_bot_id, existing_id))
+                            conn.commit()
+
+                            return {"id": existing_id, "bot_id": merged_bot_id}
+
+                        return {"id": existing_id, "bot_id": existing_bot_id}
+
+                    return None
+        except Exception as e:
+            print(f"⚠️ 检查重复消息失败: {e}")
+            return None
+
     def get_history(self, session_key: str, limit: int = 50) -> List[Dict[str, str]]:
         """
         获取对话历史
@@ -288,7 +351,14 @@ class HistoryStorage:
         """添加消息到历史"""
         cache_key = self._get_cache_key(session_key)
 
-        # 1. 写入 MySQL
+        # 1. 用户消息去重逻辑（避免同时 @ 多个机器人时重复保存）
+        if role == "user":
+            duplicate = self._check_duplicate_user_message(session_key, content, bot_id)
+            if duplicate:
+                print(f"🔄 [去重] 用户消息已存在，合并 bot_id: {duplicate['bot_id']} + {bot_id}")
+                return  # 消息已存在，跳过保存
+
+        # 2. 写入 MySQL
         try:
             with MySQLClient.get_connection() as conn:
                 with conn.cursor() as cursor:
