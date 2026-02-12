@@ -589,7 +589,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # OpenClaw 模式: 使用 Gemini 模型分析复杂度
             print(f"🔄 [路由] OpenClaw 开始智能路由分析...")
             try:
-                complexity = await analyze_complexity_with_model(content, has_images, analysis_model="gemini-3-flash-preview")
+                complexity = await analyze_complexity_with_model(content, has_images)
                 print(f"🔄 [路由] OpenClaw 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常，降级到关键词路由: {e}")
@@ -732,10 +732,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 没有 thinking 时不显示摘要，避免与主内容重复
 
             # 显示模型、thinking level 和联网状态
-            # 优先使用 usage_info 中 Gateway 返回的实际模型名
+            # 优先使用 usage_info 中的实际模型名；OpenClaw Gateway 固定返回 "openclaw"，显示为 "Claw"
             if usage_info and usage_info.get("model"):
                 actual_model = usage_info["model"]
-                model_short = actual_model.replace("gemini-", "").replace("-preview", "")
+                if actual_model.startswith("openclaw"):
+                    model_short = "Claw"
+                else:
+                    model_short = actual_model.replace("gemini-", "").replace("-preview", "")
             else:
                 model_short = target_model.replace("gemini-", "").replace("-preview", "")
             search_icon = "🌐" if need_search else ""
