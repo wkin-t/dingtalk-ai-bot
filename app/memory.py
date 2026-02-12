@@ -123,7 +123,8 @@ def update_history(
         try:
             if user_msg:
                 # 只保存纯文本内容，不拼接昵称（读取时会拼接）
-                history_storage.add_message(session_key, "user", user_msg, sender_nick)
+                # 用户消息也记录 bot_id，用于识别用户 @ 的是哪个机器人
+                history_storage.add_message(session_key, "user", user_msg, sender_nick, bot_id=BOT_ID)
             if assistant_msg:
                 history_storage.add_message(session_key, "assistant", assistant_msg, bot_id=BOT_ID)
             return
