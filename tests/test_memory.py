@@ -401,9 +401,9 @@ class TestDatabasePathBotId:
 
         assert self.mock_storage.add_message.call_count == 2
 
-        # 第一次调用: 用户消息 (无 bot_id)
+        # 第一次调用: 用户消息 (有 bot_id，用于标识用户 @ 的机器人)
         user_call = self.mock_storage.add_message.call_args_list[0]
-        assert user_call == call("dingtalk_s1", "user", "你好", "张三")
+        assert user_call == call("dingtalk_s1", "user", "你好", "张三", bot_id="gemini")
 
         # 第二次调用: assistant 消息 (有 bot_id)
         assistant_call = self.mock_storage.add_message.call_args_list[1]
@@ -415,7 +415,7 @@ class TestDatabasePathBotId:
 
         update_history("dingtalk_s2", user_msg="问题", sender_nick="李四")
 
-        self.mock_storage.add_message.assert_called_once_with("dingtalk_s2", "user", "问题", "李四")
+        self.mock_storage.add_message.assert_called_once_with("dingtalk_s2", "user", "问题", "李四", bot_id="gemini")
 
     def test_update_history_db_only_assistant(self):
         """数据库路径: 只有 assistant 消息"""

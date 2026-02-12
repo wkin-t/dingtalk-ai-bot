@@ -40,6 +40,7 @@ class TestHistoryStorageAddMessage:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_cursor.fetchone.return_value = None
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
         @contextmanager
@@ -50,9 +51,17 @@ class TestHistoryStorageAddMessage:
             self.storage.add_message("dingtalk_s1", "user", "你好", sender_nick="张三")
 
         # 验证 MySQL INSERT 包含 bot_id=None
-        mock_cursor.execute.assert_called_once()
-        sql, params = mock_cursor.execute.call_args[0]
-        assert "bot_id" in sql
+        insert_sql = None
+        params = None
+        for execute_call in mock_cursor.execute.call_args_list:
+            sql, sql_params = execute_call[0]
+            if "INSERT INTO conversation_history" in sql:
+                insert_sql = sql
+                params = sql_params
+                break
+
+        assert insert_sql is not None
+        assert "bot_id" in insert_sql
         assert params == ("dingtalk_s1", "user", "你好", "张三", None)
 
     def test_add_assistant_message_with_bot_id(self):
