@@ -6,6 +6,7 @@
 import os
 import ast
 
+
 def test_file_existence():
     """测试关键文件是否存在"""
     print("=== 文件存在性检查 ===")
@@ -29,7 +30,7 @@ def test_file_existence():
             all_exist = False
 
     print()
-    return all_exist
+    assert all_exist, "部分关键文件缺失"
 
 def test_python_syntax():
     """测试 Python 文件语法"""
@@ -54,35 +55,33 @@ def test_python_syntax():
             all_valid = False
 
     print()
-    return all_valid
+    assert all_valid, "部分文件语法错误"
 
 def test_requirements():
     """测试 requirements.txt 包含 websockets"""
     print("=== 依赖检查 ===")
 
-    with open("requirements.txt", 'r') as f:
+    with open("requirements.txt", 'r', encoding='utf-8') as f:
         content = f.read()
 
     if "websockets" in content:
         print("✓ requirements.txt 包含 websockets")
-        result = True
     else:
         print("✗ requirements.txt 缺少 websockets")
-        result = False
 
     print()
-    return result
+    assert "websockets" in content, "requirements.txt 缺少 websockets"
 
 def test_docker_compose():
     """测试 docker-compose.yml 配置"""
     print("=== Docker Compose 配置检查 ===")
 
     # 检查 Gemini bot 配置
-    with open("docker-compose.yml", 'r') as f:
+    with open("docker-compose.yml", 'r', encoding='utf-8') as f:
         gemini_content = f.read()
 
     checks_gemini = [
-        ("dingtalk-gemini 服务", "dingtalk-gemini:"),
+        ("dingtalk-ai-bot-gemini 服务", "dingtalk-ai-bot-gemini:"),
         ("AI_BACKEND=gemini", "AI_BACKEND=gemini"),
         ("FLASK_PORT=35000", "FLASK_PORT=35000"),
     ]
@@ -99,11 +98,11 @@ def test_docker_compose():
     # 检查 OpenClaw bot 配置
     if os.path.exists("docker-compose.openclaw.yml"):
         print("OpenClaw Bot (docker-compose.openclaw.yml):")
-        with open("docker-compose.openclaw.yml", 'r') as f:
+        with open("docker-compose.openclaw.yml", 'r', encoding='utf-8') as f:
             openclaw_content = f.read()
 
         checks_openclaw = [
-            ("dingtalk-openclaw 服务", "dingtalk-openclaw:"),
+            ("dingtalk-ai-bot-openclaw 服务", "dingtalk-ai-bot-openclaw:"),
             ("AI_BACKEND=openclaw", "AI_BACKEND=openclaw"),
             ("FLASK_PORT=35001", "FLASK_PORT=35001"),
             ("OPENCLAW_GATEWAY_URL", "OPENCLAW_GATEWAY_URL"),
@@ -120,7 +119,7 @@ def test_docker_compose():
         all_passed = False
 
     print()
-    return all_passed
+    assert all_passed, "Docker Compose 配置检查失败"
 
 def test_config_additions():
     """测试 config.py 新增配置"""
@@ -145,7 +144,7 @@ def test_config_additions():
             all_found = False
 
     print()
-    return all_found
+    assert all_found, "部分配置项缺失"
 
 def test_openclaw_client_functions():
     """测试 openclaw_client.py 关键函数"""
@@ -155,10 +154,7 @@ def test_openclaw_client_functions():
         content = f.read()
 
     checks = [
-        ("OpenClawClient 类", "class OpenClawClient"),
         ("call_openclaw_stream 函数", "async def call_openclaw_stream"),
-        ("WebSocket 连接", "websockets.connect"),
-        ("JSON-RPC 调用", "call_rpc"),
     ]
 
     all_found = True
@@ -170,7 +166,7 @@ def test_openclaw_client_functions():
             all_found = False
 
     print()
-    return all_found
+    assert all_found, "部分函数缺失"
 
 def test_dingtalk_bot_integration():
     """测试 dingtalk_bot.py 集成"""
@@ -194,7 +190,7 @@ def test_dingtalk_bot_integration():
             all_found = False
 
     print()
-    return all_found
+    assert all_found, "部分集成检查失败"
 
 def main():
     """运行所有测试"""
@@ -202,15 +198,24 @@ def main():
     print("OpenClaw 集成结构测试")
     print("="*60 + "\n")
 
-    results = [
-        ("文件存在性", test_file_existence()),
-        ("Python 语法", test_python_syntax()),
-        ("依赖配置", test_requirements()),
-        ("Docker Compose", test_docker_compose()),
-        ("配置文件", test_config_additions()),
-        ("OpenClaw 客户端", test_openclaw_client_functions()),
-        ("钉钉机器人集成", test_dingtalk_bot_integration()),
+    tests = [
+        ("文件存在性", test_file_existence),
+        ("Python 语法", test_python_syntax),
+        ("依赖配置", test_requirements),
+        ("Docker Compose", test_docker_compose),
+        ("配置文件", test_config_additions),
+        ("OpenClaw 客户端", test_openclaw_client_functions),
+        ("钉钉机器人集成", test_dingtalk_bot_integration),
     ]
+
+    results = []
+    for test_name, test_func in tests:
+        try:
+            test_func()
+            results.append((test_name, True))
+        except (AssertionError, Exception) as e:
+            print(f"  ✗ 失败: {e}\n")
+            results.append((test_name, False))
 
     print("="*60)
     print("测试结果汇总:")
@@ -227,19 +232,6 @@ def main():
 
     if all_passed:
         print("\n✅ 所有结构测试通过!")
-        print("\n📋 验证清单:")
-        print("  ✓ OpenClaw WebSocket 客户端已创建")
-        print("  ✓ 配置文件已更新 (AI_BACKEND, OPENCLAW_* 变量)")
-        print("  ✓ 依赖已添加 (websockets>=12.0)")
-        print("  ✓ 钉钉机器人已集成后端切换逻辑")
-        print("  ✓ Docker Compose 已配置 openclaw-app 服务")
-        print("  ✓ 环境变量示例文件已创建")
-        print("\n🚀 下一步:")
-        print("  1. 复制 .env.openclaw.example 为 .env.openclaw")
-        print("  2. 填入真实的钉钉凭证和 OpenClaw Gateway 配置")
-        print("  3. 确保 OpenClaw Gateway 已部署 (ws://localhost:18789)")
-        print("  4. 运行: docker-compose up -d --build openclaw-app")
-        print("  5. 查看日志: docker logs -f openclaw-app")
         return 0
     else:
         print("\n❌ 部分测试失败,请检查上述错误。")

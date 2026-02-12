@@ -36,10 +36,15 @@ else:
     )
 
 
-async def analyze_complexity_with_model(content: str, has_images: bool = False) -> dict:
+async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-flash-lite-latest") -> dict:
     """
-    使用 Gemini Flash Lite 快速分析问题复杂度
+    使用 Gemini 模型快速分析问题复杂度
     返回推荐的模型、thinking level 和是否需要联网搜索
+
+    Args:
+        content: 用户消息内容
+        has_images: 是否包含图片
+        analysis_model: 用于分析的模型 (默认 gemini-flash-lite-latest)
 
     Returns:
         {
@@ -84,13 +89,13 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False) 
 {{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因"}}"""
 
     try:
-        print(f"🔍 [预分析] 准备调用 gemini-flash-lite-latest...")
+        print(f"🔍 [预分析] 准备调用 {analysis_model}...")
         loop = asyncio.get_running_loop()
 
         def _analyze():
             print(f"🔍 [预分析] 进入线程执行器...")
             response = client.models.generate_content(
-                model="gemini-flash-lite-latest",
+                model=analysis_model,
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
                 config=types.GenerateContentConfig(
                     temperature=0.1,

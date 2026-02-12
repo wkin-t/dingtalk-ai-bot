@@ -127,7 +127,8 @@ class AIHandler:
                     messages,
                     conversation_id=session_key,
                     sender_id=user_id,
-                    sender_nick=sender_nick
+                    sender_nick=sender_nick,
+                    model=target_model
                 )
             else:
                 stream = call_gemini_stream(
@@ -277,8 +278,14 @@ class AIHandler:
             (target_model, thinking_level, need_search)
         """
         if AI_BACKEND == "openclaw":
-            # OpenClaw 模式: 内部处理模型选择
-            return ("openclaw", "auto", False)
+            # OpenClaw 模式: 使用 Gemini 模型分析复杂度
+            try:
+                complexity = await analyze_complexity_with_model(content, has_images, analysis_model="gemini-3-flash-preview")
+                print(f"🔄 [路由] OpenClaw 预分析返回: {complexity}")
+            except Exception as e:
+                print(f"❌ [路由] 预分析异常，降级到关键词路由: {e}")
+                complexity = analyze_complexity_unified(content, has_images)
+            return ("openclaw", complexity.get("thinking_level", "low"), False)
         else:
             # Gemini 模式: 智能路由分析
             try:

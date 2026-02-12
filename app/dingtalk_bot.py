@@ -586,11 +586,19 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         has_images = bool(image_data_list)
 
         if AI_BACKEND == "openclaw":
-            # OpenClaw 模式: 内部处理模型选择
-            target_model = "openclaw"
-            thinking_level = "auto"
-            need_search = False
-            print(f"🎯 OpenClaw 模式: 由 Gateway 自动处理路由")
+            # OpenClaw 模式: 使用 Gemini 模型分析复杂度
+            print(f"🔄 [路由] OpenClaw 开始智能路由分析...")
+            try:
+                complexity = await analyze_complexity_with_model(content, has_images, analysis_model="gemini-3-flash-preview")
+                print(f"🔄 [路由] OpenClaw 预分析返回: {complexity}")
+            except Exception as e:
+                print(f"❌ [路由] 预分析异常，降级到关键词路由: {e}")
+                from app.ai.router import analyze_complexity_unified
+                complexity = analyze_complexity_unified(content, has_images)
+            target_model = "openclaw"       # Gateway 自行决定实际模型
+            thinking_level = complexity.get("thinking_level", "low")
+            need_search = False             # OpenClaw 不支持 Google Search
+            print(f"🎯 OpenClaw 路由: {complexity.get('reason', '默认')} → thinking={thinking_level}")
         else:
             # Gemini 模式: 智能路由分析
             print(f"🔄 [路由] 开始智能路由分析...")
@@ -630,7 +638,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     messages,
                     conversation_id=conversation_id,
                     sender_id=incoming_message.sender_id,
-                    sender_nick=sender_name
+                    sender_nick=sender_name,
+                    model=target_model
                 )
             else:
                 stream = call_gemini_stream(
@@ -723,7 +732,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 没有 thinking 时不显示摘要，避免与主内容重复
 
             # 显示模型、thinking level 和联网状态
-            model_short = target_model.replace("gemini-", "").replace("-preview", "")
+            # 优先使用 usage_info 中 Gateway 返回的实际模型名
+            if usage_info and usage_info.get("model"):
+                actual_model = usage_info["model"]
+                model_short = actual_model.replace("gemini-", "").replace("-preview", "")
+            else:
+                model_short = target_model.replace("gemini-", "").replace("-preview", "")
             search_icon = "🌐" if need_search else ""
             status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} {search_icon}</font>"
 

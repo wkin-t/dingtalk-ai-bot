@@ -453,6 +453,45 @@ class TestCallOpenClawStream:
         assert mock_session.post_kwargs["proxy"] is None
 
     @pytest.mark.asyncio
+    async def test_call_openclaw_stream_with_model_param(self):
+        """验证自定义 model 参数传递到请求体"""
+        lines = _make_sse_lines(["[DONE]"])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                async for _ in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-model",
+                    sender_id="user-1",
+                    model="custom-model-v2"
+                ):
+                    pass
+
+        body = mock_session.post_kwargs["json"]
+        assert body["model"] == "custom-model-v2"
+
+    @pytest.mark.asyncio
+    async def test_call_openclaw_stream_default_model(self):
+        """验证默认 model 参数仍为 'openclaw'"""
+        lines = _make_sse_lines(["[DONE]"])
+        mock_resp = MockResponse(200, lines)
+        mock_session = MockSession(mock_resp)
+
+        with patch("app.openclaw_client.aiohttp.TCPConnector"):
+            with patch("app.openclaw_client.aiohttp.ClientSession", return_value=mock_session):
+                async for _ in call_openclaw_stream(
+                    messages=[{"role": "user", "content": "test"}],
+                    conversation_id="conv-default",
+                    sender_id="user-1",
+                ):
+                    pass
+
+        body = mock_session.post_kwargs["json"]
+        assert body["model"] == "openclaw"
+
+    @pytest.mark.asyncio
     async def test_empty_stream(self):
         """空 SSE 流 (直接 [DONE])"""
         lines = _make_sse_lines(["[DONE]"])

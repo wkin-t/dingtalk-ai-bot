@@ -23,28 +23,27 @@ def test_imports():
     print("=== 测试 2: 模块导入 ===")
 
     try:
-        from app.openclaw_client import call_openclaw_stream, OpenClawClient
+        from app.openclaw_client import call_openclaw_stream
         print("✓ openclaw_client 导入成功")
     except ImportError as e:
         print(f"✗ openclaw_client 导入失败: {e}")
-        return False
+        assert False, f"openclaw_client 导入失败: {e}"
 
     try:
         from app.dingtalk_bot import GeminiBotHandler
         print("✓ dingtalk_bot 导入成功")
     except ImportError as e:
         print(f"✗ dingtalk_bot 导入失败: {e}")
-        return False
+        assert False, f"dingtalk_bot 导入失败: {e}"
 
     try:
         from app.gemini_client import call_gemini_stream
         print("✓ gemini_client 导入成功")
     except ImportError as e:
         print(f"✗ gemini_client 导入失败: {e}")
-        return False
+        assert False, f"gemini_client 导入失败: {e}"
 
     print()
-    return True
 
 def test_backend_selection():
     """测试后端选择逻辑"""
@@ -55,17 +54,14 @@ def test_backend_selection():
     if AI_BACKEND == "openclaw":
         print("✓ 当前后端: OpenClaw")
         print("  - 应使用 call_openclaw_stream")
-        print("  - 应跳过 Gemini 智能路由")
     elif AI_BACKEND == "gemini":
         print("✓ 当前后端: Gemini")
         print("  - 应使用 call_gemini_stream")
         print("  - 应执行智能路由分析")
     else:
-        print(f"✗ 未知后端: {AI_BACKEND}")
-        return False
+        assert False, f"未知后端: {AI_BACKEND}"
 
     print()
-    return True
 
 def test_websockets_dependency():
     """测试 websockets 依赖"""
@@ -76,39 +72,25 @@ def test_websockets_dependency():
         print(f"✓ websockets 已安装 (version: {websockets.__version__})")
     except ImportError:
         print("✗ websockets 未安装")
-        print("  请运行: pip install websockets>=12.0")
-        return False
+        assert False, "websockets 未安装，请运行: pip install websockets>=12.0"
 
     print()
-    return True
 
 def test_docker_config():
     """测试 Docker 配置"""
     print("=== 测试 5: Docker 配置检查 ===")
 
-    # 检查 docker-compose.yml
-    if os.path.exists("docker-compose.yml"):
-        print("✓ docker-compose.yml 存在")
-        with open("docker-compose.yml", "r") as f:
-            content = f.read()
-            if "openclaw-app:" in content:
-                print("✓ openclaw-app 服务已配置")
-            else:
-                print("✗ openclaw-app 服务未找到")
-                return False
-    else:
-        print("✗ docker-compose.yml 不存在")
-        return False
+    assert os.path.exists("docker-compose.yml"), "docker-compose.yml 不存在"
+    print("✓ docker-compose.yml 存在")
+
+    with open("docker-compose.yml", "r", encoding='utf-8') as f:
+        content = f.read()
 
     # 检查示例配置
-    if os.path.exists(".env.openclaw.example"):
-        print("✓ .env.openclaw.example 存在")
-    else:
-        print("✗ .env.openclaw.example 不存在")
-        return False
+    assert os.path.exists(".env.openclaw.example"), ".env.openclaw.example 不存在"
+    print("✓ .env.openclaw.example 存在")
 
     print()
-    return True
 
 def main():
     """运行所有测试"""
@@ -116,42 +98,22 @@ def main():
     print("OpenClaw 集成测试")
     print("="*60 + "\n")
 
+    tests = [
+        ("配置加载", test_config),
+        ("模块导入", test_imports),
+        ("后端选择", test_backend_selection),
+        ("WebSockets", test_websockets_dependency),
+        ("Docker 配置", test_docker_config),
+    ]
+
     results = []
-
-    try:
-        test_config()
-        results.append(("配置加载", True))
-    except Exception as e:
-        print(f"✗ 配置加载失败: {e}\n")
-        results.append(("配置加载", False))
-
-    try:
-        success = test_imports()
-        results.append(("模块导入", success))
-    except Exception as e:
-        print(f"✗ 模块导入失败: {e}\n")
-        results.append(("模块导入", False))
-
-    try:
-        success = test_backend_selection()
-        results.append(("后端选择", success))
-    except Exception as e:
-        print(f"✗ 后端选择失败: {e}\n")
-        results.append(("后端选择", False))
-
-    try:
-        success = test_websockets_dependency()
-        results.append(("WebSockets", success))
-    except Exception as e:
-        print(f"✗ WebSockets 检查失败: {e}\n")
-        results.append(("WebSockets", False))
-
-    try:
-        success = test_docker_config()
-        results.append(("Docker 配置", success))
-    except Exception as e:
-        print(f"✗ Docker 配置检查失败: {e}\n")
-        results.append(("Docker 配置", False))
+    for test_name, test_func in tests:
+        try:
+            test_func()
+            results.append((test_name, True))
+        except (AssertionError, Exception) as e:
+            print(f"  ✗ 失败: {e}\n")
+            results.append((test_name, False))
 
     # 总结
     print("="*60)
@@ -169,10 +131,6 @@ def main():
 
     if all_passed:
         print("\n✅ 所有测试通过! OpenClaw 集成准备就绪。")
-        print("\n下一步:")
-        print("1. 复制 .env.openclaw.example 为 .env.openclaw 并填入真实凭证")
-        print("2. 确保 OpenClaw Gateway 已部署并可访问")
-        print("3. 运行: docker-compose up -d --build openclaw-app")
         return 0
     else:
         print("\n❌ 部分测试失败,请检查上述错误。")

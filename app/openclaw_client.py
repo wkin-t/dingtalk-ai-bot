@@ -61,7 +61,8 @@ async def call_openclaw_stream(
     messages: List[Dict],
     conversation_id: str,
     sender_id: str,
-    sender_nick: str = "User"
+    sender_nick: str = "User",
+    model: str = "openclaw"
 ) -> AsyncGenerator[Dict, None]:
     """
     调用 OpenClaw Gateway HTTP API 进行流式对话
@@ -73,6 +74,7 @@ async def call_openclaw_stream(
         conversation_id: 会话 ID
         sender_id: 发送者 ID
         sender_nick: 发送者昵称
+        model: 模型建议 (Gateway 可自行决定是否接受)
 
     Yields:
         {"content": "..."}   - 正式回复内容 (增量文本)
@@ -86,7 +88,7 @@ async def call_openclaw_stream(
     start_time = time.time()
 
     request_body = {
-        "model": "openclaw",
+        "model": model,
         "messages": messages,
         "stream": True,
     }
