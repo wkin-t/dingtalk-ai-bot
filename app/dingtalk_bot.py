@@ -4,7 +4,7 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID
+from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID, OPENCLAW_DISPLAY_MODEL
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
@@ -732,11 +732,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 没有 thinking 时不显示摘要，避免与主内容重复
 
             # 显示模型、thinking level 和联网状态
-            # 优先使用 usage_info 中的实际模型名；OpenClaw Gateway 固定返回 "openclaw"，显示为 "Claw"
+            # Gateway 返回的 model: Gemini 返回实际模型名，OpenClaw 固定返回 "openclaw"
             if usage_info and usage_info.get("model"):
                 actual_model = usage_info["model"]
                 if actual_model.startswith("openclaw"):
-                    model_short = "Claw"
+                    model_short = OPENCLAW_DISPLAY_MODEL
                 else:
                     model_short = actual_model.replace("gemini-", "").replace("-preview", "")
             else:
