@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: 自动部署钉钉 AI 机器人到腾讯云服务器 (git push + SSH + Docker Compose)
+description: 在 tencent_cloud_server 部署 openclaw 和 gemini
 argument-hint: "[gemini|openclaw|wecom]"
 user-invocable: true
 allowed-tools:
