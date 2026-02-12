@@ -4,7 +4,7 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND
+from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
@@ -431,7 +431,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         month = current_date.month
         day = current_date.day
 
-        system_prompt = f"""你是 Gem，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
+        # 根据 AI_BACKEND 动态设置 bot 名称
+        bot_name = {"gemini": "Gem", "openclaw": "Claw"}.get(AI_BACKEND, "Gem")
+
+        system_prompt = f"""你是 {bot_name}，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
 
 ⏰ 重要时间信息（请务必记住）:
 - 今天是: {year} 年 {month} 月 {day} 日
@@ -447,6 +450,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 - 对话历史中包含用户昵称和时间戳，格式为 '[时间] 昵称: 消息'。
 - 引用用户发言时，可以提及其昵称和时间（如 '正如张三在 14:30 所说...'）。
 - 所有时间均为北京时间 (UTC+8)。
+- AI 回复可能带有来源标签 [Gem] 或 [Claw]，表示由不同 AI 助手生成。
+- 你是 {bot_name}，回复不需要添加来源标签。
 
 重点:
 - 直接回应最新用户的输入。
@@ -499,8 +504,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     formatted_msg["content"] = f"[{timestamp}] {sender_nick_from_history}: {msg_content}"
                 else:
                     formatted_msg["content"] = f"[{timestamp}] {msg_content}"
+            elif msg["role"] == "assistant" and msg.get("bot_id"):
+                # assistant 消息有 bot_id 时，加来源标签
+                msg_bot_id = msg["bot_id"]
+                bot_label = {"gemini": "Gem", "openclaw": "Claw"}.get(msg_bot_id, msg_bot_id)
+                formatted_msg["content"] = f"[{bot_label}] {msg_content}"
             else:
-                # AI 回复不添加时间戳前缀（保持简洁）
                 formatted_msg["content"] = msg_content
 
             formatted_history.append(formatted_msg)

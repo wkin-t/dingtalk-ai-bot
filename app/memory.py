@@ -9,7 +9,7 @@ import time
 import threading
 from typing import List, Dict, Optional
 
-from app.config import MAX_STORAGE_LENGTH, HISTORY_TTL
+from app.config import MAX_STORAGE_LENGTH, HISTORY_TTL, BOT_ID
 
 # 尝试导入数据库模块
 try:
@@ -125,7 +125,7 @@ def update_history(
                 # 只保存纯文本内容，不拼接昵称（读取时会拼接）
                 history_storage.add_message(session_key, "user", user_msg, sender_nick)
             if assistant_msg:
-                history_storage.add_message(session_key, "assistant", assistant_msg)
+                history_storage.add_message(session_key, "assistant", assistant_msg, bot_id=BOT_ID)
             return
         except Exception as e:
             print(f"⚠️ 数据库写入失败，降级到文件: {e}")
@@ -166,7 +166,8 @@ def update_history(
                 "role": "assistant",
                 "content": assistant_msg,
                 "timestamp": timestamp,
-                "sender_nick": None
+                "sender_nick": None,
+                "bot_id": BOT_ID
             })
 
         # 保持存储长度限制
