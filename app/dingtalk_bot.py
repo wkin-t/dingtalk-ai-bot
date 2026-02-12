@@ -586,19 +586,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         has_images = bool(image_data_list)
 
         if AI_BACKEND == "openclaw":
-            # OpenClaw 模式: 使用 Gemini 模型分析复杂度
-            print(f"🔄 [路由] OpenClaw 开始智能路由分析...")
-            try:
-                complexity = await analyze_complexity_with_model(content, has_images)
-                print(f"🔄 [路由] OpenClaw 预分析返回: {complexity}")
-            except Exception as e:
-                print(f"❌ [路由] 预分析异常，降级到关键词路由: {e}")
-                from app.ai.router import analyze_complexity_unified
-                complexity = analyze_complexity_unified(content, has_images)
-            target_model = "openclaw"       # Gateway 自行决定实际模型
-            thinking_level = complexity.get("thinking_level", "low")
-            need_search = False             # OpenClaw 不支持 Google Search
-            print(f"🎯 OpenClaw 路由: {complexity.get('reason', '默认')} → thinking={thinking_level}")
+            # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
+            target_model = "openclaw"
+            thinking_level = "default"
+            need_search = False
+            print(f"🎯 OpenClaw 模式: 由 Gateway 处理 (model={OPENCLAW_DISPLAY_MODEL})")
         else:
             # Gemini 模式: 智能路由分析
             print(f"🔄 [路由] 开始智能路由分析...")
