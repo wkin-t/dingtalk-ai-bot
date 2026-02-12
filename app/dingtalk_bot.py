@@ -4,7 +4,7 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID, OPENCLAW_DISPLAY_MODEL
+from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
@@ -590,7 +590,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = "openclaw"
             thinking_level = "default"
             need_search = False
-            print(f"🎯 OpenClaw 模式: 由 Gateway 处理 (model={OPENCLAW_DISPLAY_MODEL})")
+            print(f"🎯 OpenClaw 模式: 由 Gateway 处理")
         else:
             # Gemini 模式: 智能路由分析
             print(f"🔄 [路由] 开始智能路由分析...")
@@ -725,16 +725,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 显示模型、thinking level 和联网状态
             # Gateway 返回的 model: Gemini 返回实际模型名，OpenClaw 固定返回 "openclaw"
-            if usage_info and usage_info.get("model"):
-                actual_model = usage_info["model"]
-                if actual_model.startswith("openclaw"):
-                    model_short = OPENCLAW_DISPLAY_MODEL
-                else:
-                    model_short = actual_model.replace("gemini-", "").replace("-preview", "")
+            # OpenClaw 模式不显示模型名（因为返回的是 agent ID，不是实际模型）
+            if AI_BACKEND == "openclaw":
+                search_icon = "🌐" if need_search else ""
+                status_text += f"\n\n<font color='#808080' size='2'>🧠 {thinking_level} {search_icon}</font>"
             else:
-                model_short = target_model.replace("gemini-", "").replace("-preview", "")
-            search_icon = "🌐" if need_search else ""
-            status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} {search_icon}</font>"
+                if usage_info and usage_info.get("model"):
+                    actual_model = usage_info["model"]
+                    model_short = actual_model.replace("gemini-", "").replace("-preview", "")
+                else:
+                    model_short = target_model.replace("gemini-", "").replace("-preview", "")
+                search_icon = "🌐" if need_search else ""
+                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} {search_icon}</font>"
 
             buttons = [
                 {

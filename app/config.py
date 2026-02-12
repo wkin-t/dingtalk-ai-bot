@@ -73,7 +73,7 @@ OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "default")
 # OpenClaw HTTP API (OpenAI 兼容端点，经过 Safeline WAF)
 OPENCLAW_HTTP_URL = os.getenv("OPENCLAW_HTTP_URL", "http://172.17.0.1:48789/v1/chat/completions")
 # OpenClaw Gateway 主力模型显示名 (Gateway SSE 固定返回 "openclaw"，需手动配置)
-OPENCLAW_DISPLAY_MODEL = os.getenv("OPENCLAW_DISPLAY_MODEL", "Claw")
+# OPENCLAW_DISPLAY_MODEL 已废弃 - OpenClaw 模式不再显示模型名
 
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
