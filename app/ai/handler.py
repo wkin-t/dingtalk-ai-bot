@@ -280,7 +280,7 @@ class AIHandler:
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: 使用 Gemini 模型分析复杂度
             try:
-                complexity = await analyze_complexity_with_model(content, has_images, analysis_model="gemini-3-flash-preview")
+                complexity = await analyze_complexity_with_model(content, has_images)
                 print(f"🔄 [路由] OpenClaw 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常，降级到关键词路由: {e}")

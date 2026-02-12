@@ -1,3 +1,14 @@
+---
+name: deploy
+description: 自动部署钉钉 AI 机器人到腾讯云服务器 (git push + SSH + Docker Compose)
+argument-hint: "[gemini|openclaw|wecom]"
+user-invocable: true
+allowed-tools:
+  - Bash
+  - AskUserQuestion
+  - Read
+---
+
 # Deploy Skill
 
 自动部署钉钉 AI 机器人到腾讯云服务器。
@@ -8,18 +19,10 @@
 /deploy [服务类型]
 ```
 
-**参数：**
+**参数（$ARGUMENTS）：**
 - `gemini` - 部署 Gemini 后端版本（默认）
 - `openclaw` - 部署 OpenClaw 后端版本
 - `wecom` - 部署企业微信+钉钉双平台版本
-
-## 工作流程
-
-1. 推送本地代码到 GitHub
-2. SSH 连接到腾讯云服务器
-3. 拉取最新代码
-4. 使用 Docker Compose 重新构建并部署
-5. 显示服务状态和日志
 
 ## 服务配置
 
@@ -31,7 +34,7 @@
 
 ## 部署路径
 
-- 代码仓库：`/opt/dingtalk-ai-bot`
+- 代码仓库：`/opt/1panel/docker/compose/dingtalk-ai-bot`
 - 服务器别名：`tencent_cloud_server`（SSH 配置）
 
 ## 注意事项
@@ -60,21 +63,21 @@
 
 4. **部署到服务器：**
 
-   根据服务类型选择对应的命令：
+   根据服务类型选择对应的命令（代码路径: `/opt/1panel/docker/compose/dingtalk-ai-bot`）：
 
    - **gemini（默认）：**
      ```bash
-     ssh tencent_cloud_server "cd /opt/dingtalk-ai-bot && git pull origin master && docker-compose up -d --build"
+     ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose up -d --build"
      ```
 
    - **openclaw：**
      ```bash
-     ssh tencent_cloud_server "cd /opt/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.openclaw.yml up -d --build"
+     ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.openclaw.yml up -d --build"
      ```
 
    - **wecom：**
      ```bash
-     ssh tencent_cloud_server "cd /opt/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.wecom.yml up -d --build"
+     ssh tencent_cloud_server "cd /opt/1panel/docker/compose/dingtalk-ai-bot && git pull origin master && docker-compose -f docker-compose.wecom.yml up -d --build"
      ```
 
 5. **查看服务状态：**
@@ -112,13 +115,3 @@
 - 如果 SSH 连接失败，提示检查网络和 SSH 配置
 - 如果 Docker 构建失败，显示完整错误信息
 - 如果环境文件缺失，提示用户需要创建配置文件
-
-## 示例
-
-```
-用户: /deploy
-你: [执行 gemini 版本部署...]
-
-用户: /deploy wecom
-你: [执行企业微信版本部署...]
-```
