@@ -88,6 +88,21 @@ async def call_openclaw_stream(
     """
     # 根据 conversation_id 动态选择 agent
     agent_id = get_agent_for_conversation(conversation_id)
+
+    # 严格路由模式：未配置的群返回错误提示
+    if agent_id is None:
+        error_msg = (
+            f"❌ 群未绑定 AI Agent\n\n"
+            f"当前 conversation_id: {conversation_id}\n\n"
+            f"请在环境变量中配置 OPENCLAW_GROUP_AGENT_MAPPING\n\n"
+            f"配置示例:\n"
+            f'{{"cid_xxx":"agent-1","cid_yyy":"agent-2"}}\n\n'
+            f"详见部署文档或联系管理员"
+        )
+        print(f"🚫 {error_msg}")
+        yield {"error": error_msg}
+        return
+
     print(f"📡 正在请求 OpenClaw HTTP API (conversation_id={conversation_id}, agent={agent_id})...")
 
     start_time = time.time()

@@ -1,0 +1,273 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.11, pytest-8.4.2, pluggy-1.6.0 -- C:\Users\DELL\AppData\Local\Programs\Python\Python313\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+metadata: {'Python': '3.13.11', 'Platform': 'Windows-11-10.0.26200-SP0', 'Packages': {'pytest': '8.4.2', 'pluggy': '1.6.0'}, 'Plugins': {'anyio': '4.12.1', 'hypothesis': '6.151.4', 'asyncio': '0.24.0', 'cov': '6.0.0', 'html': '4.2.0', 'metadata': '3.1.1', 'subtests': '0.15.0', 'schemathesis': '4.9.4'}, 'JAVA_HOME': 'C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.1.8-hotspot\\'}
+rootdir: E:\TsangKinWah\Projects\dingtalk-ai-bot
+plugins: anyio-4.12.1, hypothesis-6.151.4, asyncio-0.24.0, cov-6.0.0, html-4.2.0, metadata-3.1.1, subtests-0.15.0, schemathesis-4.9.4
+asyncio: mode=Mode.STRICT, default_loop_scope=None
+collecting ... collected 145 items
+
+test_openclaw_integration.py::test_config PASSED                         [  0%]
+test_openclaw_integration.py::test_imports PASSED                        [  1%]
+test_openclaw_integration.py::test_backend_selection PASSED              [  2%]
+test_openclaw_integration.py::test_websockets_dependency PASSED          [  2%]
+test_openclaw_integration.py::test_docker_config PASSED                  [  3%]
+test_structure.py::test_file_existence PASSED                            [  4%]
+test_structure.py::test_python_syntax PASSED                             [  4%]
+test_structure.py::test_requirements PASSED                              [  5%]
+test_structure.py::test_docker_compose PASSED                            [  6%]
+test_structure.py::test_config_additions PASSED                          [  6%]
+test_structure.py::test_openclaw_client_functions PASSED                 [  7%]
+test_structure.py::test_dingtalk_bot_integration PASSED                  [  8%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_user_message_without_bot_id FAILED [  8%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_assistant_message_with_bot_id PASSED [  9%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_assistant_message_openclaw_bot_id PASSED [ 10%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_message_updates_redis_cache_with_bot_id PASSED [ 11%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_message_appends_to_existing_redis_cache PASSED [ 11%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_message_redis_cache_size_limit PASSED [ 12%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_message_mysql_exception PASSED [ 13%]
+tests/test_database.py::TestHistoryStorageAddMessage::test_add_message_redis_exception PASSED [ 13%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_from_redis_cache_with_bot_id PASSED [ 14%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_from_redis_with_limit PASSED [ 15%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_from_mysql_with_bot_id PASSED [ 15%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_mysql_backfill_redis PASSED [ 16%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_mysql_empty PASSED [ 17%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_mysql_exception PASSED [ 17%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_redis_exception_fallback_mysql PASSED [ 18%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_no_redis PASSED [ 19%]
+tests/test_database.py::TestHistoryStorageGetHistory::test_get_history_redis_backfill_exception PASSED [ 20%]
+tests/test_database.py::TestHistoryStorageClearHistory::test_clear_history_redis_and_mysql PASSED [ 20%]
+tests/test_database.py::TestHistoryStorageClearHistory::test_clear_history_redis_exception PASSED [ 21%]
+tests/test_database.py::TestHistoryStorageClearHistory::test_clear_history_no_redis PASSED [ 22%]
+tests/test_database.py::TestDistributedLock::test_lock_without_redis PASSED [ 22%]
+tests/test_database.py::TestDistributedLock::test_lock_release_without_redis PASSED [ 23%]
+tests/test_database.py::TestDistributedLock::test_lock_acquire_success PASSED [ 24%]
+tests/test_database.py::TestDistributedLock::test_lock_acquire_non_blocking_fail PASSED [ 24%]
+tests/test_database.py::TestDistributedLock::test_lock_context_manager PASSED [ 25%]
+tests/test_database.py::TestDistributedLock::test_lock_release_with_redis PASSED [ 26%]
+tests/test_database.py::TestTokenCache::test_get_from_redis PASSED       [ 26%]
+tests/test_database.py::TestTokenCache::test_get_fallback_memory PASSED  [ 27%]
+tests/test_database.py::TestTokenCache::test_get_expired_memory PASSED   [ 28%]
+tests/test_database.py::TestTokenCache::test_set_to_redis PASSED         [ 28%]
+tests/test_database.py::TestTokenCache::test_get_redis_exception PASSED  [ 29%]
+tests/test_database.py::TestTokenCache::test_set_redis_exception_fallback_memory PASSED [ 30%]
+tests/test_database.py::TestTokenCache::test_get_no_cache_returns_none PASSED [ 31%]
+tests/test_database.py::TestUsageStats::test_record_success PASSED       [ 31%]
+tests/test_database.py::TestUsageStats::test_record_exception PASSED     [ 32%]
+tests/test_database.py::TestUsageStats::test_get_user_stats PASSED       [ 33%]
+tests/test_database.py::TestUsageStats::test_get_user_stats_exception PASSED [ 33%]
+tests/test_database.py::TestUsageStats::test_get_session_stats PASSED    [ 34%]
+tests/test_database.py::TestUsageStats::test_get_session_stats_exception PASSED [ 35%]
+tests/test_database.py::TestUsageStats::test_get_global_stats PASSED     [ 35%]
+tests/test_database.py::TestUsageStats::test_get_global_stats_exception PASSED [ 36%]
+tests/test_database.py::TestInitDatabase::test_init_database_creates_tables_with_bot_id PASSED [ 37%]
+tests/test_database.py::TestInitDatabase::test_init_database_alter_table_existing_column PASSED [ 37%]
+tests/test_database.py::TestInitDatabase::test_init_database_failure PASSED [ 38%]
+tests/test_gemini_client.py::TestGetModelPricing::test_exact_match_gemini_3_flash PASSED [ 39%]
+tests/test_gemini_client.py::TestGetModelPricing::test_match_gemini_3_pro_preview PASSED [ 40%]
+tests/test_gemini_client.py::TestGetModelPricing::test_match_gemini_2_5_flash PASSED [ 40%]
+tests/test_gemini_client.py::TestGetModelPricing::test_match_case_insensitive PASSED [ 41%]
+tests/test_gemini_client.py::TestGetModelPricing::test_unknown_model_returns_default PASSED [ 42%]
+tests/test_gemini_client.py::TestGetModelPricing::test_free_preview_model PASSED [ 42%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_system_message_extracted PASSED [ 43%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_no_system_message PASSED [ 44%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_role_mapping PASSED [ 44%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_string_content PASSED [ 45%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_multimodal_content_text_only PASSED [ 46%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_multimodal_content_with_image PASSED [ 46%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_empty_content_string PASSED [ 47%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_non_string_non_list_content PASSED [ 48%]
+tests/test_gemini_client.py::TestConvertOpenAIToGemini::test_multi_turn_conversation PASSED [ 48%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_normal_analysis PASSED [ 49%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_complex_question_routes_to_pro PASSED [ 50%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_search_needed_for_realtime PASSED [ 51%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_fallback_on_api_error PASSED [ 51%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_fallback_on_invalid_json PASSED [ 52%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_invalid_model_corrected PASSED [ 53%]
+tests/test_gemini_client.py::TestAnalyzeComplexity::test_invalid_thinking_level_corrected PASSED [ 53%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_normal_stream PASSED [ 54%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_stream_with_thinking PASSED [ 55%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_safety_block PASSED [ 55%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_api_exception PASSED [ 56%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_usage_stats_returned PASSED [ 57%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_empty_candidates_skipped PASSED [ 57%]
+tests/test_gemini_client.py::TestCallGeminiStream::test_no_output_tokens_gives_error PASSED [ 58%]
+tests/test_memory.py::TestGetSessionKey::test_add_dingtalk_prefix PASSED [ 59%]
+tests/test_memory.py::TestGetSessionKey::test_add_wecom_prefix PASSED    [ 60%]
+tests/test_memory.py::TestGetSessionKey::test_already_has_dingtalk_prefix PASSED [ 60%]
+tests/test_memory.py::TestGetSessionKey::test_already_has_wecom_prefix PASSED [ 61%]
+tests/test_memory.py::TestGetSessionKey::test_sender_id_ignored PASSED   [ 62%]
+tests/test_memory.py::TestFileStorageBotId::test_assistant_message_contains_bot_id PASSED [ 62%]
+tests/test_memory.py::TestFileStorageBotId::test_openclaw_bot_id PASSED  [ 63%]
+tests/test_memory.py::TestFileStorageBotId::test_get_history_returns_bot_id PASSED [ 64%]
+tests/test_memory.py::TestFileStorageBotId::test_backward_compat_no_bot_id PASSED [ 64%]
+tests/test_memory.py::TestFileStorageBotId::test_mixed_bot_id_messages PASSED [ 65%]
+tests/test_memory.py::TestFileStorageBotId::test_get_history_nonexistent_file PASSED [ 66%]
+tests/test_memory.py::TestFileStorageBotId::test_get_history_expired_data PASSED [ 66%]
+tests/test_memory.py::TestFileStorageBotId::test_get_history_corrupted_file PASSED [ 67%]
+tests/test_memory.py::TestFileStorageBotId::test_get_history_with_limit PASSED [ 68%]
+tests/test_memory.py::TestFileStorageBotId::test_update_history_storage_length_limit PASSED [ 68%]
+tests/test_memory.py::TestFileStorageBotId::test_update_history_only_user_msg PASSED [ 69%]
+tests/test_memory.py::TestFileStorageBotId::test_update_history_only_assistant_msg PASSED [ 70%]
+tests/test_memory.py::TestFileStorageBotId::test_update_history_appends_to_existing PASSED [ 71%]
+tests/test_memory.py::TestFileStorageBotId::test_update_history_corrupted_existing_file PASSED [ 71%]
+tests/test_memory.py::TestFileStorageClearHistory::test_clear_history_removes_file PASSED [ 72%]
+tests/test_memory.py::TestFileStorageClearHistory::test_clear_history_nonexistent_file PASSED [ 73%]
+tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_user_and_assistant FAILED [ 73%]
+tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_only_user FAILED [ 74%]
+tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_only_assistant PASSED [ 75%]
+tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_openclaw_bot_id PASSED [ 75%]
+tests/test_memory.py::TestDatabasePathBotId::test_get_history_db_path PASSED [ 76%]
+tests/test_memory.py::TestDatabasePathBotId::test_get_history_db_exception_fallback PASSED [ 77%]
+tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_exception_fallback PASSED [ 77%]
+tests/test_memory.py::TestDatabasePathBotId::test_clear_history_db_path PASSED [ 78%]
+tests/test_memory.py::TestDatabasePathBotId::test_clear_history_db_exception_fallback PASSED [ 79%]
+tests/test_memory.py::TestHistoryFormatting::test_format_with_bot_id_gemini PASSED [ 80%]
+tests/test_memory.py::TestHistoryFormatting::test_format_with_bot_id_openclaw PASSED [ 80%]
+tests/test_memory.py::TestHistoryFormatting::test_format_without_bot_id PASSED [ 81%]
+tests/test_memory.py::TestHistoryFormatting::test_format_unknown_bot_id PASSED [ 82%]
+tests/test_memory.py::TestHistoryFormatting::test_user_message_not_affected PASSED [ 82%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_content_delta PASSED [ 83%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_thinking_via_reasoning_content PASSED [ 84%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_thinking_via_thinking_field PASSED [ 84%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_reasoning_content_priority_over_thinking PASSED [ 85%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_both_thinking_and_content PASSED [ 86%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_empty_choices PASSED [ 86%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_no_choices PASSED [ 87%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_empty_delta PASSED [ 88%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_model_extraction PASSED [ 88%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_usage_extraction PASSED [ 89%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_empty_content_ignored PASSED [ 90%]
+tests/test_openclaw_client.py::TestParseSSEDelta::test_content_len_accumulates PASSED [ 91%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_normal_stream_content PASSED [ 91%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_stream_with_thinking PASSED [ 92%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_stream_with_usage_in_last_chunk PASSED [ 93%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_http_error_status PASSED [ 93%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_http_401_unauthorized PASSED [ 94%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_malformed_json_in_sse PASSED [ 95%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_connection_error PASSED [ 95%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_request_body_format PASSED [ 96%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_proxy_none_passed PASSED [ 97%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_call_openclaw_stream_with_model_param PASSED [ 97%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_call_openclaw_stream_default_model PASSED [ 98%]
+tests/test_openclaw_client.py::TestCallOpenClawStream::test_empty_stream PASSED [ 99%]
+tests/test_openclaw_client.py::TestCloseOpenClawClient::test_close_is_noop PASSED [100%]
+
+================================== FAILURES ===================================
+______ TestHistoryStorageAddMessage.test_add_user_message_without_bot_id ______
+
+self = <tests.test_database.TestHistoryStorageAddMessage object at 0x000002072EB67ED0>
+
+    def test_add_user_message_without_bot_id(self):
+        """用户消息不传 bot_id"""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    
+        @contextmanager
+        def fake_conn():
+            yield mock_conn
+    
+        with patch("app.database.MySQLClient.get_connection", side_effect=fake_conn):
+            self.storage.add_message("dingtalk_s1", "user", "你好", sender_nick="张三")
+    
+        # 验证 MySQL INSERT 包含 bot_id=None
+        mock_cursor.execute.assert_called_once()
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "bot_id" in sql
+>       assert params == ("dingtalk_s1", "user", "你好", "张三", None)
+E       AssertionError: assert ('dingtalk_s1', '你好') == ('dingtalk_s1...', '张三', None)
+E         
+E         At index 1 diff: '你好' != 'user'
+E         Right contains 3 more items, first extra item: '你好'
+E         
+E         Full diff:
+E           (
+E               'dingtalk_s1',...
+E         
+E         ...Full output truncated (5 lines hidden), use '-vv' to show
+
+tests\test_database.py:56: AssertionError
+---------------------------- Captured stdout call -----------------------------
+🔄 [去重] 用户消息已存在，合并 bot_id: <MagicMock name='mock.fetchone().__getitem__()' id='2229948196448'> + None
+_______ TestDatabasePathBotId.test_update_history_db_user_and_assistant _______
+
+self = <tests.test_memory.TestDatabasePathBotId object at 0x0000020730330410>
+
+    def test_update_history_db_user_and_assistant(self):
+        """数据库路径: 用户消息 + assistant 消息应正确调用 add_message"""
+        from app.memory import update_history
+    
+        update_history("dingtalk_s1", user_msg="你好", assistant_msg="回复", sender_nick="张三")
+    
+        assert self.mock_storage.add_message.call_count == 2
+    
+        # 第一次调用: 用户消息 (无 bot_id)
+        user_call = self.mock_storage.add_message.call_args_list[0]
+>       assert user_call == call("dingtalk_s1", "user", "你好", "张三")
+E       AssertionError: assert call('dingtal...t_id='gemini') == call('dingtal...', '你好', '张三')
+E         
+E         Full diff:
+E         - call('dingtalk_s1', 'user', '你好', '张三')
+E         + call('dingtalk_s1', 'user', '你好', '张三', bot_id='gemini')
+E         ?                                       +++++++++++++++++
+
+tests\test_memory.py:406: AssertionError
+___________ TestDatabasePathBotId.test_update_history_db_only_user ____________
+
+self = <tests.test_memory.TestDatabasePathBotId object at 0x00000207303302D0>
+
+    def test_update_history_db_only_user(self):
+        """数据库路径: 只有用户消息"""
+        from app.memory import update_history
+    
+        update_history("dingtalk_s2", user_msg="问题", sender_nick="李四")
+    
+>       self.mock_storage.add_message.assert_called_once_with("dingtalk_s2", "user", "问题", "李四")
+
+tests\test_memory.py:418: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py:991: in assert_called_once_with
+    return self.assert_called_with(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='mock.add_message' id='2229948196112'>
+args = ('dingtalk_s2', 'user', '问题', '李四'), kwargs = {}
+expected = call('dingtalk_s2', 'user', '问题', '李四')
+actual = call('dingtalk_s2', 'user', '问题', '李四', bot_id='gemini')
+_error_message = <function NonCallableMock.assert_called_with.<locals>._error_message at 0x00000207337A3740>
+cause = None
+
+    def assert_called_with(self, /, *args, **kwargs):
+        """assert that the last call was made with the specified arguments.
+    
+        Raises an AssertionError if the args and keyword args passed in are
+        different to the last call to the mock."""
+        if self.call_args is None:
+            expected = self._format_mock_call_signature(args, kwargs)
+            actual = 'not called.'
+            error_message = ('expected call not found.\nExpected: %s\n  Actual: %s'
+                    % (expected, actual))
+            raise AssertionError(error_message)
+    
+        def _error_message():
+            msg = self._format_mock_failure_message(args, kwargs)
+            return msg
+        expected = self._call_matcher(_Call((args, kwargs), two=True))
+        actual = self._call_matcher(self.call_args)
+        if actual != expected:
+            cause = expected if isinstance(expected, Exception) else None
+>           raise AssertionError(_error_message()) from cause
+E           AssertionError: expected call not found.
+E           Expected: add_message('dingtalk_s2', 'user', '问题', '李四')
+E             Actual: add_message('dingtalk_s2', 'user', '问题', '李四', bot_id='gemini')
+
+C:\Users\DELL\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py:979: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_database.py::TestHistoryStorageAddMessage::test_add_user_message_without_bot_id
+FAILED tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_user_and_assistant
+FAILED tests/test_memory.py::TestDatabasePathBotId::test_update_history_db_only_user
+======================== 3 failed, 142 passed in 8.81s ========================

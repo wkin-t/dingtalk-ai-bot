@@ -219,6 +219,15 @@ class MockSession:
 class TestCallOpenClawStream:
     """call_openclaw_stream SSE 流式测试"""
 
+    @pytest.fixture(autouse=True)
+    def disable_strict_routing_for_existing_tests(self, request):
+        """为现有测试禁用严格路由（新增的 strict routing 测试除外）"""
+        if 'strict_group_routing' not in request.node.name and 'fallback_group_routing' not in request.node.name:
+            with patch("app.config.OPENCLAW_STRICT_GROUP_ROUTING", False):
+                yield
+        else:
+            yield
+
     @pytest.mark.asyncio
     async def test_normal_stream_content(self):
         """正常流式内容"""
