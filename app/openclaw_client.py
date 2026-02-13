@@ -140,13 +140,13 @@ async def call_openclaw_stream(
 
     try:
         # 不走代理 (OpenClaw 是内网服务)
-        connector = aiohttp.TCPConnector(force_close=True)
-        async with aiohttp.ClientSession(connector=connector) as session:
+        connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
+        timeout = aiohttp.ClientTimeout(total=300, sock_read=300, sock_connect=30)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.post(
                 OPENCLAW_HTTP_URL,
                 json=request_body,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=180),
                 proxy=None,
             ) as resp:
                 if resp.status != 200:
@@ -156,30 +156,40 @@ async def call_openclaw_stream(
                     return
 
                 # 逐行读取 SSE 流 (readline 保证行完整性)
-                while True:
-                    line_bytes = await resp.content.readline()
-                    if not line_bytes:
-                        break
+                # 说明：某些网络/代理/中间件可能导致连接提前断开，aiohttp 会抛 TransferEncodingError。
+                try:
+                    while True:
+                        line_bytes = await resp.content.readline()
+                        if not line_bytes:
+                            break
 
-                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
 
-                    if not line or line.startswith(":"):
-                        continue
+                        if not line or line.startswith(":"):
+                            continue
 
-                    if not line.startswith("data: "):
-                        continue
+                        if not line.startswith("data: "):
+                            continue
 
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        break
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
 
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
 
-                    for chunk in _parse_sse_delta(data, state):
-                        yield chunk
+                        for chunk in _parse_sse_delta(data, state):
+                            yield chunk
+                except aiohttp.ClientPayloadError as e:
+                    # 常见报错：Response payload is not completed / TransferEncodingError
+                    print(f"⚠️ OpenClaw HTTP SSE payload 未完整（可能连接被中断）：{e}")
+                    # 尽量把已生成的内容交给上游；不要在这里直接当作失败终止。
+                    yield {
+                        "error": "OpenClaw 流式连接中断（payload 未完整）。如频繁出现，请检查 WAF/反代/HTTP2 设置。"
+                    }
+                    return
 
         # 输出统计
         latency_ms = int((time.time() - start_time) * 1000)
