@@ -8,6 +8,7 @@ from typing import Optional, Dict, List, Callable
 from datetime import datetime, timezone, timedelta
 from app.config import (
     MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES,
+    OPENCLAW_TOOLS_URL, OPENCLAW_TOOLS_TOKEN, OPENCLAW_VISION_TOOL_NAME,
     get_model_pricing
 )
 from app.memory import get_history, update_history
@@ -80,19 +81,49 @@ class AIHandler:
                     messages.append({"role": role, "content": msg_content})
 
             if image_data_list:
-                import base64
-                user_message_content = [{
-                    "type": "text",
-                    "text": f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
-                }]
-                for i, img_data in enumerate(image_data_list):
-                    b64_image = base64.b64encode(img_data).decode('utf-8')
-                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
-                    user_message_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
-                    })
-                messages.append({"role": "user", "content": user_message_content})
+                # OpenClaw Gateway 在此处默认按“无多模态”处理：先用 tools-invoke 产出文字描述，
+                # 再把纯文本送给 /v1/chat/completions，避免依赖 image_url 多模态能力。
+                from app.openclaw_tools_client import invoke_tool, build_vision_arguments
+
+                vision_sections = []
+                if OPENCLAW_TOOLS_URL and OPENCLAW_TOOLS_TOKEN and OPENCLAW_VISION_TOOL_NAME:
+                    max_images = min(len(image_data_list), 3)
+                    for idx, img in enumerate(image_data_list[:max_images], start=1):
+                        try:
+                            tool_res = await invoke_tool(
+                                tools_url=OPENCLAW_TOOLS_URL,
+                                token=OPENCLAW_TOOLS_TOKEN,
+                                tool_name=OPENCLAW_VISION_TOOL_NAME,
+                                arguments=build_vision_arguments(
+                                    img,
+                                    filename=f"image_{idx}.jpg",
+                                    prompt=content or "",
+                                ),
+                                session_key=f"{self.platform}:{session_key}:{user_id}",
+                            )
+                            result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
+                            vision_text = ""
+                            if isinstance(result_obj, dict):
+                                vision_text = (result_obj.get("text") or result_obj.get("content") or "").strip()
+                            elif isinstance(result_obj, str):
+                                vision_text = result_obj.strip()
+
+                            if vision_text:
+                                vision_sections.append(f"[图片{idx}识别结果]\n{vision_text}")
+                            else:
+                                vision_sections.append(f"[图片{idx}识别结果]\n(空结果)")
+                        except Exception as e:
+                            vision_sections.append(f"[图片{idx}识别失败]\n{e}")
+                else:
+                    vision_sections.append(
+                        "[系统]\n未配置 OPENCLAW_TOOLS_URL / OPENCLAW_TOOLS_TOKEN / OPENCLAW_VISION_TOOL_NAME，无法识别图片。"
+                    )
+
+                vision_block = "\n\n".join(vision_sections).strip()
+                text_content = f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
+                if vision_block:
+                    text_content += f"\n\n{vision_block}"
+                messages.append({"role": "user", "content": text_content})
             else:
                 messages.append({"role": "user", "content": f"{sender_nick}: {content}"})
         else:

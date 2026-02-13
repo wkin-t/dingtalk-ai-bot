@@ -464,33 +464,46 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             sender_nick = incoming_message.sender_nick or "User"
             if image_data_list:
-                # OpenClaw 侧默认按“无多模态”处理：先用 tool 产出文字描述，再仅发送纯文本消息
-                vision_text = ""
+                # OpenClaw 侧默认按“无多模态”处理：
+                # 始终先用 tools-invoke 产出文字描述，再仅发送纯文本消息给 Gateway。
+                vision_sections = []
                 if OPENCLAW_TOOLS_URL and OPENCLAW_TOOLS_TOKEN and OPENCLAW_VISION_TOOL_NAME:
-                    try:
-                        tool_res = await invoke_tool(
-                            tools_url=OPENCLAW_TOOLS_URL,
-                            token=OPENCLAW_TOOLS_TOKEN,
-                            tool_name=OPENCLAW_VISION_TOOL_NAME,
-                            arguments=build_vision_arguments(
-                                image_data_list[0],
-                                filename="image.jpg",
-                                prompt=content or "",
-                            ),
-                            session_key=f"dingtalk:{incoming_message.conversation_id}:{incoming_message.sender_id}",
-                        )
-                        result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
-                        if isinstance(result_obj, dict):
-                            vision_text = (result_obj.get("text") or result_obj.get("content") or "").strip()
-                        elif isinstance(result_obj, str):
-                            vision_text = result_obj.strip()
-                    except Exception as e:
-                        print(f"⚠️ [VisionTool] 调用失败: {e}")
+                    max_images = min(len(image_data_list), 3)
+                    for idx, img in enumerate(image_data_list[:max_images], start=1):
+                        try:
+                            tool_res = await invoke_tool(
+                                tools_url=OPENCLAW_TOOLS_URL,
+                                token=OPENCLAW_TOOLS_TOKEN,
+                                tool_name=OPENCLAW_VISION_TOOL_NAME,
+                                arguments=build_vision_arguments(
+                                    img,
+                                    filename=f"image_{idx}.jpg",
+                                    prompt=content or "",
+                                ),
+                                session_key=f"dingtalk:{incoming_message.conversation_id}:{incoming_message.sender_id}",
+                            )
+                            result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
+                            vision_text = ""
+                            if isinstance(result_obj, dict):
+                                vision_text = (result_obj.get("text") or result_obj.get("content") or "").strip()
+                            elif isinstance(result_obj, str):
+                                vision_text = result_obj.strip()
 
-                text_content = (
-                    f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
-                    + (f"\n\n[图片识别结果]\n{vision_text}" if vision_text else "")
-                )
+                            if vision_text:
+                                vision_sections.append(f"[图片{idx}识别结果]\n{vision_text}")
+                            else:
+                                vision_sections.append(f"[图片{idx}识别结果]\n(空结果)")
+                        except Exception as e:
+                            vision_sections.append(f"[图片{idx}识别失败]\n{e}")
+                else:
+                    vision_sections.append(
+                        "[系统]\n未配置 OPENCLAW_TOOLS_URL / OPENCLAW_TOOLS_TOKEN / OPENCLAW_VISION_TOOL_NAME，无法识别图片。"
+                    )
+
+                vision_block = "\n\n".join(vision_sections).strip()
+                text_content = f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
+                if vision_block:
+                    text_content += f"\n\n{vision_block}"
                 messages.append({"role": "user", "content": text_content})
             else:
                 text_content = f"{sender_nick}: {content}"
