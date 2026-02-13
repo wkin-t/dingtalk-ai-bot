@@ -19,6 +19,7 @@ from app.config import (
     OPENCLAW_TOOLS_TOKEN,
     OPENCLAW_ASR_TOOL_NAME,
     OPENCLAW_FILE_TOOL_NAME,
+    OPENCLAW_VISION_TOOL_NAME,
     DINGTALK_TYPING_ENABLED,
     DINGTALK_TYPING_INTERVAL_MS,
     DINGTALK_TYPING_FRAMES_RAW,
@@ -27,7 +28,7 @@ from app.config import (
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
-from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments
+from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
 # 尝试导入使用统计模块
@@ -463,9 +464,35 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             sender_nick = incoming_message.sender_nick or "User"
             if image_data_list:
+                # 如果 Gateway/agent 不支持直接看图，先通过 tools-invoke 生成图片描述再喂给模型
+                vision_text = ""
+                if OPENCLAW_TOOLS_URL and OPENCLAW_TOOLS_TOKEN and OPENCLAW_VISION_TOOL_NAME:
+                    try:
+                        tool_res = await invoke_tool(
+                            tools_url=OPENCLAW_TOOLS_URL,
+                            token=OPENCLAW_TOOLS_TOKEN,
+                            tool_name=OPENCLAW_VISION_TOOL_NAME,
+                            arguments=build_vision_arguments(
+                                image_data_list[0],
+                                filename="image.jpg",
+                                prompt=content or "",
+                            ),
+                            session_key=f"dingtalk:{incoming_message.conversation_id}:{incoming_message.sender_id}",
+                        )
+                        result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
+                        if isinstance(result_obj, dict):
+                            vision_text = (result_obj.get("text") or result_obj.get("content") or "").strip()
+                        elif isinstance(result_obj, str):
+                            vision_text = result_obj.strip()
+                    except Exception as e:
+                        print(f"⚠️ [VisionTool] 调用失败: {e}")
+
                 user_message_content = [{
                     "type": "text",
-                    "text": f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
+                    "text": (
+                        f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
+                        + (f"\n\n[图片识别结果]\n{vision_text}" if vision_text else "")
+                    )
                 }]
                 for i, img_data in enumerate(image_data_list):
                     b64_image = base64.b64encode(img_data).decode('utf-8')
