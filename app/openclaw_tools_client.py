@@ -25,6 +25,8 @@ async def invoke_tool(
     token: str,
     tool_name: str,
     arguments: Dict[str, Any],
+    session_key: str = "default",
+    action: str = "invoke",
     timeout_s: int = 120,
 ) -> Dict[str, Any]:
     """
@@ -40,9 +42,16 @@ async def invoke_tool(
     if not tool_name:
         return {"error": "tool_name 为空"}
 
+    # Official tools-invoke schema:
+    # - tool: tool name
+    # - action: tool action (tool-defined; keep default "invoke")
+    # - args: arguments
+    # - sessionKey: stable session identifier for routing/trace
     payload = {
-        "tool_name": tool_name,
-        "arguments": arguments or {},
+        "tool": tool_name,
+        "action": action,
+        "args": arguments or {},
+        "sessionKey": session_key,
     }
 
     headers = {"Content-Type": "application/json"}

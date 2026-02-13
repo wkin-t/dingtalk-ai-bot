@@ -1081,13 +1081,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                             token=OPENCLAW_TOOLS_TOKEN,
                             tool_name=OPENCLAW_ASR_TOOL_NAME,
                             arguments=build_asr_arguments(file_bytes, filename=file_name or "audio"),
+                            session_key=f"dingtalk:{incoming_message.conversation_id}:{incoming_message.sender_id}",
                         )
-                        transcript = (
-                            tool_res.get("text")
-                            or tool_res.get("content")
-                            or tool_res.get("result")
-                            or tool_res.get("data", {}).get("text") if isinstance(tool_res.get("data"), dict) else None
-                        )
+                        result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
+                        if isinstance(result_obj, dict):
+                            transcript = result_obj.get("text") or result_obj.get("content")
+                        elif isinstance(result_obj, str):
+                            transcript = result_obj
+                        else:
+                            transcript = tool_res.get("text") if isinstance(tool_res, dict) else None
                         content = (transcript or "").strip() or "语音已收到，但转写失败，请稍后重试。"
                     else:
                         tool_res = await invoke_tool(
@@ -1095,14 +1097,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                             token=OPENCLAW_TOOLS_TOKEN,
                             tool_name=OPENCLAW_FILE_TOOL_NAME,
                             arguments=build_file_arguments(file_bytes, filename=file_name or "file"),
+                            session_key=f"dingtalk:{incoming_message.conversation_id}:{incoming_message.sender_id}",
                         )
-                        summary = (
-                            tool_res.get("summary")
-                            or tool_res.get("text")
-                            or tool_res.get("content")
-                            or tool_res.get("result")
-                            or tool_res.get("data", {}).get("summary") if isinstance(tool_res.get("data"), dict) else None
-                        )
+                        result_obj = tool_res.get("result") if isinstance(tool_res, dict) else None
+                        if isinstance(result_obj, dict):
+                            summary = result_obj.get("summary") or result_obj.get("text") or result_obj.get("content")
+                        elif isinstance(result_obj, str):
+                            summary = result_obj
+                        else:
+                            summary = tool_res.get("summary") if isinstance(tool_res, dict) else None
                         content = (summary or "").strip() or f"已收到文件：{file_name}，但解析失败，请稍后重试。"
             
             if not content and not image_data_list:
