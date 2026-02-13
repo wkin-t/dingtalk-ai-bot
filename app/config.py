@@ -139,6 +139,8 @@ except json.JSONDecodeError:
 # 默认 true：未配置的群拒绝访问，返回错误提示
 # 设为 false：回退到 OPENCLAW_AGENT_ID (可能有隐私风险)
 OPENCLAW_STRICT_GROUP_ROUTING = _get_bool("OPENCLAW_STRICT_GROUP_ROUTING", True)
+# OpenClaw 请求携带的历史条数（仅用于客户端轻量上下文）
+OPENCLAW_CONTEXT_MESSAGES = max(0, _get_int("OPENCLAW_CONTEXT_MESSAGES", 6))
 
 def get_agent_for_conversation(conversation_id: str) -> str | None:
     """

@@ -7,7 +7,7 @@ import time
 from typing import Optional, Dict, List, Callable
 from datetime import datetime, timezone, timedelta
 from app.config import (
-    MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND, BOT_ID,
+    MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES,
     get_model_pricing
 )
 from app.memory import get_history, update_history
@@ -65,48 +65,79 @@ class AIHandler:
         # 获取完整历史记录
         full_history = get_history(session_key)
 
-        # 截取最近的 N 条发送给 AI
-        if len(full_history) > MAX_HISTORY_LENGTH:
-            history_messages = full_history[-MAX_HISTORY_LENGTH:]
+        # OpenClaw 模式使用轻量上下文，避免覆盖 Gateway 侧 agent/system 策略
+        if AI_BACKEND == "openclaw":
+            if OPENCLAW_CONTEXT_MESSAGES > 0 and len(full_history) > OPENCLAW_CONTEXT_MESSAGES:
+                history_messages = full_history[-OPENCLAW_CONTEXT_MESSAGES:]
+            else:
+                history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
+
+            messages = []
+            for msg in history_messages:
+                role = msg.get("role")
+                msg_content = msg.get("content", "")
+                if role in {"user", "assistant"} and msg_content:
+                    messages.append({"role": role, "content": msg_content})
+
+            if image_data_list:
+                import base64
+                user_message_content = [{
+                    "type": "text",
+                    "text": f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
+                }]
+                for i, img_data in enumerate(image_data_list):
+                    b64_image = base64.b64encode(img_data).decode('utf-8')
+                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+                    user_message_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    })
+                messages.append({"role": "user", "content": user_message_content})
+            else:
+                messages.append({"role": "user", "content": f"{sender_nick}: {content}"})
         else:
-            history_messages = full_history
+            # 截取最近的 N 条发送给 AI
+            if len(full_history) > MAX_HISTORY_LENGTH:
+                history_messages = full_history[-MAX_HISTORY_LENGTH:]
+            else:
+                history_messages = full_history
 
-        # 构造 System Prompt
-        system_prompt = self._build_system_prompt(group_info)
+            # 构造 System Prompt
+            system_prompt = self._build_system_prompt(group_info)
 
-        messages = [{"role": "system", "content": system_prompt}]
+            messages = [{"role": "system", "content": system_prompt}]
 
-        # 格式化历史消息
-        formatted_history = self._format_history(history_messages)
+            # 格式化历史消息
+            formatted_history = self._format_history(history_messages)
 
-        # 构造当前用户消息
-        beijing_tz = timezone(timedelta(hours=8))
-        current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+            # 构造当前用户消息
+            beijing_tz = timezone(timedelta(hours=8))
+            current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        if image_data_list:
-            # 多模态消息
-            import base64
-            user_message_content = []
-            user_message_content.append({
-                "type": "text",
-                "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"
-            })
-
-            for i, img_data in enumerate(image_data_list):
-                b64_image = base64.b64encode(img_data).decode('utf-8')
-                print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+            if image_data_list:
+                # 多模态消息
+                import base64
+                user_message_content = []
                 user_message_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    "type": "text",
+                    "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"
                 })
 
-            messages.extend(formatted_history)
-            messages.append({"role": "user", "content": user_message_content})
-        else:
-            # 纯文本消息
-            text_content = f"[{current_timestamp}] {sender_nick}: {content}"
-            messages.extend(formatted_history)
-            messages.append({"role": "user", "content": text_content})
+                for i, img_data in enumerate(image_data_list):
+                    b64_image = base64.b64encode(img_data).decode('utf-8')
+                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+                    user_message_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    })
+
+                messages.extend(formatted_history)
+                messages.append({"role": "user", "content": user_message_content})
+            else:
+                # 纯文本消息
+                text_content = f"[{current_timestamp}] {sender_nick}: {content}"
+                messages.extend(formatted_history)
+                messages.append({"role": "user", "content": text_content})
 
         # 智能路由
         has_images = bool(image_data_list)

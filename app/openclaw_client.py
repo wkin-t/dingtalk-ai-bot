@@ -107,11 +107,17 @@ async def call_openclaw_stream(
 
     start_time = time.time()
 
+    if model and model not in {"openclaw", "default"}:
+        request_model = model
+    else:
+        request_model = f"openclaw:{agent_id}"
+
     request_body = {
-        "model": f"openclaw:{agent_id}",  # OpenAI 格式：openclaw:agentId
+        "model": request_model,  # 推荐格式：openclaw:{agent_id}
         "messages": messages,
         "stream": True,
-        "user": conversation_id,  # 用 user 字段派生稳定会话密钥，实现会话连续性
+        # 由群 ID + 发送者 ID 派生稳定会话键，避免跨群/跨人串上下文
+        "user": f"dingtalk:{conversation_id}:{sender_id}",
     }
 
     headers = {
@@ -121,7 +127,7 @@ async def call_openclaw_stream(
 
     # 解析状态
     state = {
-        "model": f"openclaw:{agent_id}",
+        "model": request_model,
         "input_tokens": 0,
         "output_tokens": 0,
         "content_len": 0,

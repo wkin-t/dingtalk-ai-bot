@@ -4,7 +4,7 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID
+from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
@@ -409,32 +409,67 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             print(f"🖼️ 收到图片数量: {len(image_data_list)}")
         
         session_key = get_session_key(conversation_id, incoming_message.sender_id)
-        
+        use_openclaw_backend = AI_BACKEND == "openclaw"
+
         # 获取完整历史记录
         full_history = get_history(session_key)
-        
-        # 截取最近的 N 条发送给 Gemini
-        if len(full_history) > MAX_HISTORY_LENGTH:
-            history_messages = full_history[-MAX_HISTORY_LENGTH:]
+
+        if use_openclaw_backend:
+            # OpenClaw 模式：仅透传轻量上下文，避免与 Gateway 的 agent/system 策略冲突
+            if OPENCLAW_CONTEXT_MESSAGES > 0 and len(full_history) > OPENCLAW_CONTEXT_MESSAGES:
+                history_messages = full_history[-OPENCLAW_CONTEXT_MESSAGES:]
+            else:
+                history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
+
+            messages = []
+            for msg in history_messages:
+                role = msg.get("role")
+                msg_content = msg.get("content", "")
+                if role in {"user", "assistant"} and msg_content:
+                    messages.append({"role": role, "content": msg_content})
+
+            sender_nick = incoming_message.sender_nick or "User"
+            if image_data_list:
+                user_message_content = [{
+                    "type": "text",
+                    "text": f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
+                }]
+                for i, img_data in enumerate(image_data_list):
+                    b64_image = base64.b64encode(img_data).decode('utf-8')
+                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+                    user_message_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    })
+                messages.append({"role": "user", "content": user_message_content})
+            else:
+                text_content = f"{sender_nick}: {content}"
+                messages.append({"role": "user", "content": text_content})
+
+            print(f"🔍 [OpenClaw] 透传历史条数: {len(messages) - 1}, 当前消息已附加")
         else:
-            history_messages = full_history
-            
-        # 构造 System Prompt
-        from datetime import datetime, timezone, timedelta
-        # 获取北京时间 (UTC+8)
-        beijing_tz = timezone(timedelta(hours=8))
-        current_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+            # 截取最近的 N 条发送给 Gemini
+            if len(full_history) > MAX_HISTORY_LENGTH:
+                history_messages = full_history[-MAX_HISTORY_LENGTH:]
+            else:
+                history_messages = full_history
 
-        # 提取日期信息
-        current_date = datetime.now(beijing_tz)
-        year = current_date.year
-        month = current_date.month
-        day = current_date.day
+            # 构造 System Prompt
+            from datetime import datetime, timezone, timedelta
+            # 获取北京时间 (UTC+8)
+            beijing_tz = timezone(timedelta(hours=8))
+            current_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 根据 AI_BACKEND 动态设置 bot 名称
-        bot_name = {"gemini": "Gem", "openclaw": "Claw"}.get(AI_BACKEND, "Gem")
+            # 提取日期信息
+            current_date = datetime.now(beijing_tz)
+            year = current_date.year
+            month = current_date.month
+            day = current_date.day
 
-        system_prompt = f"""你是 {bot_name}，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
+            # 根据 AI_BACKEND 动态设置 bot 名称
+            bot_name = {"gemini": "Gem", "openclaw": "Claw"}.get(AI_BACKEND, "Gem")
+
+            system_prompt = f"""你是 {bot_name}，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
 
 ⏰ 重要时间信息（请务必记住）:
 - 今天是: {year} 年 {month} 月 {day} 日
@@ -475,86 +510,83 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 思考语言:
 - 请使用中文进行思考和推理。你的内部思考过程也应该用中文表达。"""
 
-        # 注入群信息 (只注入群名)
-        if group_info:
-            group_name = group_info.get('name', 'Unknown Group')
-            
-            group_context = f"\n\nGROUP CONTEXT:\nYou are currently in a DingTalk group chat named '{group_name}'.\n\nTASK:\nBased on the group name, briefly analyze what technical capabilities or domain knowledge you might need to assist this group effectively. Keep this analysis internal to guide your responses."
-            system_prompt += group_context
+            # 注入群信息 (只注入群名)
+            if group_info:
+                group_name = group_info.get('name', 'Unknown Group')
 
-        messages = []
-        messages.append({
-            "role": "system",
-            "content": system_prompt
-        })
+                group_context = f"\n\nGROUP CONTEXT:\nYou are currently in a DingTalk group chat named '{group_name}'.\n\nTASK:\nBased on the group name, briefly analyze what technical capabilities or domain knowledge you might need to assist this group effectively. Keep this analysis internal to guide your responses."
+                system_prompt += group_context
 
-        # 格式化历史消息，添加时间戳信息
-        formatted_history = []
-        for msg in history_messages:
-            formatted_msg = {"role": msg["role"]}
-            msg_content = msg.get("content", "")  # 改为 msg_content，避免覆盖参数 content
-            timestamp = msg.get("timestamp")
-            sender_nick_from_history = msg.get("sender_nick")
+            messages = []
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
 
-            # 如果有时间戳，添加到内容前面
-            if timestamp and msg["role"] == "user":
-                # 用户消息格式: [时间] 昵称: 内容
-                # 如果 msg_content 已经包含昵称（旧数据），则不再拼接
-                if sender_nick_from_history and not msg_content.startswith(f"{sender_nick_from_history}:"):
-                    formatted_msg["content"] = f"[{timestamp}] {sender_nick_from_history}: {msg_content}"
+            # 格式化历史消息，添加时间戳信息
+            formatted_history = []
+            for msg in history_messages:
+                formatted_msg = {"role": msg["role"]}
+                msg_content = msg.get("content", "")  # 改为 msg_content，避免覆盖参数 content
+                timestamp = msg.get("timestamp")
+                sender_nick_from_history = msg.get("sender_nick")
+
+                # 如果有时间戳，添加到内容前面
+                if timestamp and msg["role"] == "user":
+                    # 用户消息格式: [时间] 昵称: 内容
+                    # 如果 msg_content 已经包含昵称（旧数据），则不再拼接
+                    if sender_nick_from_history and not msg_content.startswith(f"{sender_nick_from_history}:"):
+                        formatted_msg["content"] = f"[{timestamp}] {sender_nick_from_history}: {msg_content}"
+                    else:
+                        formatted_msg["content"] = f"[{timestamp}] {msg_content}"
+                elif msg["role"] == "assistant" and msg.get("bot_id"):
+                    # assistant 消息有 bot_id 时，加来源标签
+                    msg_bot_id = msg["bot_id"]
+                    bot_label = {"gemini": "Gem", "openclaw": "Claw"}.get(msg_bot_id, msg_bot_id)
+                    formatted_msg["content"] = f"[{bot_label}] {msg_content}"
                 else:
-                    formatted_msg["content"] = f"[{timestamp}] {msg_content}"
-            elif msg["role"] == "assistant" and msg.get("bot_id"):
-                # assistant 消息有 bot_id 时，加来源标签
-                msg_bot_id = msg["bot_id"]
-                bot_label = {"gemini": "Gem", "openclaw": "Claw"}.get(msg_bot_id, msg_bot_id)
-                formatted_msg["content"] = f"[{bot_label}] {msg_content}"
+                    formatted_msg["content"] = msg_content
+
+                formatted_history.append(formatted_msg)
+
+            if image_data_list:
+                from datetime import datetime, timezone, timedelta
+                beijing_tz = timezone(timedelta(hours=8))
+                current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+                sender_nick = incoming_message.sender_nick or "User"
+
+                user_message_content = []
+                user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"})
+
+                for i, img_data in enumerate(image_data_list):
+                    b64_image = base64.b64encode(img_data).decode('utf-8')
+                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+                    user_message_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    })
+
+                messages.extend(formatted_history)
+                messages.append({"role": "user", "content": user_message_content})
+
             else:
-                formatted_msg["content"] = msg_content
+                # 无图片时：先添加历史记录，再添加当前用户消息
+                from datetime import datetime, timezone, timedelta
+                beijing_tz = timezone(timedelta(hours=8))
+                current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-            formatted_history.append(formatted_msg)
+                sender_nick = incoming_message.sender_nick or "User"
+                print(f"🔍 [调试] 构造当前消息 - sender_nick='{sender_nick}', content='{content}'")
+                text_content = f"[{current_timestamp}] {sender_nick}: {content}"
+                messages.extend(formatted_history)
+                messages.append({"role": "user", "content": text_content})
 
-        if image_data_list:
-            if history_messages and history_messages[-1]['role'] == 'user':
-                pass
-
-            from datetime import datetime, timezone, timedelta
-            beijing_tz = timezone(timedelta(hours=8))
-            current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-            sender_nick = incoming_message.sender_nick or "User"
-
-            user_message_content = []
-            user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"})
-            
-            for i, img_data in enumerate(image_data_list):
-                b64_image = base64.b64encode(img_data).decode('utf-8')
-                print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
-                user_message_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
-                })
-
-            messages.extend(formatted_history)
-            messages.append({"role": "user", "content": user_message_content})
-
-        else:
-            # 无图片时：先添加历史记录，再添加当前用户消息
-            from datetime import datetime, timezone, timedelta
-            beijing_tz = timezone(timedelta(hours=8))
-            current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-            sender_nick = incoming_message.sender_nick or "User"
-            print(f"🔍 [调试] 构造当前消息 - sender_nick='{sender_nick}', content='{content}'")
-            text_content = f"[{current_timestamp}] {sender_nick}: {content}"
-            messages.extend(formatted_history)
-            messages.append({"role": "user", "content": text_content})
-
-            # 调试：打印发送给 Gemini 的完整消息
-            print(f"🔍 [调试] 发送给 Gemini 的历史记录数量: {len(formatted_history)}")
-            if formatted_history:
-                print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
-            print(f"🔍 [调试] 当前消息: {text_content}")
+                # 调试：打印发送给 Gemini 的完整消息
+                print(f"🔍 [调试] 发送给 Gemini 的历史记录数量: {len(formatted_history)}")
+                if formatted_history:
+                    print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
+                print(f"🔍 [调试] 当前消息: {text_content}")
 
         # 初始化 AI 卡片
         thinking_text = random.choice(self.thinking_phrases)

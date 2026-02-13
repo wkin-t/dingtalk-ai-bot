@@ -436,9 +436,10 @@ class TestCallOpenClawStream:
         # 验证 POST 请求的参数
         assert mock_session.post_kwargs is not None
         body = mock_session.post_kwargs["json"]
-        assert body["model"] == "openclaw"
+        assert body["model"].startswith("openclaw:")
         assert body["stream"] is True
         assert body["messages"] == messages
+        assert body["user"] == "dingtalk:conv-fmt:user-1"
 
         headers = mock_session.post_kwargs["headers"]
         assert "Bearer" in headers["Authorization"]
@@ -483,7 +484,7 @@ class TestCallOpenClawStream:
 
     @pytest.mark.asyncio
     async def test_call_openclaw_stream_default_model(self):
-        """验证默认 model 参数仍为 'openclaw'"""
+        """默认 model 会根据路由 agent 组装为 openclaw:{agent}"""
         lines = _make_sse_lines(["[DONE]"])
         mock_resp = MockResponse(200, lines)
         mock_session = MockSession(mock_resp)
@@ -498,7 +499,8 @@ class TestCallOpenClawStream:
                     pass
 
         body = mock_session.post_kwargs["json"]
-        assert body["model"] == "openclaw"
+        assert body["model"].startswith("openclaw:")
+        assert body["user"] == "dingtalk:conv-default:user-1"
 
     @pytest.mark.asyncio
     async def test_empty_stream(self):

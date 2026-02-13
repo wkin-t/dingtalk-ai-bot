@@ -116,6 +116,7 @@ docker-compose up -d --build
 | `OPENCLAW_GATEWAY_URL` | ✓ | OpenClaw Gateway 地址 (默认 ws://127.0.0.1:18789) |
 | `OPENCLAW_GATEWAY_TOKEN` | ✓ | Gateway 认证 Token (从 Gateway 的 .env 中获取) |
 | `OPENCLAW_AGENT_ID` | - | Agent ID (默认 default) |
+| `OPENCLAW_CONTEXT_MESSAGES` | - | 透传给 OpenClaw 的历史条数 (默认 6，建议小于等于 10) |
 | `AI_BACKEND` | - | 固定为 `openclaw` |
 | `FLASK_PORT` | - | Flask 端口 (默认 35001) |
 
