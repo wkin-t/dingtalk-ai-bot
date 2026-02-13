@@ -108,11 +108,10 @@ async def call_openclaw_stream(
     start_time = time.time()
 
     request_body = {
-        "agent": agent_id,  # 动态 agent 路由
-        "conversation_id": conversation_id,  # 会话 ID：告诉 OpenClaw 这是同一个对话的延续
-        "model": model,
+        "model": f"openclaw:{agent_id}",  # OpenAI 格式：openclaw:agentId
         "messages": messages,
         "stream": True,
+        "user": conversation_id,  # 用 user 字段派生稳定会话密钥，实现会话连续性
     }
 
     headers = {
@@ -122,7 +121,7 @@ async def call_openclaw_stream(
 
     # 解析状态
     state = {
-        "model": f"openclaw-{agent_id}",
+        "model": f"openclaw:{agent_id}",
         "input_tokens": 0,
         "output_tokens": 0,
         "content_len": 0,
