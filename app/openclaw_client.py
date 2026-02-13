@@ -107,22 +107,26 @@ async def call_openclaw_stream(
 
     start_time = time.time()
 
+    # 兼容逻辑：如果没有指定特定模型，使用 openclaw:{agent_id} 格式
+    # 这有助于在不传递 header 的场景下也能路由（作为 fallback），
+    # 但我们下面会显式传递 x-openclaw-agent-id header。
     if model and model not in {"openclaw", "default"}:
         request_model = model
     else:
         request_model = f"openclaw:{agent_id}"
 
     request_body = {
-        "model": request_model,  # 推荐格式：openclaw:{agent_id}
+        "model": request_model,
         "messages": messages,
         "stream": True,
-        # 由群 ID + 发送者 ID 派生稳定会话键，避免跨群/跨人串上下文
+        # 给 Gateway 一个稳定的 user，有助于会话粘性（同一群/同一用户）。
         "user": f"dingtalk:{conversation_id}:{sender_id}",
     }
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+        "x-openclaw-agent-id": agent_id,  # 显式 Header 路由
     }
 
     # 解析状态
