@@ -124,6 +124,29 @@ OPENCLAW_HTTP_URL = os.getenv("OPENCLAW_HTTP_URL", "http://172.17.0.1:48789/v1/c
 # OpenClaw Gateway 主力模型显示名 (Gateway SSE 固定返回 "openclaw"，需手动配置)
 # OPENCLAW_DISPLAY_MODEL 已废弃 - OpenClaw 模式不再显示模型名
 
+# OpenClaw 多 Agent 路由配置
+# 钉钉群 conversationId → OpenClaw agent ID 的映射
+# 格式: JSON 对象字符串，例如: {"cid123":"group-1","cid456":"group-2"}
+OPENCLAW_GROUP_AGENT_MAPPING_RAW = os.getenv("OPENCLAW_GROUP_AGENT_MAPPING", "{}")
+try:
+    import json
+    OPENCLAW_GROUP_AGENT_MAPPING = json.loads(OPENCLAW_GROUP_AGENT_MAPPING_RAW)
+except json.JSONDecodeError:
+    print(f"⚠️ OPENCLAW_GROUP_AGENT_MAPPING 解析失败，使用空映射")
+    OPENCLAW_GROUP_AGENT_MAPPING = {}
+
+def get_agent_for_conversation(conversation_id: str) -> str:
+    """
+    根据钉钉 conversationId 获取对应的 OpenClaw agent ID
+    
+    Args:
+        conversation_id: 钉钉会话 ID (群 ID)
+    
+    Returns:
+        agent ID (如 "group-1", "group-2", "main")
+    """
+    return OPENCLAW_GROUP_AGENT_MAPPING.get(conversation_id, OPENCLAW_AGENT_ID)
+
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
 

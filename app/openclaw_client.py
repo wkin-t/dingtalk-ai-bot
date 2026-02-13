@@ -6,13 +6,17 @@ OpenClaw Gateway HTTP 客户端
 端点: http://172.17.0.1:48789/v1/chat/completions (经过 Safeline WAF)
 认证: Authorization: Bearer <gateway token>
 格式: 标准 OpenAI SDK 格式
+
+支持多 Agent 路由：
+- 根据 conversation_id 动态选择 agent
+- 配置在 OPENCLAW_GROUP_AGENT_MAPPING 环境变量中
 """
 import asyncio
 import json
 import time
 from typing import List, Dict, AsyncGenerator
 import aiohttp
-from app.config import OPENCLAW_HTTP_URL, OPENCLAW_GATEWAY_TOKEN, OPENCLAW_AGENT_ID
+from app.config import OPENCLAW_HTTP_URL, OPENCLAW_GATEWAY_TOKEN, get_agent_for_conversation
 
 
 def _parse_sse_delta(data: dict, state: dict) -> List[Dict]:
@@ -71,7 +75,7 @@ async def call_openclaw_stream(
 
     Args:
         messages: OpenAI 格式的消息列表
-        conversation_id: 会话 ID
+        conversation_id: 会话 ID（用于路由到不同 agent）
         sender_id: 发送者 ID
         sender_nick: 发送者昵称
         model: 模型建议 (Gateway 可自行决定是否接受)
@@ -82,12 +86,14 @@ async def call_openclaw_stream(
         {"error": "..."}     - 错误信息
         {"usage": {...}}     - 使用统计
     """
-    agent_id = OPENCLAW_AGENT_ID or "main"
-    print(f"📡 正在请求 OpenClaw HTTP API (conversation_id={conversation_id})...")
+    # 根据 conversation_id 动态选择 agent
+    agent_id = get_agent_for_conversation(conversation_id)
+    print(f"📡 正在请求 OpenClaw HTTP API (conversation_id={conversation_id}, agent={agent_id})...")
 
     start_time = time.time()
 
     request_body = {
+        "agent": agent_id,  # 动态 agent 路由
         "model": model,
         "messages": messages,
         "stream": True,
