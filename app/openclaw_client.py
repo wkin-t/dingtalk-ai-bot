@@ -109,6 +109,7 @@ async def call_openclaw_stream(
 
     request_body = {
         "agent": agent_id,  # 动态 agent 路由
+        "conversation_id": conversation_id,  # 会话 ID：告诉 OpenClaw 这是同一个对话的延续
         "model": model,
         "messages": messages,
         "stream": True,
