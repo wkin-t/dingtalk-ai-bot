@@ -13,6 +13,9 @@
 demo/
 demo/wxwork/aibot_demo_python/
 
+# 临时目录（本地调试/克隆上游仓库）
+.tmp/
+
 # 1Panel 模板 (实际使用的在服务器 1Panel 管理)
 1panel/
 
