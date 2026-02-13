@@ -29,6 +29,7 @@ from alibabacloud_tea_util import models as util_models
 
 from app.config import (
     DINGTALK_CORP_ID,
+    DINGTALK_COOL_APP_CODE,
     DINGTALK_FORCE_DIRECT,
     DINGTALK_RETRY_ATTEMPTS,
     DINGTALK_RETRY_BASE_DELAY,
@@ -557,6 +558,183 @@ class DingTalkCardHelper:
         if result == PERMANENT_FAIL:
             return None
         return result
+
+    async def upload_media(
+        self,
+        content: bytes,
+        filetype: str = "image",
+        filename: str = "image.png",
+        mimetype: str = "image/png",
+    ) -> Optional[str]:
+        """
+        上传媒体文件到钉钉，返回 media_id。
+
+        复用 dingtalk-stream SDK 的思路：调用 oapi /media/upload?access_token=...
+        """
+        token = await self.get_access_token()
+        if not token:
+            return None
+
+        loop = asyncio.get_running_loop()
+
+        def do_upload(current_token: str):
+            try:
+                files = {"media": (filename, content, mimetype)}
+                values = {"type": filetype}
+                url = f"https://oapi.dingtalk.com/media/upload?access_token={current_token}"
+                resp = self.download_session.post(url, data=values, files=files, timeout=30)
+                if resp.status_code == 401:
+                    return "401"
+                resp.raise_for_status()
+                data = resp.json()
+                media_id = data.get("media_id")
+                return media_id or False
+            except Exception as e:
+                if _is_retryable_exception(e):
+                    raise
+                print(f"⚠️ 上传媒体失败: {e}")
+                traceback.print_exc()
+                return False
+
+        @async_retry(
+            max_attempts=DINGTALK_RETRY_ATTEMPTS,
+            base_delay=DINGTALK_RETRY_BASE_DELAY,
+            max_delay=DINGTALK_RETRY_MAX_DELAY,
+            jitter=DINGTALK_RETRY_JITTER,
+            retry_if=_is_retryable_exception,
+        )
+        async def _upload_with_retry() -> Optional[str]:
+            current = self.access_token or token
+            result = await loop.run_in_executor(None, do_upload, current)
+            if result == "401":
+                refreshed = await self.get_access_token(force_refresh=True)
+                if not refreshed:
+                    return None
+                result = await loop.run_in_executor(None, do_upload, refreshed)
+            if result is False:
+                return PERMANENT_FAIL
+            if isinstance(result, str) and result not in {"401"}:
+                return result
+            return None
+
+        result = await _upload_with_retry()
+        if result == PERMANENT_FAIL:
+            return None
+        return result
+
+    async def send_group_message(
+        self,
+        open_conversation_id: str,
+        msg_key: str,
+        msg_param: str,
+    ) -> bool:
+        """机器人发送群聊消息（OpenAPI）"""
+        token = await self.get_access_token()
+        if not token:
+            return False
+
+        loop = asyncio.get_running_loop()
+
+        def do_send(current_token: str):
+            try:
+                headers = robot_models.OrgGroupSendHeaders()
+                headers.x_acs_dingtalk_access_token = current_token
+                req = robot_models.OrgGroupSendRequest(
+                    cool_app_code=DINGTALK_COOL_APP_CODE or None,
+                    msg_key=msg_key,
+                    msg_param=msg_param,
+                    open_conversation_id=open_conversation_id,
+                    robot_code=self.client_id,
+                )
+                resp = self.robot_client.org_group_send_with_options(req, headers, self.runtime)
+                return bool(resp and resp.status_code == 200)
+            except Exception as e:
+                if _is_auth_error(e):
+                    return "401"
+                if _is_retryable_exception(e):
+                    raise
+                print(f"⚠️ 群消息发送失败: {e}")
+                traceback.print_exc()
+                return False
+
+        @async_retry(
+            max_attempts=DINGTALK_RETRY_ATTEMPTS,
+            base_delay=DINGTALK_RETRY_BASE_DELAY,
+            max_delay=DINGTALK_RETRY_MAX_DELAY,
+            jitter=DINGTALK_RETRY_JITTER,
+            retry_if=_is_retryable_exception,
+        )
+        async def _send_with_retry() -> Optional[bool]:
+            current = self.access_token or token
+            result = await loop.run_in_executor(None, do_send, current)
+            if result == "401":
+                refreshed = await self.get_access_token(force_refresh=True)
+                if not refreshed:
+                    return None
+                result = await loop.run_in_executor(None, do_send, refreshed)
+            if result is False:
+                return PERMANENT_FAIL
+            return bool(result)
+
+        result = await _send_with_retry()
+        return bool(result and result != PERMANENT_FAIL)
+
+    async def send_private_chat_message(
+        self,
+        open_conversation_id: str,
+        msg_key: str,
+        msg_param: str,
+    ) -> bool:
+        """人与人会话中机器人发送消息（OpenAPI）"""
+        token = await self.get_access_token()
+        if not token:
+            return False
+
+        loop = asyncio.get_running_loop()
+
+        def do_send(current_token: str):
+            try:
+                headers = robot_models.PrivateChatSendHeaders()
+                headers.x_acs_dingtalk_access_token = current_token
+                req = robot_models.PrivateChatSendRequest(
+                    cool_app_code=DINGTALK_COOL_APP_CODE or None,
+                    msg_key=msg_key,
+                    msg_param=msg_param,
+                    open_conversation_id=open_conversation_id,
+                    robot_code=self.client_id,
+                )
+                resp = self.robot_client.private_chat_send_with_options(req, headers, self.runtime)
+                return bool(resp and resp.status_code == 200)
+            except Exception as e:
+                if _is_auth_error(e):
+                    return "401"
+                if _is_retryable_exception(e):
+                    raise
+                print(f"⚠️ 单聊消息发送失败: {e}")
+                traceback.print_exc()
+                return False
+
+        @async_retry(
+            max_attempts=DINGTALK_RETRY_ATTEMPTS,
+            base_delay=DINGTALK_RETRY_BASE_DELAY,
+            max_delay=DINGTALK_RETRY_MAX_DELAY,
+            jitter=DINGTALK_RETRY_JITTER,
+            retry_if=_is_retryable_exception,
+        )
+        async def _send_with_retry() -> Optional[bool]:
+            current = self.access_token or token
+            result = await loop.run_in_executor(None, do_send, current)
+            if result == "401":
+                refreshed = await self.get_access_token(force_refresh=True)
+                if not refreshed:
+                    return None
+                result = await loop.run_in_executor(None, do_send, refreshed)
+            if result is False:
+                return PERMANENT_FAIL
+            return bool(result)
+
+        result = await _send_with_retry()
+        return bool(result and result != PERMANENT_FAIL)
 
     async def get_group_info(self, conversation_id: str) -> Optional[Any]:
         """获取群信息"""

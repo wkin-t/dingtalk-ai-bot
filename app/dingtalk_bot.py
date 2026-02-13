@@ -4,10 +4,31 @@ import time
 import base64
 import dingtalk_stream
 from dingtalk_stream import AckMessage
-from app.config import DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET, MAX_HISTORY_LENGTH, DEFAULT_MODEL, CARD_TEMPLATE_ID, get_model_pricing, AVAILABLE_MODELS, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES
+from app.config import (
+    DINGTALK_CLIENT_ID,
+    DINGTALK_CLIENT_SECRET,
+    MAX_HISTORY_LENGTH,
+    DEFAULT_MODEL,
+    CARD_TEMPLATE_ID,
+    get_model_pricing,
+    AVAILABLE_MODELS,
+    AI_BACKEND,
+    BOT_ID,
+    OPENCLAW_CONTEXT_MESSAGES,
+    OPENCLAW_TOOLS_URL,
+    OPENCLAW_TOOLS_TOKEN,
+    OPENCLAW_ASR_TOOL_NAME,
+    OPENCLAW_FILE_TOOL_NAME,
+    DINGTALK_TYPING_ENABLED,
+    DINGTALK_TYPING_INTERVAL_MS,
+    DINGTALK_TYPING_FRAMES_RAW,
+    DINGTALK_REFERENCE_AUTO_ENABLED,
+)
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
+from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments
+from app.reference import maybe_inject_reference
 
 # 尝试导入使用统计模块
 try:
@@ -407,12 +428,24 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         print(f"🔍 [调试] handle_gemini_stream 接收到的 content 参数: '{content}'")
         if image_data_list:
             print(f"🖼️ 收到图片数量: {len(image_data_list)}")
-        
+
+        raw_user_content = content
+
         session_key = get_session_key(conversation_id, incoming_message.sender_id)
         use_openclaw_backend = AI_BACKEND == "openclaw"
 
         # 获取完整历史记录
         full_history = get_history(session_key)
+
+        # 智能“历史引用”注入（仅用于本次 AI 请求，不写入历史）
+        if DINGTALK_REFERENCE_AUTO_ENABLED:
+            injected_content, quote = maybe_inject_reference(
+                user_content=raw_user_content,
+                history=full_history,
+            )
+            if quote:
+                print(f"🧷 [引用] 已注入引用: {quote}")
+            content = injected_content
 
         if use_openclaw_backend:
             # OpenClaw 模式：仅透传轻量上下文，避免与 Gateway 的 agent/system 策略冲突
@@ -654,6 +687,34 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         sender_name = incoming_message.sender_nick or "User"
         at_header = f"👋 @{sender_name} \n\n"
 
+        # “敲键盘”状态动画（通过 statusText 流式更新模拟，结束后清空）
+        stop_typing = asyncio.Event()
+        typing_task = None
+        if DINGTALK_TYPING_ENABLED:
+            frames = [x.strip() for x in (DINGTALK_TYPING_FRAMES_RAW or "").split("|") if x.strip()]
+            if not frames:
+                frames = ["⌨️ 正在敲键盘..."]
+
+            async def _typing_loop():
+                idx = 0
+                interval_s = max(0.2, float(DINGTALK_TYPING_INTERVAL_MS) / 1000.0)
+                while not stop_typing.is_set():
+                    frame = frames[idx % len(frames)]
+                    idx += 1
+                    try:
+                        await self.card_helper.stream_update(
+                            out_track_id,
+                            frame,
+                            is_finalize=False,
+                            is_full=True,
+                            content_key="statusText",
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(interval_s)
+
+            typing_task = asyncio.create_task(_typing_loop())
+
         try:
             # 根据后端选择调用不同的 API
             if AI_BACKEND == "openclaw":
@@ -784,7 +845,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     "color": "blue", 
                     "event": {
                         "type": "openUrl",
-                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=" + (content or "重试")}
+                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=" + (raw_user_content or "重试")}
                     }
                 },
                 {
@@ -809,7 +870,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 记录历史：现在同时保存用户消息和助手消息
             sender_nick = incoming_message.sender_nick or "User"
-            history_content = content
+            history_content = raw_user_content
             if image_data_list:
                 history_content += f" [图片x{len(image_data_list)}]"
             update_history(session_key, user_msg=history_content, assistant_msg=full_response, sender_nick=sender_nick)
@@ -836,7 +897,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 buttons_md = (
                     "\n\n"
                     "[🧹 清空](dtmd://dingtalkclient/sendMessage?content=🧹 清空记忆) | "
-                    "[🔄 重试](dtmd://dingtalkclient/sendMessage?content=" + (content or "重试") + ") | "
+                    "[🔄 重试](dtmd://dingtalkclient/sendMessage?content=" + (raw_user_content or "重试") + ") | "
                     "[📝 总结](dtmd://dingtalkclient/sendMessage?content=📝 总结摘要) | "
                     "[🇬🇧 翻译](dtmd://dingtalkclient/sendMessage?content=🇬🇧 翻译成英文)"
                 )
@@ -864,6 +925,24 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     content_key="msgContent"
                 )
             except:
+                pass
+        finally:
+            stop_typing.set()
+            if typing_task:
+                try:
+                    await asyncio.wait_for(typing_task, timeout=1.0)
+                except Exception:
+                    pass
+            # 清空打字状态，避免残留
+            try:
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    "",
+                    is_finalize=False,
+                    is_full=True,
+                    content_key="statusText",
+                )
+            except Exception:
                 pass
 
     async def process_buffered_messages(self, buffer_key):
@@ -944,6 +1023,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             msg_type = incoming_message.message_type
             content = ""
             image_data_list = [] 
+            file_bytes = None
+            file_name = ""
             
             if msg_type == "text":
                 content = incoming_message.text.content.strip()
@@ -971,6 +1052,58 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                             print(f"✅ 图片下载成功")
                             image_data_list.append(img_data)
                         await asyncio.sleep(0.5)
+            elif msg_type in {"audio", "file"}:
+                # dingtalk_stream SDK 未内置解析 audio/file，content 会落在 extensions["content"]
+                raw_content = incoming_message.extensions.get("content")
+                if not isinstance(raw_content, dict):
+                    raw_content = {}
+                download_code = (
+                    raw_content.get("downloadCode")
+                    or raw_content.get("download_code")
+                    or raw_content.get("download_code".title())
+                )
+                file_name = (
+                    raw_content.get("fileName")
+                    or raw_content.get("filename")
+                    or raw_content.get("name")
+                    or msg_type
+                )
+                if download_code:
+                    print(f"📥 收到 {msg_type} 消息，正在下载... Code: {download_code}")
+                    file_bytes = await self.card_helper.download_file(download_code)
+                if not file_bytes:
+                    content = f"[{msg_type} 下载失败]"
+                else:
+                    # 优先通过 OpenClaw Tools 做 ASR/文件摘要（不依赖 chat prompt）
+                    if msg_type == "audio":
+                        tool_res = await invoke_tool(
+                            tools_url=OPENCLAW_TOOLS_URL,
+                            token=OPENCLAW_TOOLS_TOKEN,
+                            tool_name=OPENCLAW_ASR_TOOL_NAME,
+                            arguments=build_asr_arguments(file_bytes, filename=file_name or "audio"),
+                        )
+                        transcript = (
+                            tool_res.get("text")
+                            or tool_res.get("content")
+                            or tool_res.get("result")
+                            or tool_res.get("data", {}).get("text") if isinstance(tool_res.get("data"), dict) else None
+                        )
+                        content = (transcript or "").strip() or "语音已收到，但转写失败，请稍后重试。"
+                    else:
+                        tool_res = await invoke_tool(
+                            tools_url=OPENCLAW_TOOLS_URL,
+                            token=OPENCLAW_TOOLS_TOKEN,
+                            tool_name=OPENCLAW_FILE_TOOL_NAME,
+                            arguments=build_file_arguments(file_bytes, filename=file_name or "file"),
+                        )
+                        summary = (
+                            tool_res.get("summary")
+                            or tool_res.get("text")
+                            or tool_res.get("content")
+                            or tool_res.get("result")
+                            or tool_res.get("data", {}).get("summary") if isinstance(tool_res.get("data"), dict) else None
+                        )
+                        content = (summary or "").strip() or f"已收到文件：{file_name}，但解析失败，请稍后重试。"
             
             if not content and not image_data_list:
                 return AckMessage.STATUS_OK, 'OK'
