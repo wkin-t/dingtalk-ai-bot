@@ -88,3 +88,16 @@ def build_asr_arguments(audio_bytes: bytes, filename: str = "audio") -> Dict[str
 
 def build_file_arguments(file_bytes: bytes, filename: str = "file") -> Dict[str, Any]:
     return {"filename": filename, "file_base64": _b64(file_bytes)}
+
+
+def build_vision_arguments(
+    image_bytes: bytes,
+    *,
+    filename: str = "image.jpg",
+    prompt: str = "",
+) -> Dict[str, Any]:
+    # Keep arguments generic. Tools can choose to use prompt or ignore it.
+    args: Dict[str, Any] = {"filename": filename, "image_base64": _b64(image_bytes)}
+    if prompt:
+        args["prompt"] = prompt
+    return args

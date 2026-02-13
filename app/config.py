@@ -146,6 +146,7 @@ OPENCLAW_TOOLS_URL = os.getenv("OPENCLAW_TOOLS_URL", "").strip()
 OPENCLAW_TOOLS_TOKEN = os.getenv("OPENCLAW_TOOLS_TOKEN", "").strip()
 OPENCLAW_ASR_TOOL_NAME = os.getenv("OPENCLAW_ASR_TOOL_NAME", "asr").strip()
 OPENCLAW_FILE_TOOL_NAME = os.getenv("OPENCLAW_FILE_TOOL_NAME", "file_summarize").strip()
+OPENCLAW_VISION_TOOL_NAME = os.getenv("OPENCLAW_VISION_TOOL_NAME", "vision").strip()
 
 def get_agent_for_conversation(conversation_id: str) -> str | None:
     """
