@@ -86,7 +86,7 @@ WECOM_SECRET = os.getenv("WECOM_SECRET", "")
 WECOM_TOKEN = os.getenv("WECOM_TOKEN", WECOM_BOT_TOKEN)
 WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", WECOM_BOT_ENCODING_AES_KEY)
 
-# 平台选择: dingtalk | wecom | both
+# platform 选择: dingtalk | wecom | both
 PLATFORM = os.getenv("PLATFORM", "dingtalk")
 
 # 代理设置 (优先读取环境变量)
@@ -135,10 +135,9 @@ except json.JSONDecodeError:
     print(f"⚠️ OPENCLAW_GROUP_AGENT_MAPPING 解析失败，使用空映射")
     OPENCLAW_GROUP_AGENT_MAPPING = {}
 
-# OpenClaw 严格路由模式（安全特性）
-# 默认 true：未配置的群拒绝访问，返回错误提示
-# 设为 false：回退到 OPENCLAW_AGENT_ID (可能有隐私风险)
-OPENCLAW_STRICT_GROUP_ROUTING = _get_bool("OPENCLAW_STRICT_GROUP_ROUTING", True)
+# OpenClaw 严格路由模式 (Security)
+# 如果启用，未在 mapping 中的群组将直接被拒绝访问 (不会 fallback 到 default agent)
+OPENCLAW_STRICT_ROUTING = _get_bool("OPENCLAW_STRICT_ROUTING", True)
 # OpenClaw 请求携带的历史条数（仅用于客户端轻量上下文）
 OPENCLAW_CONTEXT_MESSAGES = max(0, _get_int("OPENCLAW_CONTEXT_MESSAGES", 6))
 
@@ -156,7 +155,7 @@ def get_agent_for_conversation(conversation_id: str) -> str | None:
     - 当群 conversationId 在 OPENCLAW_GROUP_AGENT_MAPPING 中有映射时，返回对应 agent
     - 当群未配置映射时，返回 None（调用者需要返回错误提示给用户）
 
-    兼容模式（OPENCLAW_STRICT_GROUP_ROUTING=false）：
+    兼容模式（OPENCLAW_STRICT_ROUTING=false）：
     - 未配置的群回退到 OPENCLAW_AGENT_ID（可能有隐私/隔离风险）
 
     Args:
@@ -173,7 +172,7 @@ def get_agent_for_conversation(conversation_id: str) -> str | None:
         return OPENCLAW_GROUP_AGENT_MAPPING[conversation_id]
 
     # 未在映射表中
-    if OPENCLAW_STRICT_GROUP_ROUTING:
+    if OPENCLAW_STRICT_ROUTING:
         # 严格模式：返回 None，让调用者返回错误提示
         return None
     else:
