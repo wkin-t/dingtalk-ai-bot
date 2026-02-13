@@ -223,7 +223,12 @@ class TestCallOpenClawStream:
     def disable_strict_routing_for_existing_tests(self, request):
         """为现有测试禁用严格路由（新增的 strict routing 测试除外）"""
         if 'strict_group_routing' not in request.node.name and 'fallback_group_routing' not in request.node.name:
-            with patch("app.config.OPENCLAW_STRICT_GROUP_ROUTING", False):
+            # Config name changed upstream: OPENCLAW_STRICT_GROUP_ROUTING -> OPENCLAW_STRICT_ROUTING
+            try:
+                cm = patch("app.config.OPENCLAW_STRICT_ROUTING", False)
+            except AttributeError:
+                cm = patch("app.config.OPENCLAW_STRICT_GROUP_ROUTING", False, create=True)
+            with cm:
                 yield
         else:
             yield
