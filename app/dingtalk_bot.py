@@ -464,7 +464,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             sender_nick = incoming_message.sender_nick or "User"
             if image_data_list:
-                # 如果 Gateway/agent 不支持直接看图，先通过 tools-invoke 生成图片描述再喂给模型
+                # OpenClaw 侧默认按“无多模态”处理：先用 tool 产出文字描述，再仅发送纯文本消息
                 vision_text = ""
                 if OPENCLAW_TOOLS_URL and OPENCLAW_TOOLS_TOKEN and OPENCLAW_VISION_TOOL_NAME:
                     try:
@@ -487,21 +487,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     except Exception as e:
                         print(f"⚠️ [VisionTool] 调用失败: {e}")
 
-                user_message_content = [{
-                    "type": "text",
-                    "text": (
-                        f"{sender_nick}: [图片x{len(image_data_list)}] {content}"
-                        + (f"\n\n[图片识别结果]\n{vision_text}" if vision_text else "")
-                    )
-                }]
-                for i, img_data in enumerate(image_data_list):
-                    b64_image = base64.b64encode(img_data).decode('utf-8')
-                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
-                    user_message_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
-                    })
-                messages.append({"role": "user", "content": user_message_content})
+                text_content = (
+                    f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
+                    + (f"\n\n[图片识别结果]\n{vision_text}" if vision_text else "")
+                )
+                messages.append({"role": "user", "content": text_content})
             else:
                 text_content = f"{sender_nick}: {content}"
                 messages.append({"role": "user", "content": text_content})
