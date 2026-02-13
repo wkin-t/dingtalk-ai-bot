@@ -135,17 +135,42 @@ except json.JSONDecodeError:
     print(f"⚠️ OPENCLAW_GROUP_AGENT_MAPPING 解析失败，使用空映射")
     OPENCLAW_GROUP_AGENT_MAPPING = {}
 
-def get_agent_for_conversation(conversation_id: str) -> str:
+# OpenClaw 严格路由模式（安全特性）
+# 默认 true：未配置的群拒绝访问，返回错误提示
+# 设为 false：回退到 OPENCLAW_AGENT_ID (可能有隐私风险)
+OPENCLAW_STRICT_GROUP_ROUTING = _get_bool("OPENCLAW_STRICT_GROUP_ROUTING", True)
+
+def get_agent_for_conversation(conversation_id: str) -> str | None:
     """
     根据钉钉 conversationId 获取对应的 OpenClaw agent ID
-    
+
+    严格路由模式（推荐）：
+    - 当群 conversationId 在 OPENCLAW_GROUP_AGENT_MAPPING 中有映射时，返回对应 agent
+    - 当群未配置映射时，返回 None（调用者需要返回错误提示给用户）
+
+    兼容模式（OPENCLAW_STRICT_GROUP_ROUTING=false）：
+    - 未配置的群回退到 OPENCLAW_AGENT_ID（可能有隐私/隔离风险）
+
     Args:
         conversation_id: 钉钉会话 ID (群 ID)
-    
+
     Returns:
-        agent ID (如 "group-1", "group-2", "main")
+        agent ID 字符串，或 None（严格模式下未映射）
+
+    Safety:
+        严格模式避免未配置的群误打到默认 agent，防止隐私泄露。
     """
-    return OPENCLAW_GROUP_AGENT_MAPPING.get(conversation_id, OPENCLAW_AGENT_ID)
+    # 首先尝试从映射表查询
+    if conversation_id in OPENCLAW_GROUP_AGENT_MAPPING:
+        return OPENCLAW_GROUP_AGENT_MAPPING[conversation_id]
+
+    # 未在映射表中
+    if OPENCLAW_STRICT_GROUP_ROUTING:
+        # 严格模式：返回 None，让调用者返回错误提示
+        return None
+    else:
+        # 兼容模式：回退到默认 agent
+        return OPENCLAW_AGENT_ID
 
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
