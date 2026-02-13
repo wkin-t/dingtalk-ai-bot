@@ -54,3 +54,22 @@ def test_push_group_text_ok(client):
     assert body["ok"] is True
     assert mock_sender.send_group_message.await_count == 1
 
+
+def test_push_default_is_markdown(client):
+    import app.routes as routes
+
+    mock_sender = MagicMock()
+    mock_sender.send_group_message = AsyncMock(return_value=True)
+
+    with patch.object(routes, "DINGTALK_PUSH_BEARER_TOKEN", "token123"):
+        with patch.object(routes, "DINGTALK_PUSH_IP_ALLOWLIST_RAW", ""):
+            with patch.object(routes, "_get_sender", return_value=mock_sender):
+                resp = client.post(
+                    "/api/dingtalk/push",
+                    headers={"Authorization": "Bearer token123"},
+                    environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                    json={"target_type": "group", "conversation_id": "cid_1", "content": "## hi"},
+                )
+
+    assert resp.status_code == 200
+    assert mock_sender.send_group_message.await_count == 1

@@ -120,7 +120,8 @@ def dingtalk_push():
     data = request.get_json(silent=True) or {}
     target_type = (data.get("target_type") or "group").strip().lower()
     conversation_id = (data.get("conversation_id") or "").strip()
-    msg_type = (data.get("message_type") or "text").strip().lower()
+    # Default to markdown for a better user experience.
+    msg_type = (data.get("message_type") or "markdown").strip().lower()
 
     if not conversation_id:
         return jsonify({"ok": False, "error": "conversation_id required"}), 400
