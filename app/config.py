@@ -142,6 +142,12 @@ OPENCLAW_STRICT_GROUP_ROUTING = _get_bool("OPENCLAW_STRICT_GROUP_ROUTING", True)
 # OpenClaw 请求携带的历史条数（仅用于客户端轻量上下文）
 OPENCLAW_CONTEXT_MESSAGES = max(0, _get_int("OPENCLAW_CONTEXT_MESSAGES", 6))
 
+# OpenClaw Tools Invoke HTTP API
+OPENCLAW_TOOLS_URL = os.getenv("OPENCLAW_TOOLS_URL", "").strip()
+OPENCLAW_TOOLS_TOKEN = os.getenv("OPENCLAW_TOOLS_TOKEN", "").strip()
+OPENCLAW_ASR_TOOL_NAME = os.getenv("OPENCLAW_ASR_TOOL_NAME", "asr").strip()
+OPENCLAW_FILE_TOOL_NAME = os.getenv("OPENCLAW_FILE_TOOL_NAME", "file_summarize").strip()
+
 def get_agent_for_conversation(conversation_id: str) -> str | None:
     """
     根据钉钉 conversationId 获取对应的 OpenClaw agent ID
@@ -200,6 +206,29 @@ ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "true").lower() == "true"
 
 # 钉钉 AI 卡片模板 ID
 CARD_TEMPLATE_ID = os.getenv("CARD_TEMPLATE_ID", "ea2d035e-20fe-447d-9fbf-c04658772b24.schema")
+
+# 钉钉主动推送 API
+DINGTALK_PUSH_BEARER_TOKEN = os.getenv("DINGTALK_PUSH_BEARER_TOKEN", "").strip()
+DINGTALK_PUSH_IP_ALLOWLIST_RAW = os.getenv("DINGTALK_PUSH_IP_ALLOWLIST", "").strip()
+
+# 钉钉“敲键盘”状态
+DINGTALK_TYPING_ENABLED = _get_bool("DINGTALK_TYPING_ENABLED", True)
+DINGTALK_TYPING_INTERVAL_MS = max(200, _get_int("DINGTALK_TYPING_INTERVAL_MS", 650))
+DINGTALK_TYPING_FRAMES_RAW = os.getenv(
+    "DINGTALK_TYPING_FRAMES",
+    "⌨️ 正在敲键盘.|⌨️ 正在敲键盘..|⌨️ 正在敲键盘...",
+).strip()
+
+# 历史引用（智能触发）
+DINGTALK_REFERENCE_AUTO_ENABLED = _get_bool("DINGTALK_REFERENCE_AUTO_ENABLED", True)
+
+# 发送图片消息（原生优先）
+DINGTALK_IMAGE_MSG_KEY = os.getenv("DINGTALK_IMAGE_MSG_KEY", "sampleImageMsg").strip()
+# msgParam 为 JSON 字符串，{mediaId} 会被替换
+DINGTALK_IMAGE_MSG_PARAM_TEMPLATE = os.getenv(
+    "DINGTALK_IMAGE_MSG_PARAM_TEMPLATE",
+    "{\"photoURL\":\"@{mediaId}\"}",
+).strip()
 
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing
