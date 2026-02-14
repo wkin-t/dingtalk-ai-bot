@@ -2,6 +2,8 @@ import asyncio
 import random
 import time
 import base64
+import json
+import re
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 from app.config import (
@@ -25,6 +27,8 @@ from app.config import (
     DINGTALK_TYPING_INTERVAL_MS,
     DINGTALK_TYPING_FRAMES_RAW,
     DINGTALK_REFERENCE_AUTO_ENABLED,
+    DINGTALK_IMAGE_MSG_KEY,
+    DINGTALK_IMAGE_MSG_PARAM_TEMPLATE,
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
@@ -51,6 +55,81 @@ group_info_cache = {}  # 群信息缓存 (conversation_id -> {"name": str, "time
 processed_messages = {}
 MESSAGE_ID_CACHE_SIZE = 1000  # 最多缓存 1000 条
 MESSAGE_ID_TTL = 300  # 消息 ID 缓存 5 分钟
+
+
+def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
+    """
+    Extract an image generation result JSON block from model output.
+
+    Expected marker: "【生图结果JSON】"
+    Supported formats:
+    - 【生图结果JSON】```json { ... } ```
+    - 【生图结果JSON】{ ... }
+
+    Returns:
+    - cleaned_text: original text with the JSON block removed (trimmed)
+    - payload: parsed JSON dict or None
+    """
+    marker = "【生图结果JSON】"
+    if marker not in (text or ""):
+        return (text or "").strip(), None
+
+    src = text or ""
+    start = src.find(marker)
+    if start < 0:
+        return src.strip(), None
+
+    tail = src[start + len(marker):]
+
+    # Prefer fenced ```json blocks
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", tail, flags=re.IGNORECASE | re.DOTALL)
+    json_str = None
+    end_in_tail = None
+    if m:
+        json_str = m.group(1)
+        end_in_tail = m.end()
+    else:
+        # Fallback: parse from first '{' to matching '}' using brace counting.
+        i = tail.find("{")
+        if i >= 0:
+            depth = 0
+            in_str = False
+            esc = False
+            for j in range(i, len(tail)):
+                ch = tail[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == "\"":
+                        in_str = False
+                    continue
+                if ch == "\"":
+                    in_str = True
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_str = tail[i : j + 1]
+                        end_in_tail = j + 1
+                        break
+
+    if not json_str or end_in_tail is None:
+        return src.strip(), None
+
+    payload = None
+    try:
+        payload = json.loads(json_str)
+    except Exception:
+        payload = None
+
+    # Remove marker + parsed block segment
+    remove_end = start + len(marker) + end_in_tail
+    cleaned = (src[:start] + src[remove_end:]).strip()
+    return cleaned, payload if isinstance(payload, dict) else None
 
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
@@ -840,6 +919,56 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             full_response = full_response.replace("[AILoading]", "")
             clean_response = full_response.strip()
 
+            # If the model produced an image generation result block, send image back to the same
+            # conversation (single chat or group) as a native picture message.
+            cleaned_text, image_gen_payload = _extract_image_gen_json_block(clean_response)
+            sent_image_ok = False
+            image_send_error = ""
+            if image_gen_payload and isinstance(image_gen_payload.get("images"), list):
+                try:
+                    images = image_gen_payload.get("images") or []
+                    first = images[0] if images else None
+                    b64 = (first or {}).get("base64") if isinstance(first, dict) else None
+                    if isinstance(b64, str) and b64.strip():
+                        image_bytes = base64.b64decode(b64)
+                        media_id = await self.card_helper.upload_media(
+                            image_bytes,
+                            filetype="image",
+                            filename="image.png",
+                            mimetype="image/png",
+                        )
+                        if media_id:
+                            msg_param = (DINGTALK_IMAGE_MSG_PARAM_TEMPLATE or "").replace(
+                                "{mediaId}",
+                                media_id,
+                            )
+                            if incoming_message.conversation_type == "2":
+                                sent_image_ok = await self.card_helper.send_group_message(
+                                    incoming_message.conversation_id,
+                                    DINGTALK_IMAGE_MSG_KEY,
+                                    msg_param,
+                                )
+                            else:
+                                sent_image_ok = await self.card_helper.send_private_chat_message(
+                                    incoming_message.conversation_id,
+                                    DINGTALK_IMAGE_MSG_KEY,
+                                    msg_param,
+                                )
+                        else:
+                            image_send_error = "upload_media 返回为空"
+                    else:
+                        image_send_error = "images[0].base64 为空"
+                except Exception as e:
+                    image_send_error = str(e)
+
+                # Avoid storing huge base64 blocks in history/UI.
+                if cleaned_text:
+                    clean_response = cleaned_text
+                if sent_image_ok:
+                    clean_response = (clean_response + "\n\n[已发送图片]").strip()
+                else:
+                    clean_response = (clean_response + f"\n\n[图片发送失败] {image_send_error}").strip()
+
             # 构建状态栏：只有 thinking 时才显示摘要，避免重复显示内容
             status_text = ""
             if full_thinking:
@@ -907,7 +1036,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             history_content = raw_user_content
             if image_data_list:
                 history_content += f" [图片x{len(image_data_list)}]"
-            update_history(session_key, user_msg=history_content, assistant_msg=full_response, sender_nick=sender_nick)
+            # Store the cleaned response so we don't persist base64 blobs.
+            update_history(
+                session_key,
+                user_msg=history_content,
+                assistant_msg=clean_response,
+                sender_nick=sender_nick,
+            )
             
             await self.card_helper.stream_update(
                 out_track_id,
