@@ -222,6 +222,18 @@ class DingTalkCardHelper:
         if DINGTALK_FORCE_DIRECT:
             self.download_session.trust_env = False
 
+        # Streaming updates (card stream_update) are sensitive to concurrency and update rates.
+        # We serialize updates per out_track_id to avoid DingTalk returning intermittent 500s.
+        self._stream_locks: Dict[str, asyncio.Lock] = {}
+        self._last_stream_at: Dict[str, float] = {}
+
+    def _get_stream_lock(self, out_track_id: str) -> asyncio.Lock:
+        lock = self._stream_locks.get(out_track_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._stream_locks[out_track_id] = lock
+        return lock
+
     @async_retry(
         max_attempts=DINGTALK_RETRY_ATTEMPTS,
         base_delay=DINGTALK_RETRY_BASE_DELAY,
@@ -402,12 +414,19 @@ class DingTalkCardHelper:
         if not token:
             return False
 
+        # Drop overly-frequent non-final updates to reduce server-side 500/unknownError bursts.
+        # Final updates are always delivered (with retry) to keep the UI consistent.
+        now = time.time()
+        last = self._last_stream_at.get(out_track_id, 0.0)
+        if not is_finalize and (now - last) < 0.15:
+            return True
+
         loop = asyncio.get_running_loop()
 
-        def do_update():
+        def do_update(current_token: str):
             try:
                 headers = card_models.StreamingUpdateHeaders()
-                headers.x_acs_dingtalk_access_token = token
+                headers.x_acs_dingtalk_access_token = current_token
 
                 request = card_models.StreamingUpdateRequest(
                     out_track_id=out_track_id,
@@ -427,18 +446,65 @@ class DingTalkCardHelper:
                 if response.status_code == 200:
                     return True
 
-                print(f"❌ 流式更新失败: HTTP {response.status_code}")
+                if response.status_code in (401, 403):
+                    return "401"
+                # Let transient statuses fall through as retryable None.
+                if response.status_code in (429, 500, 502, 503, 504):
+                    return None
+
+                print(f"❌ 流式更新失败: HTTP {response.status_code} (key={content_key})")
                 return False
 
             except Exception as e:
+                if _is_auth_error(e):
+                    return "401"
+                if _is_retryable_exception(e):
+                    raise
                 print(f"⚠️ 流式更新失败: {e}")
                 return False
 
-        try:
-            return await loop.run_in_executor(None, do_update)
-        except Exception as e:
-            print(f"⚠️ 流式更新异常: {e}")
-            return False
+        # Serialize updates per card to avoid concurrent stream_update calls (typing + content).
+        async with self._get_stream_lock(out_track_id):
+            # Update last-send time only when we're actually attempting a call.
+            self._last_stream_at[out_track_id] = time.time()
+
+            # Non-final updates should never block the main flow with long retries.
+            # Final updates retry more aggressively.
+            max_attempts = DINGTALK_RETRY_ATTEMPTS if is_finalize else 2
+
+            @async_retry(
+                max_attempts=max_attempts,
+                base_delay=DINGTALK_RETRY_BASE_DELAY,
+                max_delay=DINGTALK_RETRY_MAX_DELAY,
+                jitter=DINGTALK_RETRY_JITTER,
+                retry_if=_is_retryable_exception,
+            )
+            async def _update_with_retry() -> Optional[bool]:
+                current = self.access_token or token
+                result = await loop.run_in_executor(None, do_update, current)
+
+                if result == "401":
+                    refreshed = await self.get_access_token(force_refresh=True)
+                    if not refreshed:
+                        return None
+                    result = await loop.run_in_executor(None, do_update, refreshed)
+
+                if result is False:
+                    return PERMANENT_FAIL
+                if result is None:
+                    return None
+                return bool(result)
+
+            try:
+                result = await _update_with_retry()
+                return bool(result and result != PERMANENT_FAIL)
+            except Exception as e:
+                # For non-final updates, suppress noisy errors (they'll be followed by later updates).
+                if is_finalize:
+                    print(
+                        f"⚠️ 流式更新异常(out_track_id={out_track_id}, key={content_key}, finalize={is_finalize}, len={len(content or '')}): {e}"
+                    )
+                return False
 
     async def update_card(
         self,
