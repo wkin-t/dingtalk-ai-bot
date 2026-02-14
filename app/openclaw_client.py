@@ -14,9 +14,247 @@ OpenClaw Gateway HTTP 客户端
 import asyncio
 import json
 import time
-from typing import List, Dict, AsyncGenerator
+import base64
+import uuid
+from typing import List, Dict, AsyncGenerator, Optional
 import aiohttp
-from app.config import OPENCLAW_HTTP_URL, OPENCLAW_GATEWAY_TOKEN, get_agent_for_conversation
+import websockets
+from app.config import (
+    OPENCLAW_HTTP_URL,
+    OPENCLAW_GATEWAY_TOKEN,
+    OPENCLAW_GATEWAY_TRANSPORT,
+    OPENCLAW_GATEWAY_WS_URL,
+    get_agent_for_conversation,
+)
+
+
+PROTOCOL_VERSION = 3
+
+
+def _derive_ws_url(http_url: str) -> str:
+    """
+    Best-effort derive a Gateway WS URL from the OpenAI-compatible HTTP endpoint.
+    The gateway accepts WS upgrades on any path, but "/ws" is commonly used behind reverse proxies.
+    """
+    raw = (http_url or "").strip()
+    if not raw:
+        return ""
+    # http(s) -> ws(s)
+    if raw.startswith("https://"):
+        base = "wss://" + raw[len("https://"):]
+    elif raw.startswith("http://"):
+        base = "ws://" + raw[len("http://"):]
+    else:
+        base = raw
+
+    # Strip OpenAI-compatible path if present.
+    base = base.replace("/v1/chat/completions", "")
+    if base.endswith("/"):
+        base = base[:-1]
+    return base + "/ws"
+
+
+async def _ws_wait_for_response(ws, req_id: str, timeout_s: float = 30.0) -> dict:
+    """Wait until we receive a response frame with matching id."""
+    deadline = time.time() + timeout_s
+    while True:
+        remaining = max(0.1, deadline - time.time())
+        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        obj = json.loads(raw)
+        if obj.get("type") == "res" and obj.get("id") == req_id:
+            return obj
+
+
+async def _ws_wait_for_challenge(ws, timeout_s: float = 10.0) -> str:
+    """Wait for connect.challenge and return nonce (if present)."""
+    deadline = time.time() + timeout_s
+    while True:
+        remaining = max(0.1, deadline - time.time())
+        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        obj = json.loads(raw)
+        if obj.get("type") == "event" and obj.get("event") == "connect.challenge":
+            payload = obj.get("payload") or {}
+            nonce = payload.get("nonce")
+            return nonce if isinstance(nonce, str) else ""
+
+
+async def call_openclaw_ws_chat_stream(
+    *,
+    message: str,
+    conversation_id: str,
+    sender_id: str,
+    sender_nick: str = "User",
+    image_data_list: Optional[List[bytes]] = None,
+    timeout_s: float = 300.0,
+) -> AsyncGenerator[Dict, None]:
+    """
+    Call OpenClaw Gateway WebSocket protocol via chat.send.
+
+    This is closer to official channel plugins:
+    - Gateway manages session memory/transcript by sessionKey
+    - Supports image attachments (base64) via chat.send params.attachments
+
+    Notes:
+    - chat.send attachments currently only accept images (audio/file should use tools-invoke first).
+    - We embed the agent route into sessionKey as: agent:{agentId}:{rest}
+    """
+    agent_id = get_agent_for_conversation(conversation_id)
+    if agent_id is None:
+        error_msg = (
+            f"❌ 群未绑定 AI Agent\n\n"
+            f"当前 conversation_id: {conversation_id}\n\n"
+            f"请在环境变量中配置 OPENCLAW_GROUP_AGENT_MAPPING\n\n"
+            f"配置示例:\n"
+            f'{{"cid_xxx":"agent-1","cid_yyy":"agent-2"}}\n\n'
+            f"详见部署文档或联系管理员"
+        )
+        yield {"error": error_msg}
+        return
+
+    # Stable session key for gateway-managed transcripts.
+    rest_key = f"dingtalk:{conversation_id}:{sender_id}"
+    session_key = f"agent:{agent_id}:{rest_key}"
+
+    ws_url = OPENCLAW_GATEWAY_WS_URL or _derive_ws_url(OPENCLAW_HTTP_URL)
+    if not ws_url:
+        yield {"error": "OpenClaw WS 未配置：请设置 OPENCLAW_GATEWAY_WS_URL 或 OPENCLAW_GATEWAY_URL"}
+        return
+
+    # Build chat.send attachments (images only)
+    attachments = []
+    if image_data_list:
+        for idx, img in enumerate(image_data_list[:3], start=1):
+            b64 = base64.b64encode(img).decode("utf-8")
+            attachments.append({
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "fileName": f"image_{idx}.jpg",
+                "content": b64,
+            })
+
+    # Compose user message. Keep it simple; gateway will stamp timestamp internally.
+    # Note: callers typically already prefix speaker labels if needed.
+    user_text = (message or "").strip()
+
+    run_id = f"dingtalk-{uuid.uuid4().hex}"
+    connect_req_id = f"connect-{uuid.uuid4().hex}"
+    send_req_id = f"send-{uuid.uuid4().hex}"
+
+    last_text = ""
+    start_time = time.time()
+
+    try:
+        async with websockets.connect(
+            ws_url,
+            max_size=20 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=5,
+        ) as ws:
+            await _ws_wait_for_challenge(ws, timeout_s=10.0)
+
+            connect_frame = {
+                "type": "req",
+                "id": connect_req_id,
+                "method": "connect",
+                "params": {
+                    "minProtocol": PROTOCOL_VERSION,
+                    "maxProtocol": PROTOCOL_VERSION,
+                    "client": {
+                        "id": "gateway-client",
+                        "version": "dingtalk-ai-bot",
+                        "platform": "python",
+                        "mode": "backend",
+                    },
+                    "role": "operator",
+                    "scopes": [],
+                    "auth": {"token": OPENCLAW_GATEWAY_TOKEN},
+                },
+            }
+            await ws.send(json.dumps(connect_frame, ensure_ascii=False))
+            connect_res = await _ws_wait_for_response(ws, connect_req_id, timeout_s=15.0)
+            if not connect_res.get("ok"):
+                err = (connect_res.get("error") or {}).get("message") or "unknown connect error"
+                yield {"error": f"OpenClaw WS connect failed: {err}"}
+                return
+
+            send_frame = {
+                "type": "req",
+                "id": send_req_id,
+                "method": "chat.send",
+                "params": {
+                    "sessionKey": session_key,
+                    "message": user_text,
+                    "attachments": attachments if attachments else None,
+                    "timeoutMs": int(timeout_s * 1000),
+                    "idempotencyKey": run_id,
+                    "deliver": False,
+                },
+            }
+            # Remove None fields for strict schema (additionalProperties=false)
+            send_frame["params"] = {k: v for k, v in send_frame["params"].items() if v is not None}
+            await ws.send(json.dumps(send_frame, ensure_ascii=False))
+
+            send_res = await _ws_wait_for_response(ws, send_req_id, timeout_s=15.0)
+            if not send_res.get("ok"):
+                err = (send_res.get("error") or {}).get("message") or "unknown send error"
+                yield {"error": f"OpenClaw WS chat.send failed: {err}"}
+                return
+
+            # Stream events until final/error/aborted for our run_id.
+            deadline = time.time() + timeout_s
+            while True:
+                remaining = max(0.1, deadline - time.time())
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                obj = json.loads(raw)
+                if obj.get("type") != "event" or obj.get("event") != "chat":
+                    continue
+                payload = obj.get("payload") or {}
+                if payload.get("runId") != run_id:
+                    continue
+
+                state = payload.get("state")
+                if state in {"delta", "final"}:
+                    msg = payload.get("message") or {}
+                    content = msg.get("content") or []
+                    # Gateway sends full accumulated text in each delta; compute incremental diff.
+                    text = ""
+                    if isinstance(content, list) and content:
+                        first = content[0] or {}
+                        text = first.get("text") if isinstance(first, dict) else ""
+                    if not isinstance(text, str):
+                        text = ""
+
+                    if text.startswith(last_text):
+                        delta = text[len(last_text):]
+                    else:
+                        # Fallback: treat as full replacement (avoid dropping content).
+                        delta = text
+                        last_text = ""
+                    last_text = text
+
+                    if delta:
+                        yield {"content": delta}
+
+                    if state == "final":
+                        break
+
+                elif state == "error":
+                    yield {"error": payload.get("errorMessage") or "OpenClaw WS run error"}
+                    break
+                elif state == "aborted":
+                    yield {"error": "OpenClaw WS run aborted"}
+                    break
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            yield {"usage": {"latency_ms": latency_ms, "transport": "ws"}}
+
+    except asyncio.TimeoutError:
+        yield {"error": "OpenClaw WS 请求超时"}
+    except websockets.WebSocketException as e:
+        yield {"error": f"OpenClaw WS Error: {e}"}
+    except Exception as e:
+        yield {"error": f"OpenClaw WS Error: {e}"}
 
 
 def _parse_sse_delta(data: dict, state: dict) -> List[Dict]:
@@ -66,7 +304,8 @@ async def call_openclaw_stream(
     conversation_id: str,
     sender_id: str,
     sender_nick: str = "User",
-    model: str = "openclaw"
+    model: str = "openclaw",
+    image_data_list: Optional[List[bytes]] = None,
 ) -> AsyncGenerator[Dict, None]:
     """
     调用 OpenClaw Gateway HTTP API 进行流式对话
@@ -86,7 +325,27 @@ async def call_openclaw_stream(
         {"error": "..."}     - 错误信息
         {"usage": {...}}     - 使用统计
     """
-    # 根据 conversation_id 动态选择 agent
+    # WS transport is closer to official channel plugins and supports image attachments.
+    if OPENCLAW_GATEWAY_TRANSPORT == "ws":
+        # Prefer the last user content as message body (gateway manages transcript).
+        last_user = ""
+        for msg in reversed(messages or []):
+            if msg.get("role") == "user":
+                last_user = msg.get("content") or ""
+                break
+        if not isinstance(last_user, str):
+            last_user = ""
+        async for chunk in call_openclaw_ws_chat_stream(
+            message=last_user,
+            conversation_id=conversation_id,
+            sender_id=sender_id,
+            sender_nick=sender_nick,
+            image_data_list=image_data_list,
+        ):
+            yield chunk
+        return
+
+    # 根据 conversation_id 动态选择 agent (HTTP/OpenAI-compatible path)
     agent_id = get_agent_for_conversation(conversation_id)
 
     # 严格路由模式：未配置的群返回错误提示
