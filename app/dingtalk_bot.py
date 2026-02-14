@@ -929,8 +929,26 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     images = image_gen_payload.get("images") or []
                     first = images[0] if images else None
                     b64 = (first or {}).get("base64") if isinstance(first, dict) else None
-                    if isinstance(b64, str) and b64.strip():
-                        image_bytes = base64.b64decode(b64)
+                    file_path = (first or {}).get("file_path") if isinstance(first, dict) else None
+                    
+                    image_bytes = None
+                    if isinstance(file_path, str) and file_path.strip():
+                        # Priority 1: file path (shared volume)
+                        try:
+                            with open(file_path.strip(), "rb") as f:
+                                image_bytes = f.read()
+                        except Exception as e:
+                            image_send_error = f"读取文件失败: {e}"
+                    elif isinstance(b64, str) and b64.strip():
+                        # Priority 2: base64 payload
+                        try:
+                            image_bytes = base64.b64decode(b64)
+                        except Exception as e:
+                            image_send_error = f"Base64解码失败: {e}"
+                    else:
+                        image_send_error = "无有效图片数据 (base64/file_path)"
+
+                    if image_bytes:
                         media_id = await self.card_helper.upload_media(
                             image_bytes,
                             filetype="image",
