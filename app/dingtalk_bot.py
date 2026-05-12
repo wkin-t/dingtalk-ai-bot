@@ -34,6 +34,8 @@ from app.memory import get_history, update_history, clear_history, get_session_k
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
 from app.image_gen import generate_image
+from app.image_store import save_image
+from app.config import EXTERNAL_BASE_URL
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
@@ -1142,34 +1144,22 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 if not images:
                     raise RuntimeError("生图 API 未返回任何图片")
 
-                # 上传第一张图片
-                media_id = await self.card_helper.upload_media(
-                    images[0],
-                    filetype="image",
-                    filename="image.png",
-                    mimetype="image/png",
-                )
+                # 检查是否有公网 URL 配置
+                if not EXTERNAL_BASE_URL:
+                    raise RuntimeError("EXTERNAL_BASE_URL 未配置，无法展示图片")
 
-                if media_id:
-                    msg_param = DINGTALK_IMAGE_MSG_PARAM_TEMPLATE.replace("{mediaId}", media_id)
-                    if incoming_message.conversation_type == "2":
-                        sent = await self.card_helper.send_group_message(
-                            incoming_message.conversation_id,
-                            DINGTALK_IMAGE_MSG_KEY,
-                            msg_param,
-                        )
-                    else:
-                        sent = await self.card_helper.send_private_chat_message(
-                            incoming_message.conversation_id,
-                            DINGTALK_IMAGE_MSG_KEY,
-                            msg_param,
-                        )
+                # 保存图片到本地 + 生成公网 URL
+                image_urls = []
+                saved_files = []
+                for img_bytes in images:
+                    filename, url = save_image(img_bytes)
+                    saved_files.append(filename)
+                    if url:
+                        image_urls.append(url)
 
-                    card_text = f"已为你生成 {len(images)} 张图片 ✨\n\n{image_prompt}"
-                    if not sent:
-                        card_text += "\n\n⚠️ 图片消息发送失败，请查看对话"
-                else:
-                    card_text = "⚠️ 图片上传失败，请稍后重试"
+                # 卡片 markdown 展示图片
+                img_markdown = "\n".join(f"![图片{i+1}]({url})" for i, url in enumerate(image_urls))
+                card_text = f"已为你生成 {len(images)} 张图片 ✨\n\n{img_markdown}"
 
                 await self.card_helper.stream_update(
                     out_track_id,
@@ -1177,7 +1167,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     is_finalize=True,
                     is_full=True,
                 )
-                print(f"✅ [生图] 完成，{len(images)} 张")
+                print(f"✅ [生图] 完成，{len(images)} 张，本地存储 {len(saved_files)} 个")
 
             except RuntimeError as e:
                 error_msg = str(e)
