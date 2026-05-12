@@ -95,11 +95,15 @@ async def call_litellm_stream(
 
         thinking_sent = False
 
+        chunk_count = 0
         async for chunk in response:
             if not chunk.choices:
                 continue
 
             delta = chunk.choices[0].delta
+            chunk_count += 1
+            if chunk_count <= 3:
+                print(f"🔍 [LiteLLM Debug] chunk#{chunk_count} delta attrs: {list(vars(delta).keys())}, content={getattr(delta, 'content', None)!r:.100}, reasoning={getattr(delta, 'reasoning_content', None)!r:.100}")
 
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
