@@ -1,5 +1,5 @@
 import asyncio
-import random
+
 import time
 import base64
 import json
@@ -553,7 +553,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
    - false: 不需要联网（默认）
 
 4. thinking_text:
-   - 一句简短搞怪的思考状态（10字以内，带emoji），要和问题内容相关
+   - 一句简短的思考状态（10字以内，带emoji），要和问题内容相关，风格符合你的性格
    - {soul_instruction}例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
    - 要有趣、有个性、不重复
 
