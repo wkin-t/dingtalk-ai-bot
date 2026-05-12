@@ -365,11 +365,14 @@ class DingTalkCardHelper:
                 return False
 
             except Exception as e:
+                err_msg = str(e)
                 if _is_auth_error(e):
+                    print(f"⚠️ 卡片创建认证错误: {err_msg}")
                     return "401"
                 if _is_retryable_exception(e):
+                    print(f"⚠️ 卡片创建可重试异常: {err_msg}")
                     raise
-                print(f"⚠️ 发送卡片失败: {e}")
+                print(f"⚠️ 发送卡片失败: {err_msg}")
                 traceback.print_exc()
                 return False
 
@@ -541,10 +544,10 @@ class DingTalkCardHelper:
                 )
 
                 if response.status_code == 200:
-                    print(f"✅ 卡片更新成功: {out_track_id}")
+                    print(f"✅ 卡片更新成功: {out_track_id}, body={response.body}")
                     return True
 
-                print(f"❌ 卡片更新失败: HTTP {response.status_code}")
+                print(f"❌ 卡片更新失败: HTTP {response.status_code}, body={response.body}")
                 return False
 
             except Exception as e:
