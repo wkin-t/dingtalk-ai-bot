@@ -16,10 +16,11 @@ if LITELLM_PROXY:
     os.environ.setdefault("HTTP_PROXY", LITELLM_PROXY)
 
 EFFORT_MAPPING = {
-    "minimal": None,
+    "minimal": "none",      # GPT-5: 关闭推理 | Gemini: 映射为 minimal
     "low": "low",
     "medium": "medium",
     "high": "high",
+    "xhigh": "xhigh",       # GPT-5 独有：极限推理
 }
 
 
