@@ -612,7 +612,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             day = current_date.day
 
             # 根据 AI_BACKEND 动态设置 bot 名称
-            bot_name = {"gemini": "Gem", "openclaw": "Claw"}.get(AI_BACKEND, "Gem")
+            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(AI_BACKEND, "Gem")
 
             system_prompt = f"""你是 {bot_name}，一个有帮助的 AI 助手。你的回答应该准确，不要产生幻觉。
 
