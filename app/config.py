@@ -280,5 +280,51 @@ def get_model_pricing(model_name: str) -> dict:
             return GEMINI_PRICING[key]
     return GEMINI_PRICING["default"]
 
+# ===== LiteLLM 后端 =====
+LITELLM_MODEL_FLASH = os.getenv("OPENAI_MODEL_FLASH", "deepseek/deepseek-chat")
+LITELLM_MODEL_PRO = os.getenv("OPENAI_MODEL_PRO", "deepseek/deepseek-reasoner")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")
+OPENAI_API_KEY_CUSTOM = os.getenv("OPENAI_API_KEY", "")
+
+# 网络控制
+LITELLM_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
+LITELLM_CONNECT_TIMEOUT = _get_int("LITELLM_CONNECT_TIMEOUT", 30)
+LITELLM_READ_TIMEOUT = _get_int("LITELLM_READ_TIMEOUT", 120)
+LITELLM_MAX_RETRIES = _get_int("LITELLM_MAX_RETRIES", 2)
+
+# 模型映射（带 capability 声明）
+LITELLM_MODEL_CONFIG = {
+    "fast": {
+        "model": LITELLM_MODEL_FLASH,
+        "supports_reasoning": _get_bool("OPENAI_FLASH_SUPPORTS_REASONING", True),
+        "supports_search": _get_bool("OPENAI_FLASH_SUPPORTS_SEARCH", False),
+        "supports_vision": _get_bool("OPENAI_FLASH_SUPPORTS_VISION", True),
+    },
+    "pro": {
+        "model": LITELLM_MODEL_PRO,
+        "supports_reasoning": _get_bool("OPENAI_PRO_SUPPORTS_REASONING", True),
+        "supports_search": _get_bool("OPENAI_PRO_SUPPORTS_SEARCH", False),
+        "supports_vision": _get_bool("OPENAI_PRO_SUPPORTS_VISION", True),
+    },
+}
+
+# 路由名归一化：把路由输出的各种模型名统一到 fast/pro
+ROUTE_KEY_MAP = {
+    "gemini-3-flash-preview": "fast",
+    "gemini-3-flash": "fast",
+    "gemini-3.1-pro-preview": "pro",
+    "gemini-3-pro-preview": "pro",
+}
+
+def get_route_key(target_model: str) -> str:
+    key = ROUTE_KEY_MAP.get(target_model)
+    if key is None:
+        print(f"⚠️ 未知模型 {target_model}，降级到 fast")
+        return "fast"
+    return key
+
+def get_litellm_model_config(route_key: str) -> dict:
+    return LITELLM_MODEL_CONFIG.get(route_key, LITELLM_MODEL_CONFIG["fast"])
+
 # 注意: 代理配置在 gemini_client.py 中设置
 # 使用 NO_PROXY 排除钉钉域名，确保钉钉 SDK 不走代理

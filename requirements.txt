@@ -32,3 +32,5 @@ pymysql
 websockets>=12.0
 # 企业微信消息加解密
 pycryptodome
+# LiteLLM 统一 LLM 客户端 (OpenAI 兼容后端)
+litellm==1.81.9
