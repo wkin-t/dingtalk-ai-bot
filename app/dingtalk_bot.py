@@ -618,7 +618,57 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
     }
 
 
-class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
+async def _enrich_image_prompt(
+    raw_prompt: str,
+    user_message: str,
+    messages: list,
+    soul_text: str = "",
+) -> str:
+    """
+    用轻量模型 + 聊天记录 + Soul 生成精细的生图 prompt
+    返回增强后的英文图片描述；失败时降级为 raw_prompt
+    """
+    # 从 messages 中提取最近 10 条非 system 消息作为上下文
+    recent = []
+    for msg in messages[-12:]:
+        role = msg.get("role", "")
+        text = msg.get("content", "")
+        if role == "system" or not text:
+            continue
+        recent.append(f"{'用户' if role == 'user' else 'AI'}: {text[:200]}")
+    chat_context = "\n".join(recent[-10:])
+
+    soul_hint = ""
+    if soul_text:
+        soul_hint = f"\nAI 的性格/风格: {soul_text[:200]}"
+
+    enrich_prompt = f"""你是一个图片描述专家。根据聊天上下文，把用户的生图请求优化为精细的英文图片描述（用于 AI 生图模型）。
+
+聊天记录:
+{chat_context}
+{soul_hint}
+
+用户最新消息: {user_message}
+初步翻译: {raw_prompt}
+
+要求:
+1. 结合聊天上下文理解用户真正想要什么（比如用户说"我"时，根据上下文推断身份/场景）
+2. 输出纯英文描述，100 字以内，适合 AI 生图模型
+3. 包含视觉细节：风格、光线、色调、构图、氛围
+4. 不要输出任何解释，只输出图片描述本身"""
+
+    try:
+        result = await _ask_lightweight_model(enrich_prompt)
+        # 清理：去掉可能的引号包裹
+        result = result.strip().strip('"').strip("'")
+        if result and len(result) > 10:
+            print(f"🎨 [Prompt增强] {raw_prompt[:40]} → {result[:60]}")
+            return result
+        print(f"⚠️ [Prompt增强] 返回过短，使用原始 prompt")
+    except Exception as e:
+        print(f"⚠️ [Prompt增强] 失败: {e}，使用原始 prompt")
+
+    return raw_prompt
     def __init__(self):
         super(GeminiBotHandler, self).__init__()
         self.card_helper = DingTalkCardHelper(DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET)
@@ -1063,9 +1113,14 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         need_image_gen = complexity.get("need_image_gen", False) if AI_BACKEND != "openclaw" else False
         if need_image_gen:
             params = complexity.get("image_gen_params", {})
-            image_prompt = params.get("prompt", content)
+            raw_prompt = params.get("prompt", content)
             aspect_ratio = params.get("aspect_ratio", "1:1")
             num_images = max(1, min(4, params.get("number_of_images", 1)))
+
+            # 用聊天记录 + Soul 生成精细 prompt
+            image_prompt = await _enrich_image_prompt(
+                raw_prompt, content, messages, soul_text
+            )
             print(f"🎨 [生图] prompt={image_prompt[:80]}, ratio={aspect_ratio}, n={num_images}, backend={AI_BACKEND}")
 
             try:
