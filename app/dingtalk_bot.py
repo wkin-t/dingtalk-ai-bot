@@ -32,7 +32,7 @@ from app.config import (
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
-from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
+from app.gemini_client import analyze_complexity_with_model
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
@@ -828,24 +828,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             typing_task = asyncio.create_task(_typing_loop())
 
         try:
-            # 根据后端选择调用不同的 API
-            if AI_BACKEND == "openclaw":
-                from app.openclaw_client import call_openclaw_stream
-                stream = call_openclaw_stream(
-                    messages,
-                    conversation_id=conversation_id,
-                    sender_id=incoming_message.sender_id,
-                    sender_nick=sender_name,
-                    model=target_model,
-                    image_data_list=image_data_list if image_data_list else None,
-                )
-            else:
-                stream = call_gemini_stream(
-                    messages,
-                    target_model=target_model,
-                    thinking_level=thinking_level,
-                    enable_search=need_search
-                )
+            # 统一后端入口
+            from app.ai.backend import create_backend_stream
+            stream = create_backend_stream(
+                messages,
+                target_model=target_model,
+                thinking_level=thinking_level,
+                enable_search=need_search,
+                conversation_id=conversation_id,
+                sender_id=incoming_message.sender_id,
+                sender_nick=sender_name,
+                image_data_list=image_data_list if image_data_list else None,
+            )
 
             async for chunk in stream:
                 # 处理使用统计
