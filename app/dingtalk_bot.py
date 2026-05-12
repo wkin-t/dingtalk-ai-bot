@@ -433,10 +433,14 @@ async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
    - false: 不需要联网（默认）
 
+4. thinking_text:
+   - 一句简短有趣的思考状态（10字以内，带emoji），要和问题内容相关
+   - 例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         kwargs = {
@@ -476,7 +480,8 @@ async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
         "model": "gemini-3-flash-preview",
         "thinking_level": "low",
         "need_search": False,
-        "reason": "LiteLLM预分析失败，使用默认"
+        "reason": "LiteLLM预分析失败，使用默认",
+        "thinking_text": "正在思考 💭"
     }
 
 
@@ -932,6 +937,19 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+
+        # 预分析完成后，用 AI 生成的思考状态更新卡片
+        if AI_BACKEND != "openclaw" and complexity.get("thinking_text"):
+            try:
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    complexity["thinking_text"],
+                    is_finalize=False,
+                    is_full=True,
+                    content_key="thinkingText",
+                )
+            except Exception:
+                pass
 
         full_response = ""
         full_thinking = ""  # 真实的 thinking 内容
