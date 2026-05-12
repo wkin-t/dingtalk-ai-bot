@@ -92,10 +92,19 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - {soul_instruction}例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
    - 要有趣、有个性、不重复
 
+5. need_image_gen:
+   - true: 用户明确要求生成图片、画画、插图、绘制、画一张、生成图片
+   - false: 不需要生图（默认）
+
+6. image_gen_params (仅当 need_image_gen=true 时):
+   - prompt: 提取用户描述的图片内容，转为英文描述（生图模型只支持英文）
+   - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
+   - number_of_images: 解析数量 → 1-4，默认 1
+
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
@@ -108,7 +117,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=150
+                    max_output_tokens=300
                 )
             )
             print(f"🔍 [预分析] API 调用完成")
@@ -117,8 +126,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         result_text = await loop.run_in_executor(None, _analyze)
         print(f"📝 [预分析] 原始返回: {result_text[:200]}")
 
-        # 解析 JSON
-        json_match = re.search(r'\{[^}]+\}', result_text)
+        # 解析 JSON（支持嵌套对象）
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
             # 验证和修正字段
@@ -128,6 +137,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
                 result["thinking_level"] = "low"
             if "need_search" not in result:
                 result["need_search"] = False
+            if "need_image_gen" not in result:
+                result["need_image_gen"] = False
             print(f"🤖 预分析结果: {result}")
             return result
         else:
