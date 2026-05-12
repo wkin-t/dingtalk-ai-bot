@@ -679,12 +679,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         self.card_helper = DingTalkCardHelper(DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET)
         self.card_template_id = CARD_TEMPLATE_ID  # 从环境变量读取
         
-        self.thinking_phrases = [
-            "CPU 正在燃烧 🔥", "正在翻阅百科全书 📖", "让我想想... 🤔",
-            "正在连接宇宙意识 🌌", "头都要炸了 🤯", "正在疯狂码字中 ✍️",
-            "正在调取量子算力 ⚛️", "大脑飞速运转中 🧠", "正在和数据打架 ⚔️",
-            "稍等，灵感马上就来 💡"
-        ]
+        # thinking_text 由预分析模型动态生成（结合 Soul 个性）
 
     def _calculate_cost(self, model_usage: list) -> float:
         """根据模型用量计算费用 (美元)"""
@@ -1042,7 +1037,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 print(f"🔍 [调试] 当前消息: {text_content}")
 
         # 初始化 AI 卡片
-        thinking_text = random.choice(self.thinking_phrases)
+        thinking_text = "思考中..."
         
         card_data = {
             "msgTitle": {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI"}.get(AI_BACKEND, "AI"),
@@ -1089,7 +1084,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "model": "gemini-3-flash-preview",
                     "thinking_level": "low",
                     "need_search": False,
-                    "reason": "路由异常，使用默认"
+                    "reason": "路由异常，使用默认",
+                    "thinking_text": "思考中..."
                 }
             target_model = complexity.get("model", "gemini-3-flash-preview")
             thinking_level = complexity.get("thinking_level", "low")
@@ -1107,7 +1103,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "model": "gemini-3-flash-preview",
                     "thinking_level": "low",
                     "need_search": False,
-                    "reason": "路由异常，使用默认"
+                    "reason": "路由异常，使用默认",
+                    "thinking_text": "思考中..."
                 }
             target_model = complexity.get("model", "gemini-3-flash-preview")
             thinking_level = complexity.get("thinking_level", "low")
