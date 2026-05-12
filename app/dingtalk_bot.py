@@ -211,6 +211,8 @@ async def _ask_lightweight_model(prompt: str) -> str:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=500,
+                drop_params=True,
+                reasoning_effort="none",
             )
             return response.choices[0].message.content or ""
         else:
@@ -574,6 +576,8 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
             "temperature": 0.1,
             "max_tokens": 300,
             "timeout": 15,
+            "drop_params": True,
+            "reasoning_effort": "none",
         }
         if OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
