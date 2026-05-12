@@ -883,6 +883,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                     if is_first_chunk:
                         is_first_chunk = False
+                        print(f"🔍 [Stream Debug] 首次stream_update, display_content长度={len(display_content)}, 前100字={display_content[:100]!r}")
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = time.time()
                         continue
