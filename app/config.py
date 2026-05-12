@@ -204,8 +204,8 @@ HISTORY_TTL = 3600 * 24 * 7 # 本地存储保留 7 天
 GOOGLE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 # 默认模型 (可通过环境变量配置)
-# 可选: gemini-2.0-flash, gemini-2.0-flash-thinking-exp, gemini-3-pro-preview
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+# 可选: gemini-2.0-flash, gemini-2.0-flash-thinking-exp, gemini-3.1-pro-preview
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 # 是否启用 thinking 模式 (显示模型的思考过程)
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
@@ -246,6 +246,9 @@ GEMINI_PRICING = {
     # Gemini 3 系列
     "gemini-3-flash": {"input": 0.50, "output": 3.00},
     "gemini-3-pro": {"input": 2.00, "output": 12.00},
+    # Gemini 3.1 系列
+    "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+    "gemini-3.1-pro": {"input": 2.00, "output": 12.00},  # <=200K tokens; >200K: $4/$18
     # Gemini 2.5 系列
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
     "gemini-2.5-flash": {"input": 0.15, "output": 3.50},  # 含推理
@@ -263,7 +266,7 @@ GEMINI_PRICING = {
 # 可用模型列表
 AVAILABLE_MODELS = {
     "flash": "gemini-3-flash",
-    "pro": "gemini-3-pro-preview",
+    "pro": "gemini-3.1-pro-preview",
     "2.5-flash": "gemini-2.5-flash",
     "2.5-pro": "gemini-2.5-pro",
     "2.0-flash": "gemini-2.0-flash",
