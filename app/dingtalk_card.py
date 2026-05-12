@@ -355,9 +355,10 @@ class DingTalkCardHelper:
                     print(f"✅ 卡片创建成功: {out_track_id}")
                     return out_track_id
                 if response.status_code in (401, 403):
+                    print(f"⚠️ 卡片创建权限错误: HTTP {response.status_code}, body={response.body}")
                     return "401"
                 if response.status_code in (429, 500, 502, 503, 504):
-                    print(f"⚠️ 卡片创建临时失败: HTTP {response.status_code}")
+                    print(f"⚠️ 卡片创建临时失败: HTTP {response.status_code}, body={response.body}")
                     return None
 
                 print(f"❌ 卡片创建失败: HTTP {response.status_code}")
