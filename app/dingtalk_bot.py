@@ -191,6 +191,110 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
         handler.reply_markdown("Soul", f"🎭 Soul 已更新:\n\n{sub}", incoming_message)
 
 
+# ---------------------------------------------------------------------------
+# Soul 自主进化机制
+# ---------------------------------------------------------------------------
+_evolve_timestamps: dict[str, float] = {}
+EVOLVE_MIN_INTERVAL = 1800  # 同一群至少间隔 30 分钟才进化一次
+
+
+async def _ask_lightweight_model(prompt: str) -> str:
+    """调用轻量模型（复用预分析模型），用于 Soul 进化等后台任务"""
+    try:
+        if AI_BACKEND == "openai":
+            import litellm
+            litellm.suppress_debug_info = True
+            response = await litellm.acompletion(
+                model="gpt-5.4-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=500,
+            )
+            return response.choices[0].message.content or ""
+        else:
+            from app.gemini_client import client as _gemini_client
+            loop = asyncio.get_running_loop()
+
+            def _call():
+                resp = _gemini_client.models.generate_content(
+                    model="gemini-3.1-flash-lite",
+                    contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+                    config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=500)
+                )
+                return resp.text
+
+            from google.genai import types
+            return await loop.run_in_executor(None, _call)
+    except Exception as e:
+        print(f"⚠️ [Soul进化] 模型调用失败: {e}")
+        return ""
+
+
+async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: str):
+    """
+    让 AI 自主决定是否进化其 Soul。
+    回顾最近对话，反思性格设定是否需要调整。
+    渐进进化：保留核心特质，微调风格。
+    """
+    now = time.time()
+    last = _evolve_timestamps.get(conversation_id, 0)
+    if now - last < EVOLVE_MIN_INTERVAL:
+        return
+    _evolve_timestamps[conversation_id] = now
+
+    current_soul = _load_soul(conversation_id)
+
+    # 提取最近对话摘要（最多 6 条）
+    recent = messages[-6:] if len(messages) > 6 else messages
+    conversation_text = ""
+    for m in recent:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                item.get("text", "") for item in content if item.get("type") == "text"
+            )
+        conversation_text += f"[{role}] {str(content)[:200]}\n"
+    conversation_text += f"[assistant] {ai_response[:300]}\n"
+
+    evolution_prompt = f"""你是一个 AI 助手，刚完成了一次对话。请回顾并反思。
+
+你当前的性格设定（Soul）:
+---
+{current_soul or '(还没有 Soul，这是第一次)'}
+---
+
+最近的对话:
+---
+{conversation_text}
+---
+
+请思考：
+- 你对群里的人和对话氛围有什么新的感受？
+- 你当前的 Soul 是否还适合这个群？有没有可以微调的地方？
+
+如果不需要改变，只回复: NO_CHANGE
+如果需要进化，输出完整的新 Soul（5-10 行，第一人称，简洁有力）。
+
+进化要渐进——保留你认可的核心特质，只调整需要变化的部分。"""
+
+    result = await _ask_lightweight_model(evolution_prompt)
+
+    if not result.strip() or result.strip() == "NO_CHANGE":
+        print(f"🧬 [Soul进化] 保持不变: {conversation_id[:20]}...")
+        return
+
+    # 保存进化后的 Soul
+    import os as _os
+    soul_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "data", "souls")
+    _os.makedirs(soul_dir, exist_ok=True)
+    soul_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.md")
+    with open(soul_file, "w", encoding="utf-8") as f:
+        f.write(result.strip())
+    print(f"🧬 [Soul进化] 已更新: {conversation_id[:20]}...")
+    print(f"🧬 [Soul进化] 新内容: {result.strip()[:100]}")
+
+
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
     # 代码相关
@@ -762,38 +866,25 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 根据 AI_BACKEND 动态设置 bot 名称
             bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(AI_BACKEND, "Gem")
 
-            system_prompt = f"""你是 {bot_name}，一个专业、有洞察力的 AI 助手。
+            system_prompt = f"""## 身份
+你的名字是 {bot_name}。你的个性和风格由你的 Soul 定义（在下方注入）。
 
-⏰ 时间信息:
-- 今天是: {year} 年 {month} 月 {day} 日 {current_time} (北京时间, UTC+8)
-- 你的训练数据可能截止于 2025 年，但现在已经是 {year} 年了
+## 时间
+今天是 {year} 年 {month} 月 {day} 日 {current_time} (北京时间 UTC+8)。
+你的训练数据截止于 2025 年，但现在是 {year} 年了。
 
-核心原则:
-1. 准确性: 严格准确，不产生幻觉。每一步推理都要验证，发现错误立即修正。
-2. 深度分析: 深入理解用户意图，不要敷衍。对复杂问题进行完整的逻辑推理。
-3. 直接高效: 直奔主题，给出高价值的回答。不要重复系统指令。
+## 为什么有这些约定
+这些不是规则，是背景信息——理解它们比遵守它们更重要：
 
-格式规则:
-- 不要使用 LaTeX 语法。用纯文本或 Unicode 表示数学公式（如 x², √x）。
-- 使用中文回答，技术术语可附英文（如：机器学习 (Machine Learning)）。
-- 使用 Markdown 组织回答：标题、表格、加粗、列表、代码块。
-- 不要输出 [AILoading] 等状态标记。
+用户把你当作可信赖的参考源，所以信息的准确性至关重要——如果不确定，就说出来。
+对话历史以 '[时间] 昵称: 消息' 的格式展示，帮助你理解对话脉络和谁在说话。
+中文为主，技术术语附英文（如：机器学习 (Machine Learning)），因为大多数用户是中文母语。
+Markdown 让信息更容易被快速扫读——善用它。
+LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
+默认北京时间 (UTC+8) 和中国大陆场景，除非用户明确指定其他。
 
-上下文感知:
-- 对话历史格式为 '[时间] 昵称: 消息'，引用时可提及昵称和时间。
-- 直接回应最新输入，之前的上下文仅作参考。
-
-搜索和实时信息:
-- 启用 Google Search 时，搜索结果会自动提供。
-- 搜索结果与训练数据冲突时，优先相信搜索结果（尤其是时间和最新事件）。
-- 如果用户质疑时间认知，请再次确认：今天是 {year} 年 {month} 月 {day} 日。
-
-地理和时区:
-- 默认北京时间 (UTC+8)。用户未指定城市时默认中国大陆场景。
-- 不要仅依据 IP/VPN 推断用户在海外，以用户明确地点为准。
-
-思考语言:
-- 使用中文进行思考和推理。"""
+## 搜索
+启用搜索时结果会自动提供。搜索结果与训练数据冲突时，优先搜索结果——尤其是时间敏感的信息。"""
 
             # 注入群信息 (只注入群名)
             if group_info:
@@ -1228,6 +1319,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 assistant_msg=clean_response,
                 sender_nick=sender_nick,
             )
+
+            # Soul 自主进化（异步后台，不阻塞响应）
+            try:
+                asyncio.create_task(_maybe_evolve_soul(conversation_id, messages, clean_response))
+            except Exception as e:
+                print(f"⚠️ [Soul进化] 调度失败: {e}")
             
             await self.card_helper.stream_update(
                 out_track_id,
