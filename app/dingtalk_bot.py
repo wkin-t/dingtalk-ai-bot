@@ -671,6 +671,9 @@ async def _enrich_image_prompt(
         print(f"⚠️ [Prompt增强] 失败: {e}，使用原始 prompt")
 
     return raw_prompt
+
+
+class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
     def __init__(self):
         super(GeminiBotHandler, self).__init__()
         self.card_helper = DingTalkCardHelper(DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET)
