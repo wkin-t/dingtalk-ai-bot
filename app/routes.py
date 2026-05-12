@@ -3,7 +3,7 @@ import aiohttp
 import ipaddress
 import json
 import base64
-from flask import request, Response, jsonify
+from flask import request, Response, jsonify, send_file
 from app import app
 from app.config import (
     GEMINI_API_KEY,
@@ -31,6 +31,18 @@ def models():
             {"id": "gemini-3-flash-preview", "object": "model", "created": 1677610602, "owned_by": "google"}
         ]
     })
+
+@app.route('/gen-images/<filename>')
+def serve_gen_image(filename):
+    """提供生图结果（由 EdgeOne 反代到公网）"""
+    from app.image_store import get_image_path
+    from flask import make_response
+    filepath = get_image_path(filename)
+    if not filepath:
+        return jsonify({"error": "not found"}), 404
+    resp = make_response(send_file(filepath, mimetype="image/png"))
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
 
 async def async_chat_completions():
     data = request.json
