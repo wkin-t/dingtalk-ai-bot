@@ -205,8 +205,9 @@ async def _ask_lightweight_model(prompt: str) -> str:
         if AI_BACKEND == "openai":
             import litellm
             litellm.suppress_debug_info = True
+            from app.config import LITELLM_MODEL_FLASH as _flash_model
             response = await litellm.acompletion(
-                model="gpt-5.4-mini",
+                model=_flash_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=500,
@@ -519,7 +520,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
     """
     import json
     import re
-    from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM
+    from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM, LITELLM_MODEL_FLASH
     import litellm
     litellm.suppress_debug_info = True
 
@@ -568,7 +569,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
 
     try:
         kwargs = {
-            "model": "gpt-5.4-mini",
+            "model": LITELLM_MODEL_FLASH,
             "messages": [{"role": "user", "content": analysis_prompt}],
             "temperature": 0.1,
             "max_tokens": 300,
