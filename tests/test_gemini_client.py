@@ -191,13 +191,13 @@ class TestAnalyzeComplexity:
         from app.gemini_client import analyze_complexity_with_model
 
         mock_response = MagicMock()
-        mock_response.text = '{"model":"gemini-3-pro-preview","thinking_level":"high","need_search":false,"reason":"复杂数学"}'
+        mock_response.text = '{"model":"gemini-3.1-pro-preview","thinking_level":"high","need_search":false,"reason":"复杂数学"}'
 
         with patch("app.gemini_client.client") as mock_client:
             mock_client.models.generate_content.return_value = mock_response
             result = await analyze_complexity_with_model("证明黎曼猜想")
 
-        assert result["model"] == "gemini-3-pro-preview"
+        assert result["model"] == "gemini-3.1-pro-preview"
         assert result["thinking_level"] == "high"
 
     @pytest.mark.asyncio
