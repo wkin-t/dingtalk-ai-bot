@@ -33,6 +33,7 @@ from app.config import (
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
+from app.image_gen import generate_image
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
@@ -1052,6 +1053,94 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+
+        # ===== 生图分支 =====
+        need_image_gen = complexity.get("need_image_gen", False) if AI_BACKEND != "openclaw" else False
+        if need_image_gen:
+            params = complexity.get("image_gen_params", {})
+            image_prompt = params.get("prompt", content)
+            aspect_ratio = params.get("aspect_ratio", "1:1")
+            num_images = max(1, min(4, params.get("number_of_images", 1)))
+            print(f"🎨 [生图] prompt={image_prompt[:80]}, ratio={aspect_ratio}, n={num_images}, backend={AI_BACKEND}")
+
+            try:
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    "正在生成图片... 🎨",
+                    is_finalize=False,
+                    is_full=True,
+                    content_key="thinkingText",
+                )
+
+                images = await generate_image(
+                    image_prompt,
+                    backend=AI_BACKEND,
+                    aspect_ratio=aspect_ratio,
+                    number_of_images=num_images,
+                )
+
+                if not images:
+                    raise RuntimeError("生图 API 未返回任何图片")
+
+                # 上传第一张图片
+                media_id = await self.card_helper.upload_media(
+                    images[0],
+                    filetype="image",
+                    filename="image.png",
+                    mimetype="image/png",
+                )
+
+                if media_id:
+                    msg_param = DINGTALK_IMAGE_MSG_PARAM_TEMPLATE.replace("{mediaId}", media_id)
+                    if incoming_message.conversation_type == "2":
+                        sent = await self.card_helper.send_group_message(
+                            incoming_message.conversation_id,
+                            DINGTALK_IMAGE_MSG_KEY,
+                            msg_param,
+                        )
+                    else:
+                        sent = await self.card_helper.send_private_chat_message(
+                            incoming_message.conversation_id,
+                            DINGTALK_IMAGE_MSG_KEY,
+                            msg_param,
+                        )
+
+                    card_text = f"已为你生成 {len(images)} 张图片 ✨\n\n{image_prompt}"
+                    if not sent:
+                        card_text += "\n\n⚠️ 图片消息发送失败，请查看对话"
+                else:
+                    card_text = "⚠️ 图片上传失败，请稍后重试"
+
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    card_text,
+                    is_finalize=True,
+                    is_full=True,
+                )
+                print(f"✅ [生图] 完成，{len(images)} 张")
+
+            except RuntimeError as e:
+                error_msg = str(e)
+                print(f"⚠️ [生图] 业务错误: {error_msg}")
+                if "安全过滤" in error_msg:
+                    friendly = "图片生成被安全过滤器拒绝，请调整描述后重试"
+                elif "无法生成" in error_msg:
+                    friendly = "无法生成图片，请尝试其他描述"
+                else:
+                    friendly = f"图片生成失败：{error_msg}"
+                await self.card_helper.stream_update(out_track_id, friendly, is_finalize=True, is_full=True)
+
+            except Exception as e:
+                print(f"❌ [生图] 异常: {e}")
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    "图片生成失败，请稍后重试 🥲",
+                    is_finalize=True,
+                    is_full=True,
+                )
+
+            return  # 跳过正常 AI 流
+        # ===== 生图分支结束 =====
 
         # 预分析完成后，用 AI 生成的思考状态更新卡片
         if AI_BACKEND != "openclaw" and complexity.get("thinking_text"):
