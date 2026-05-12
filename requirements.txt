@@ -34,3 +34,5 @@ websockets>=12.0
 pycryptodome
 # LiteLLM 统一 LLM 客户端 (OpenAI 兼容后端)
 litellm==1.81.9
+# 腾讯云 COS SDK (生图存储)
+cos-python-sdk-v5

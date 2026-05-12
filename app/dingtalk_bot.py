@@ -35,7 +35,6 @@ from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
 from app.image_gen import generate_image
 from app.image_store import save_image
-from app.config import EXTERNAL_BASE_URL
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
@@ -1144,18 +1143,11 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 if not images:
                     raise RuntimeError("生图 API 未返回任何图片")
 
-                # 检查是否有公网 URL 配置
-                if not EXTERNAL_BASE_URL:
-                    raise RuntimeError("EXTERNAL_BASE_URL 未配置，无法展示图片")
-
-                # 保存图片到本地 + 生成公网 URL
+                # 上传图片到 COS + 生成公网 URL
                 image_urls = []
-                saved_files = []
                 for img_bytes in images:
-                    filename, url = save_image(img_bytes)
-                    saved_files.append(filename)
-                    if url:
-                        image_urls.append(url)
+                    _, url = save_image(img_bytes)
+                    image_urls.append(url)
 
                 # 卡片 markdown 展示图片
                 img_markdown = "\n".join(f"![图片{i+1}]({url})" for i, url in enumerate(image_urls))
@@ -1167,7 +1159,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     is_finalize=True,
                     is_full=True,
                 )
-                print(f"✅ [生图] 完成，{len(images)} 张，本地存储 {len(saved_files)} 个")
+                print(f"✅ [生图] 完成，{len(images)} 张已上传 COS")
 
             except RuntimeError as e:
                 error_msg = str(e)
