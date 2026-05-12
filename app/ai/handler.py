@@ -13,7 +13,7 @@ from app.config import (
     get_model_pricing
 )
 from app.memory import get_history, update_history
-from app.gemini_client import call_gemini_stream, analyze_complexity_with_model
+from app.gemini_client import analyze_complexity_with_model
 from app.ai.router import analyze_complexity_unified
 
 
@@ -185,24 +185,17 @@ class AIHandler:
         usage_info = None
 
         try:
-            # 根据后端选择调用不同的 API
-            if AI_BACKEND == "openclaw":
-                from app.openclaw_client import call_openclaw_stream
-                stream = call_openclaw_stream(
-                    messages,
-                    conversation_id=session_key,
-                    sender_id=user_id,
-                    sender_nick=sender_nick,
-                    model=target_model,
-                    image_data_list=image_data_list if image_data_list else None,
-                )
-            else:
-                stream = call_gemini_stream(
-                    messages,
-                    target_model=target_model,
-                    thinking_level=thinking_level,
-                    enable_search=need_search
-                )
+            from app.ai.backend import create_backend_stream
+            stream = create_backend_stream(
+                messages,
+                target_model=target_model,
+                thinking_level=thinking_level,
+                enable_search=need_search,
+                conversation_id=session_key,
+                sender_id=user_id,
+                sender_nick=sender_nick,
+                image_data_list=image_data_list if image_data_list else None,
+            )
 
             async for chunk in stream:
                 # 处理使用统计
