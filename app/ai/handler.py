@@ -273,7 +273,6 @@ class AIHandler:
 - 对话历史中包含用户昵称和时间戳，格式为 '[时间] 昵称: 消息'。
 - 引用用户发言时，可以提及其昵称和时间（如 '正如张三在 14:30 所说...'）。
 - 所有时间均为北京时间 (UTC+8)。
-- AI 回复可能带有来源标签 [Gem] 或 [Claw]，表示由不同 AI 助手生成。
 - 你是 {bot_name}，回复不需要添加来源标签。
 
 重点:
@@ -318,10 +317,10 @@ class AIHandler:
             if timestamp and msg["role"] == "user":
                 formatted_msg["content"] = f"[{timestamp}] {msg_content}"
             elif msg["role"] == "assistant" and msg.get("bot_id"):
-                # assistant 消息有 bot_id 时，加来源标签
+                # 历史消息标注 AI 来源（仅用于上下文区分，不作为输出格式）
                 msg_bot_id = msg["bot_id"]
-                bot_label = {"gemini": "Gem", "openclaw": "Claw"}.get(msg_bot_id, msg_bot_id)
-                formatted_msg["content"] = f"[{bot_label}] {msg_content}"
+                bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(msg_bot_id, msg_bot_id)
+                formatted_msg["content"] = f"[来自{bot_source}] {msg_content}"
             else:
                 formatted_msg["content"] = msg_content
 
