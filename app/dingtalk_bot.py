@@ -893,7 +893,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = current_time
 
-            print(f"✅ 流式响应结束，总长度: {len(full_response)}, thinking: {len(full_thinking)}")
+            print(f"✅ 流式响应结束，总长度: {len(full_response)}, thinking: {len(full_thinking)}, full_response前200字={full_response[:200]!r}")
 
             # 记录使用统计
             if USE_STATS and usage_info:
@@ -1069,7 +1069,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 "msgButtons": buttons,
                 "flowStatus": "3" 
             }
-            print(f"🔄 正在全量更新卡片: {update_data.keys()}")
+            print(f"🔄 正在全量更新卡片: keys={list(update_data.keys())}, msgContent长度={len(update_data['msgContent'])}, msgContent前200字={update_data['msgContent'][:200]!r}")
             
             success = await self.card_helper.update_card(out_track_id, update_data)
             
