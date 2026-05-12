@@ -32,7 +32,7 @@ from app.config import (
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
-from app.gemini_client import analyze_complexity_with_model
+from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 
@@ -346,6 +346,84 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
         "thinking_level": thinking_level,
         "reason": reason
     }
+
+async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
+    """
+    使用 LiteLLM (gpt-5.4-mini) 快速分析问题复杂度
+    用于 OpenAI 后端，替代 Gemini Flash Lite 预分析
+    """
+    import json
+    import re
+    from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM
+    import litellm
+    litellm.suppress_debug_info = True
+
+    analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
+
+问题: {content[:300]}
+有图片: {"是" if has_images else "否"}
+
+选择规则:
+1. model:
+   - "gemini-3-flash-preview": 日常问答、代码、一般分析 (默认)
+   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+
+2. thinking_level:
+   - "minimal": 简单问候如"你好"、"谢谢"
+   - "low": 普通问答、事实查询
+   - "medium": 需要一定推理、代码问题
+   - "high": 复杂分析、算法设计
+
+3. need_search:
+   - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
+   - false: 不需要联网（默认）
+
+重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
+
+只返回JSON:
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因"}}"""
+
+    try:
+        kwargs = {
+            "model": "gpt-5.4-mini",
+            "messages": [{"role": "user", "content": analysis_prompt}],
+            "temperature": 0.1,
+            "max_tokens": 150,
+            "timeout": 15,
+        }
+        if OPENAI_API_BASE:
+            kwargs["api_base"] = OPENAI_API_BASE
+        if OPENAI_API_KEY_CUSTOM:
+            kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
+
+        response = await litellm.acompletion(**kwargs)
+        result_text = response.choices[0].message.content or ""
+        print(f"📝 [LiteLLM预分析] 原始返回: {result_text[:200]}")
+
+        json_match = re.search(r'\{[^}]+\}', result_text)
+        if json_match:
+            result = json.loads(json_match.group())
+            if result.get("model") not in ["gemini-3-flash-preview", "gemini-3.1-pro-preview"]:
+                result["model"] = "gemini-3-flash-preview"
+            if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
+                result["thinking_level"] = "low"
+            if "need_search" not in result:
+                result["need_search"] = False
+            print(f"🤖 [LiteLLM预分析] 结果: {result}")
+            return result
+        else:
+            print(f"⚠️ [LiteLLM预分析] 无法提取 JSON: {result_text}")
+
+    except Exception as e:
+        print(f"⚠️ [LiteLLM预分析] 失败: {e}")
+
+    return {
+        "model": "gemini-3-flash-preview",
+        "thinking_level": "low",
+        "need_search": False,
+        "reason": "LiteLLM预分析失败，使用默认"
+    }
+
 
 class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
     def __init__(self):
@@ -737,7 +815,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         thinking_text = random.choice(self.thinking_phrases)
         
         card_data = {
-            "msgTitle": "Gemini AI",
+            "msgTitle": {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI"}.get(AI_BACKEND, "AI"),
             "thinkingText": thinking_text,
             "msgContent": "Thinking...", 
             "isError": "false",
@@ -768,16 +846,32 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             thinking_level = "default"
             need_search = False
             print(f"🎯 OpenClaw 模式: 由 Gateway 处理")
-        else:
-            # Gemini 模式: 智能路由分析
-            print(f"🔄 [路由] 开始智能路由分析...")
+        elif AI_BACKEND == "openai":
+            # OpenAI 模式: 使用 LiteLLM + gpt-5.4-mini 做预分析
+            print(f"🔄 [路由] OpenAI 模式，使用 GPT 预分析...")
             try:
-                complexity = await analyze_complexity_with_model(content, has_images)
+                complexity = await _analyze_with_litellm(content, has_images)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
-                import traceback
-                traceback.print_exc()
+                complexity = {
+                    "model": "gemini-3-flash-preview",
+                    "thinking_level": "low",
+                    "need_search": False,
+                    "reason": "路由异常，使用默认"
+                }
+            target_model = complexity.get("model", "gemini-3-flash-preview")
+            thinking_level = complexity.get("thinking_level", "low")
+            need_search = complexity.get("need_search", False)
+            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+        else:
+            # Gemini 模式: 使用 Gemini Flash Lite 做预分析
+            print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
+            try:
+                complexity = await _analyze_with_gemini(content, has_images)
+                print(f"🔄 [路由] 预分析返回: {complexity}")
+            except Exception as e:
+                print(f"❌ [路由] 预分析异常: {e}")
                 complexity = {
                     "model": "gemini-3-flash-preview",
                     "thinking_level": "low",
@@ -883,7 +977,6 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                     if is_first_chunk:
                         is_first_chunk = False
-                        print(f"🔍 [Stream Debug] 首次stream_update, display_content长度={len(display_content)}, 前100字={display_content[:100]!r}")
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = time.time()
                         continue
@@ -894,7 +987,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = current_time
 
-            print(f"✅ 流式响应结束，总长度: {len(full_response)}, thinking: {len(full_thinking)}, full_response前200字={full_response[:200]!r}")
+            print(f"✅ 流式响应结束，总长度: {len(full_response)}, thinking: {len(full_thinking)}")
 
             # 记录使用统计
             if USE_STATS and usage_info:
@@ -1065,7 +1158,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             )
             
             update_data = {
-                "msgTitle": "AI",
+                "msgTitle": {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI"}.get(AI_BACKEND, "AI"),
                 "thinkingText": "",
                 "msgContent": final_content,
                 "isError": "false",
@@ -1074,8 +1167,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 "flowStatus": "3",
                 "config": {"autoLayout": True}
             }
-            print(f"🔄 正在全量更新卡片: keys={list(update_data.keys())}, msgContent长度={len(update_data['msgContent'])}, msgContent前200字={update_data['msgContent'][:200]!r}")
-            
+            print(f"🔄 正在全量更新卡片: keys={list(update_data.keys())}")
+
             success = await self.card_helper.update_card(out_track_id, update_data)
             
             if not success:
