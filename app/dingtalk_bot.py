@@ -131,6 +131,11 @@ def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
     cleaned = (src[:start] + src[remove_end:]).strip()
     return cleaned, payload if isinstance(payload, dict) else None
 
+def _soul_filename(conversation_id: str) -> str:
+    """将 conversation_id 转为安全的文件名（替换 / 等路径分隔符）"""
+    return conversation_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
 def _load_soul(conversation_id: str) -> str:
     """
     加载群级 Soul 配置
@@ -138,7 +143,7 @@ def _load_soul(conversation_id: str) -> str:
     """
     import os
     soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
-    soul_file = os.path.join(soul_dir, f"{conversation_id}.md")
+    soul_file = os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.md")
     default_file = os.path.join(soul_dir, "default.md")
 
     target = soul_file if os.path.isfile(soul_file) else (default_file if os.path.isfile(default_file) else None)
@@ -161,7 +166,7 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
     import os
     soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
     os.makedirs(soul_dir, exist_ok=True)
-    soul_file = os.path.join(soul_dir, f"{conversation_id}.md")
+    soul_file = os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.md")
 
     parts = content.strip().split(None, 1)
     sub = parts[1].strip() if len(parts) > 1 else ""
