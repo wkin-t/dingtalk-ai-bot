@@ -1,4 +1,5 @@
 """LiteLLM 统一流式客户端"""
+import os
 import time
 import traceback
 from typing import Dict, Any, List, AsyncGenerator
@@ -8,6 +9,11 @@ from app.config import (
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
     LITELLM_MAX_RETRIES, OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM,
 )
+
+# LiteLLM 通过环境变量识别代理
+if LITELLM_PROXY:
+    os.environ.setdefault("HTTPS_PROXY", LITELLM_PROXY)
+    os.environ.setdefault("HTTP_PROXY", LITELLM_PROXY)
 
 EFFORT_MAPPING = {
     "minimal": None,
@@ -69,9 +75,6 @@ async def call_litellm_stream(
             "num_retries": LITELLM_MAX_RETRIES,
             "timeout": LITELLM_READ_TIMEOUT,
         }
-
-        if LITELLM_PROXY:
-            kwargs["api_base"] = OPENAI_API_BASE or None
 
         if OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
