@@ -1,0 +1,24 @@
+# 1Panel 管理的 DingTalk AI 机器人服务 (LiteLLM/OpenAI 兼容后端)
+# 代码位置: /opt/1panel/docker/compose/dingtalk-ai-bot/
+# 依赖: v2raya (由 1Panel 单独管理，提供 socks5://127.0.0.1:1080 代理)
+
+services:
+  dingtalk-ai-bot-openai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-ai-bot:openai
+    container_name: dingtalk-ai-bot-openai
+    restart: always
+    network_mode: "host"
+    environment:
+      - AI_BACKEND=openai
+      - FLASK_PORT=35000
+    env_file:
+      - .env.openai
+    volumes:
+      - ./data-openai:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
