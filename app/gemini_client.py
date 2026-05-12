@@ -83,10 +83,14 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
    - false: 不需要联网（默认）
 
+4. thinking_text:
+   - 一句简短有趣的思考状态（10字以内，带emoji），要和问题内容相关
+   - 例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
@@ -134,7 +138,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         "model": "gemini-3-flash-preview",
         "thinking_level": "low",
         "need_search": False,
-        "reason": "预分析失败，使用默认配置"
+        "reason": "预分析失败，使用默认配置",
+        "thinking_text": "正在思考 💭"
     }
 
 
