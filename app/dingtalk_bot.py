@@ -1092,6 +1092,11 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             typing_task = asyncio.create_task(_typing_loop())
 
         try:
+            # 记录完整 System Prompt（含 Soul）
+            sys_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
+            print(f"📋 [System Prompt] 群={group_info.get('name','?') if group_info else conversation_id}, 模型={target_model}, 消息数={len(messages)}")
+            print(f"📋 [System Prompt] 完整内容:\n{'-'*40}\n{sys_msg}\n{'-'*40}")
+
             # 统一后端入口
             from app.ai.backend import create_backend_stream
             stream = create_backend_stream(
