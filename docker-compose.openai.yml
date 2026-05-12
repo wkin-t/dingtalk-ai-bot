@@ -13,7 +13,7 @@ services:
     network_mode: "host"
     environment:
       - AI_BACKEND=openai
-      - FLASK_PORT=35000
+      - FLASK_PORT=35001
     env_file:
       - .env.openai
     volumes:
