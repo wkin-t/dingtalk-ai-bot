@@ -36,7 +36,7 @@ else:
     )
 
 
-async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-flash-lite-latest") -> dict:
+async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-3.1-flash-lite") -> dict:
     """
     使用 Gemini 模型快速分析问题复杂度
     返回推荐的模型、thinking level 和是否需要联网搜索
@@ -44,11 +44,11 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     Args:
         content: 用户消息内容
         has_images: 是否包含图片
-        analysis_model: 用于分析的模型 (默认 gemini-flash-lite-latest)
+        analysis_model: 用于分析的模型 (默认 gemini-3.1-flash-lite)
 
     Returns:
         {
-            "model": "gemini-3-flash-preview" or "gemini-3-pro-preview",
+            "model": "gemini-3-flash-preview" or "gemini-3.1-pro-preview",
             "thinking_level": "minimal" | "low" | "medium" | "high",
             "need_search": true | false,
             "reason": "分析原因"
@@ -71,7 +71,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 选择规则:
 1. model:
    - "gemini-3-flash-preview": 日常问答、代码、一般分析 (默认)
-   - "gemini-3-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
 
 2. thinking_level:
    - "minimal": 简单问候如"你好"、"谢谢"
@@ -113,7 +113,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         if json_match:
             result = json.loads(json_match.group())
             # 验证和修正字段
-            if result.get("model") not in ["gemini-3-flash-preview", "gemini-3-pro-preview"]:
+            if result.get("model") not in ["gemini-3-flash-preview", "gemini-3.1-pro-preview"]:
                 result["model"] = "gemini-3-flash-preview"
             if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
                 result["thinking_level"] = "low"

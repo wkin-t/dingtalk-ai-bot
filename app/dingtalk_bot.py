@@ -265,7 +265,7 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
 
     Returns:
         {
-            "model": "gemini-3-flash" or "gemini-3-pro-preview",
+            "model": "gemini-3-flash" or "gemini-3.1-pro-preview",
             "thinking_level": "minimal" | "low" | "medium" | "high",
             "reason": "分析原因"
         }
@@ -299,13 +299,13 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
 
     # 超复杂问题 → Pro + high
     if pro_count >= 2 or (pro_count >= 1 and complex_count >= 3):
-        model = "gemini-3-pro-preview"
+        model = "gemini-3.1-pro-preview"
         thinking_level = "high"
         reason = f"深度推理 (Pro关键词={pro_count}, 复杂={complex_count})"
 
     # 复杂问题 + 长文本 → Pro + high
     elif complex_count >= 4 and content_len > 300:
-        model = "gemini-3-pro-preview"
+        model = "gemini-3.1-pro-preview"
         thinking_level = "high"
         reason = f"复杂长文 (关键词={complex_count}, 长度={content_len})"
 
