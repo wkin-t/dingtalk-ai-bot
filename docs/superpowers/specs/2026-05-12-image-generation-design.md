@@ -17,37 +17,18 @@
 | 文字回复 | 生图 API + 模板文字（跳过正常 AI 流） |
 | 参数控制 | 从用户消息中解析（比例、数量） |
 | 错误处理 | 在卡片中发送错误提示文本 |
-| **图片展示** | **卡片内展示：模板图片插槽 + `card_media_id_param_map`** |
+| 图片展示 | V1：独立图片消息（`sampleImageMsg` + `upload_media`）；后续迭代卡片内展示 |
 | 架构方案 | 方案 A：预分析扩展 + 独立生图模块 |
 
-## 图片展示方案（关键变更）
+## 实验验证结果
 
-**不用独立图片消息**，而是复用现有 AI 卡片模板：
-
-1. **用户操作**：在钉钉开发者后台，给当前 AI 卡片模板添加一个图片组件/插槽（字段名如 `generatedImage`）
-2. **代码实现**：生图完成后，通过 `im_1_0` SDK 的 `UpdateInteractiveCard` API 同时更新文字和图片：
-
-```python
-# im_1_0 SDK 支持 card_media_id_param_map
-from alibabacloud_dingtalk.im_1_0 import models as im_models
-
-card_data = im_models.UpdateInteractiveCardRequestCardData(
-    card_param_map={
-        "msgContent": "已为你生成图片：一只在月光下奔跑的猫",
-        "msgTitle": "AI",
-        # ... 其他文字字段
-    },
-    card_media_id_param_map={
-        "generatedImage": media_id  # 图片插槽 = upload_media 返回的 media_id
-    }
-)
-```
-
-**SDK 差异说明**：
-- 当前 `card_1_0.UpdateCardRequestCardData` — 只有 `card_param_map`，**不支持** media
-- `im_1_0.UpdateInteractiveCardRequestCardData` — 有 `card_param_map` + `card_media_id_param_map`，**支持** media
-
-需要新增一个使用 `im_1_0` SDK 的卡片更新方法，专门用于带图片的更新。
+| 测试 | 结果 |
+|------|------|
+| Imagen 4 生图 | ✓ 返回 `generated_images[i].image.image_bytes`（PNG bytes，~1.3MB），耗时 ~10s，无 URL |
+| GPT-image-2 生图 | ✓ 返回 `b64_json`（PNG bytes，~2.2MB），耗时 ~88s，无 URL。需 OpenResty `proxy_read_timeout ≥ 180s` |
+| 钉钉 media upload | ✓ 返回 `media_id`（如 `@lALPD2DNFXykXUXNBADNBAA`），无 URL |
+| 卡片 markdown 展示 | ✗ `![img](url)` 需要 URL，`media_id` 无法直接使用 |
+| `card_media_id_param_map` | `im_1_0` SDK 支持，`card_1_0` SDK 不支持。需用户改卡片模板，后续迭代 |
 
 ## 架构
 
@@ -73,10 +54,8 @@ card_data = im_models.UpdateInteractiveCardRequestCardData(
               ▼           ▼
       upload_media()     卡片显示错误文本
       ↓ media_id
-      im_1_0 UpdateInteractiveCard
-      (card_param_map + card_media_id_param_map)
-      ↓
-      卡片内同时展示文字 + 图片
+      send_group_message(sampleImageMsg)
+      卡片更新模板文字
 ```
 
 ## 文件变更清单
