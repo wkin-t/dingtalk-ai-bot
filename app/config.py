@@ -240,6 +240,12 @@ DINGTALK_IMAGE_MSG_PARAM_TEMPLATE = os.getenv(
     "{\"photoURL\":\"@{mediaId}\"}",
 ).strip()
 
+# ===== 生图配置 =====
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "imagen-4.0-generate-001")
+OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
+DEFAULT_IMAGE_ASPECT_RATIO = os.environ.get("DEFAULT_IMAGE_ASPECT_RATIO", "1:1")
+DEFAULT_IMAGE_COUNT = max(1, min(4, _get_int("DEFAULT_IMAGE_COUNT", 1)))
+
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing
 GEMINI_PRICING = {
