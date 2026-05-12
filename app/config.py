@@ -246,6 +246,11 @@ OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_IMAGE_ASPECT_RATIO = os.environ.get("DEFAULT_IMAGE_ASPECT_RATIO", "1:1")
 DEFAULT_IMAGE_COUNT = max(1, min(4, _get_int("DEFAULT_IMAGE_COUNT", 1)))
 
+# 生图本地存储 + URL 展示
+GEN_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "images")
+IMAGE_TTL_HOURS = max(1, _get_int("IMAGE_TTL_HOURS", 24))
+EXTERNAL_BASE_URL = os.getenv("EXTERNAL_BASE_URL", "").rstrip("/")
+
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing
 GEMINI_PRICING = {
