@@ -62,6 +62,8 @@ from app.config import (
 )
 from app.dingtalk_bot import GeminiBotHandler
 from app.memory import DATA_DIR # 导入数据目录
+from app.image_store import start_cleanup_timer
+start_cleanup_timer()
 
 def start_dingtalk_stream_async():
     if not DINGTALK_CLIENT_ID or not DINGTALK_CLIENT_SECRET:
