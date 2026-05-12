@@ -36,7 +36,7 @@ else:
     )
 
 
-async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-3.1-flash-lite") -> dict:
+async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-3.1-flash-lite", soul_text: str = "") -> dict:
     """
     使用 Gemini 模型快速分析问题复杂度
     返回推荐的模型、thinking level 和是否需要联网搜索
@@ -63,6 +63,10 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     print(f"🔍 [预分析] has_images={has_images}")
 
     # 构造分析提示
+    soul_instruction = ""
+    if soul_text:
+        soul_instruction = f"你的性格设定: {soul_text[:100]}\n   请让思考短语符合这个性格。\n   "
+
     analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
 
 问题: {content[:300]}
@@ -84,8 +88,9 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - false: 不需要联网（默认）
 
 4. thinking_text:
-   - 一句简短有趣的思考状态（10字以内，带emoji），要和问题内容相关
-   - 例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+   - 一句简短搞怪的思考状态（10字以内，带emoji），要和问题内容相关
+   - {soul_instruction}例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+   - 要有趣、有个性、不重复
 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 

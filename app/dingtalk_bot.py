@@ -402,7 +402,7 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
         "reason": reason
     }
 
-async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
+async def _analyze_with_litellm(content: str, has_images: bool = False, soul_text: str = "") -> dict:
     """
     使用 LiteLLM (gpt-5.4-mini) 快速分析问题复杂度
     用于 OpenAI 后端，替代 Gemini Flash Lite 预分析
@@ -412,6 +412,10 @@ async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
     from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM
     import litellm
     litellm.suppress_debug_info = True
+
+    soul_instruction = ""
+    if soul_text:
+        soul_instruction = f"你的性格设定: {soul_text[:100]}\n   请让思考短语符合这个性格。\n   "
 
     analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
 
@@ -434,8 +438,9 @@ async def _analyze_with_litellm(content: str, has_images: bool = False) -> dict:
    - false: 不需要联网（默认）
 
 4. thinking_text:
-   - 一句简短有趣的思考状态（10字以内，带emoji），要和问题内容相关
-   - 例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+   - 一句简短搞怪的思考状态（10字以内，带emoji），要和问题内容相关
+   - {soul_instruction}例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+   - 要有趣、有个性、不重复
 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
@@ -894,6 +899,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         # 智能路由：根据 AI_BACKEND 选择后端
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
         has_images = bool(image_data_list)
+        soul_text = _load_soul(conversation_id)
 
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
@@ -905,7 +911,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # OpenAI 模式: 使用 LiteLLM + gpt-5.4-mini 做预分析
             print(f"🔄 [路由] OpenAI 模式，使用 GPT 预分析...")
             try:
-                complexity = await _analyze_with_litellm(content, has_images)
+                complexity = await _analyze_with_litellm(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
@@ -923,7 +929,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # Gemini 模式: 使用 Gemini Flash Lite 做预分析
             print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
             try:
-                complexity = await _analyze_with_gemini(content, has_images)
+                complexity = await _analyze_with_gemini(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
