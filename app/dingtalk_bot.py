@@ -1065,10 +1065,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             )
             
             update_data = {
-                "msgContent": final_content, 
+                "msgTitle": "AI",
+                "thinkingText": "",
+                "msgContent": final_content,
+                "isError": "false",
                 "statusText": status_text,
                 "msgButtons": buttons,
-                "flowStatus": "3" 
+                "flowStatus": "3",
+                "config": {"autoLayout": True}
             }
             print(f"🔄 正在全量更新卡片: keys={list(update_data.keys())}, msgContent长度={len(update_data['msgContent'])}, msgContent前200字={update_data['msgContent'][:200]!r}")
             
