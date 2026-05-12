@@ -131,6 +131,61 @@ def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
     cleaned = (src[:start] + src[remove_end:]).strip()
     return cleaned, payload if isinstance(payload, dict) else None
 
+def _load_soul(conversation_id: str) -> str:
+    """
+    加载群级 Soul 配置
+    优先读取 data/souls/{conversation_id}.md，不存在则读取 default.md
+    """
+    import os
+    soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
+    soul_file = os.path.join(soul_dir, f"{conversation_id}.md")
+    default_file = os.path.join(soul_dir, "default.md")
+
+    target = soul_file if os.path.isfile(soul_file) else (default_file if os.path.isfile(default_file) else None)
+    if not target:
+        return ""
+
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            print(f"🎭 [Soul] 加载: {os.path.basename(target)}")
+        return content
+    except Exception as e:
+        print(f"⚠️ [Soul] 读取失败: {e}")
+        return ""
+
+
+def _handle_soul_command(handler, incoming_message, conversation_id: str, content: str):
+    """处理 /soul 命令：查看、设置、重置群级 Soul"""
+    import os
+    soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
+    os.makedirs(soul_dir, exist_ok=True)
+    soul_file = os.path.join(soul_dir, f"{conversation_id}.md")
+
+    parts = content.strip().split(None, 1)
+    sub = parts[1].strip() if len(parts) > 1 else ""
+
+    if not sub:
+        # /soul — 查看当前 soul
+        current = _load_soul(conversation_id)
+        source = "群专属" if os.path.isfile(soul_file) else "默认"
+        msg = f"## 🎭 Soul 配置 ({source})\n\n{current or '(空)'}\n\n---\n设置方式: `/soul 你的个性设定内容`\n重置为默认: `/soul reset`"
+        handler.reply_markdown("Soul 配置", msg, incoming_message)
+    elif sub == "reset":
+        # /soul reset — 删除群专属，回退到 default
+        if os.path.isfile(soul_file):
+            os.remove(soul_file)
+            handler.reply_markdown("Soul", "🎭 已重置为默认 Soul", incoming_message)
+        else:
+            handler.reply_markdown("Soul", "当前使用的是默认 Soul，无需重置", incoming_message)
+    else:
+        # /soul 内容 — 写入群专属 soul
+        with open(soul_file, "w", encoding="utf-8") as f:
+            f.write(sub)
+        handler.reply_markdown("Soul", f"🎭 Soul 已更新:\n\n{sub}", incoming_message)
+
+
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
     # 代码相关
@@ -728,9 +783,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 注入群信息 (只注入群名)
             if group_info:
                 group_name = group_info.get('name', 'Unknown Group')
+                system_prompt += f"\n\n当前群聊: '{group_name}'"
 
-                group_context = f"\n\nGROUP CONTEXT:\nYou are currently in a DingTalk group chat named '{group_name}'.\n\nTASK:\nBased on the group name, briefly analyze what technical capabilities or domain knowledge you might need to assist this group effectively. Keep this analysis internal to guide your responses."
-                system_prompt += group_context
+            # 注入群级 Soul 配置
+            soul_content = _load_soul(conversation_id)
+            if soul_content:
+                system_prompt += f"\n\n{bot_name} 的个性设定:\n{soul_content}"
 
             messages = []
             messages.append({
@@ -1422,6 +1480,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     await self._show_stats(incoming_message, session_key, sender_id)
                 else:
                     self.reply_markdown("系统提示", "⚠️ 统计功能不可用", incoming_message)
+                return AckMessage.STATUS_OK, 'OK'
+
+            # Soul 管理命令
+            if content == "/soul" or content.startswith("/soul "):
+                if incoming_message.conversation_type != '2':
+                    self.reply_markdown("系统提示", "⚠️ Soul 配置仅支持群聊", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                _handle_soul_command(self, incoming_message, conversation_id, content)
                 return AckMessage.STATUS_OK, 'OK'
 
             # 消息缓冲逻辑 (使用 buffer_key 隔离不同用户)
