@@ -281,6 +281,20 @@ def _sanitize_evolution_input(text: str, max_len: int = 200) -> str:
     return text
 
 
+def _parse_evolution_json(text: str) -> dict | None:
+    """从模型返回文本中提取第一个有效 JSON。非贪婪匹配，避免多 JSON 块粘连。"""
+    import json as _json
+    import re as _re
+    # 非贪婪匹配第一个完整的 {...} 块（支持一层嵌套）
+    json_match = _re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, _re.DOTALL)
+    if not json_match:
+        return None
+    try:
+        return _json.loads(json_match.group())
+    except _json.JSONDecodeError:
+        return None
+
+
 async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: str):
     """
     让 AI 自主决定是否进化其 Soul。
@@ -339,18 +353,9 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
         print(f"🧬 [Soul进化] 模型返回为空: {conversation_id[:20]}...")
         return
 
-    # 解析 JSON
-    import json as _json
-    import re as _re
-    json_match = _re.search(r'\{.*\}', result, _re.DOTALL)
-    if not json_match:
+    parsed = _parse_evolution_json(result)
+    if parsed is None:
         print(f"🧬 [Soul进化] 无法解析 JSON: {result[:100]}")
-        return
-
-    try:
-        parsed = _json.loads(json_match.group())
-    except _json.JSONDecodeError as e:
-        print(f"🧬 [Soul进化] JSON 解析失败: {e}")
         return
 
     if not parsed.get("changed"):
@@ -1867,7 +1872,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     history = get_history(session_key)
                     await _maybe_evolve_soul(conversation_id, history, "")
                     new_soul = _load_soul(conversation_id)
-                    if new_soul != old_soul:
+                    if new_soul.strip() != old_soul.strip():
                         self.reply_markdown("Soul 进化完成", f"🧬 新 Soul:\n\n{new_soul}", incoming_message)
                     else:
                         self.reply_markdown("Soul", "🧬 模型认为当前 Soul 不需要改变", incoming_message)

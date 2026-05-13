@@ -392,3 +392,29 @@ class TestSoulEvolveSanitization:
         from app.dingtalk_bot import _sanitize_evolution_input
         normal = "今天天气不错，大家聊得很开心"
         assert _sanitize_evolution_input(normal) == normal
+
+
+# ─── Soul JSON 解析测试 ──────────────────────────────────────────
+
+class TestSoulJsonParsing:
+    def test_nested_json_parsed(self):
+        """含嵌套对象的 JSON 应正确解析"""
+        from app.dingtalk_bot import _parse_evolution_json
+        result = '一些文本\n{"changed": true, "new_soul": "含{花括号}的内容"}\n更多文本'
+        parsed = _parse_evolution_json(result)
+        assert parsed is not None
+        assert parsed["changed"] is True
+        assert "花括号" in parsed["new_soul"]
+
+    def test_multiple_json_blocks_takes_first(self):
+        """多个 JSON 块时取第一个"""
+        from app.dingtalk_bot import _parse_evolution_json
+        result = '{"changed": false}\n{"changed": true, "new_soul": "第二个"}'
+        parsed = _parse_evolution_json(result)
+        assert parsed is not None
+        assert parsed["changed"] is False
+
+    def test_no_json_returns_none(self):
+        """无 JSON 时返回 None"""
+        from app.dingtalk_bot import _parse_evolution_json
+        assert _parse_evolution_json("纯文本，没有 JSON") is None
