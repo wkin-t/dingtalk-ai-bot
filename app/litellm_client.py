@@ -55,7 +55,9 @@ async def call_litellm_stream(
         {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
     """
     import litellm
+    import warnings
     litellm.suppress_debug_info = True
+    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
     route_key = get_route_key(target_model)
     config = get_litellm_model_config(route_key)

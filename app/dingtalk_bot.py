@@ -526,7 +526,9 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
     import re
     from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM, LITELLM_MODEL_FLASH
     import litellm
+    import warnings
     litellm.suppress_debug_info = True
+    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
     soul_instruction = ""
     if soul_text:
