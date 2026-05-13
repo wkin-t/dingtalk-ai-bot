@@ -1069,6 +1069,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
         has_images = bool(image_data_list)
         soul_text = _load_soul(conversation_id)
+        complexity = {}  # 预分析结果，openclaw 模式留空
 
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
@@ -1190,17 +1191,22 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         # ===== 生图分支结束 =====
 
         # 预分析完成后，用 AI 生成的思考状态更新卡片
-        if AI_BACKEND != "openclaw" and complexity.get("thinking_text"):
+        dynamic_thinking_text = complexity.get("thinking_text", "").strip()
+        if not dynamic_thinking_text:
+            dynamic_thinking_text = "思考中... 🤔"
+        print(f"💡 [thinkingText] 预分析返回: '{dynamic_thinking_text}'")
+        if AI_BACKEND != "openclaw":
             try:
-                await self.card_helper.stream_update(
+                ok = await self.card_helper.stream_update(
                     out_track_id,
-                    complexity["thinking_text"],
+                    dynamic_thinking_text,
                     is_finalize=False,
                     is_full=True,
                     content_key="thinkingText",
                 )
-            except Exception:
-                pass
+                print(f"💡 [thinkingText] stream_update 结果: {ok}")
+            except Exception as e:
+                print(f"⚠️ [thinkingText] 更新失败: {e}")
 
         full_response = ""
         full_thinking = ""  # 真实的 thinking 内容
