@@ -1,0 +1,24 @@
+## 最近完成
+- Git 历史重写：移除个人邮箱/真实姓名，78 commits 改为 wkin-t 匿名（git filter-repo --mailmap）
+- /soul evolve 命令：支持手动触发 Soul 进化，进化后展示新内容
+- 对抗性代码审查（codex:rescue）：审查 35 个提交，发现 10 个问题，全部修复
+- 安全加固 5 个 commit：admin 权限、prompt injection 防护、JSON 解析升级、内存泄漏防护、字节截断
+- 双后端部署：Gemini(:35000) + OpenAI(:35001) 均已部署最新代码
+- 更新 memory（soul-system、security-audit）和 CLAUDE.md
+
+## 当前正在做
+- 无
+
+## 下一步应做
+- CLAUDE.md 变更待提交（补充了 /soul evolve 和 push 审计提醒）
+- GitHub Dependabot 报告 6 个漏洞（1 critical, 5 high），可能需要处理依赖升级
+- 对抗性审查改进计划文档 docs/superpowers/plans/2026-05-13-adversarial-review-fixes.md 待清理
+
+## 已知问题
+- Pyright 报告多个已有类型标注问题（conversation_id 可能为 None），非本次引入
+- 服务器 GitHub 访问不稳定，git 操作需走代理 http://127.0.0.1:1087
+
+## 环境状态
+- Git 分支: master
+- 未提交变更: CLAUDE.md (modified), docs/superpowers/plans/ (untracked)
+- 服务状态: dingtalk-ai-bot-gemini(:35000) 运行中, dingtalk-ai-bot-openai(:35001) 运行中

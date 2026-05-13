@@ -62,7 +62,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **双后端切换**: `AI_BACKEND` 环境变量选择 `gemini` 或 `openclaw`，OpenClaw 支持 HTTP SSE 和 WebSocket 两种传输。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
 - **智能路由**: 先用 `gemini-flash-lite` 分析问题复杂度，动态选择模型、thinking level 和是否启用 Google Search。
-- **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul log` 历史。
+- **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制 reset/set/evolve 权限（空=允许所有）。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。
 - **数据降级**: Redis+MySQL 优先，不可用时自动降级到本地文件 (`data/history/`)。
@@ -101,3 +101,4 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `socks5h://` → `socks5://` 转换: aiohttp 和 httpx 不支持 `socks5h` 前缀，需要转换
 - 文件操作显式指定 `encoding='utf-8'`
 - 不提交 `.env` 文件或密钥
+- Push 前审计：`git diff origin/master...HEAD | grep -iE 'key|secret|token|password'`，仓库是公有的
