@@ -295,7 +295,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
 {{"changed": false}}
 
 如果需要进化，返回:
-{{"changed": true, "reflection": "你对群氛围、人物关系、自己角色定位的内心独白（2-5 句话，真诚坦率）", "new_soul": "完整的新 Soul（5-10 行，第一人称，简洁有力，纯净的角色定义）"}}
+{{"changed": true, "new_soul": "完整的新 Soul。可以在开头用 1-2 句话写下你的近期感悟（帮助未来的你理解为何这样定义），然后是核心角色定义。5-12 行，第一人称，简洁有力。"}}
 
 进化要渐进——保留你认可的核心特质，只调整需要变化的部分。
 只返回 JSON，不要其他内容。"""
@@ -325,12 +325,11 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
         return
 
     new_soul = parsed.get("new_soul", "").strip()
-    reflection = parsed.get("reflection", "").strip()
     if not new_soul:
         print(f"🧬 [Soul进化] new_soul 为空，跳过")
         return
 
-    # 保存纯净的 Soul
+    # 保存 Soul（含感悟和角色定义）
     import os as _os
     soul_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "data", "souls")
     _os.makedirs(soul_dir, exist_ok=True)
@@ -345,10 +344,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
     beijing_tz = timezone(timedelta(hours=8))
     ts = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M")
     changelog_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.changelog.md")
-    entry = f"\n## {ts}\n\n"
-    if reflection:
-        entry += f"### 🧠 内心独白\n\n{reflection}\n\n"
-    entry += f"### 🎭 Soul 变更\n\n{new_soul}\n\n---\n"
+    entry = f"\n## {ts}\n\n### 🎭 Soul 变更\n\n{new_soul}\n\n---\n"
     with open(changelog_file, "a", encoding="utf-8") as f:
         f.write(entry)
     print(f"🧬 [Soul进化] changelog 已追加")
