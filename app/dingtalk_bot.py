@@ -179,7 +179,7 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
         # /soul — 查看当前 soul
         current = _load_soul(conversation_id)
         source = "群专属" if os.path.isfile(soul_file) else "默认"
-        msg = f"## 🎭 Soul 配置 ({source})\n\n{current or '(空)'}\n\n---\n查看进化历史: `/soul log`\n设置方式: `/soul 你的个性设定内容`\n重置为默认: `/soul reset`"
+        msg = f"## 🎭 Soul 配置 ({source})\n\n{current or '(空)'}\n\n---\n查看进化历史: `/soul log`\n主动进化: `/soul evolve`\n设置方式: `/soul 你的个性设定内容`\n重置为默认: `/soul reset`"
         handler.reply_markdown("Soul 配置", msg, incoming_message)
     elif sub == "log":
         # /soul log — 查看进化历史
@@ -1824,7 +1824,21 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 if incoming_message.conversation_type != '2':
                     self.reply_markdown("系统提示", "⚠️ Soul 配置仅支持群聊", incoming_message)
                     return AckMessage.STATUS_OK, 'OK'
-                _handle_soul_command(self, incoming_message, conversation_id, content)
+                # /soul evolve 需要异步处理
+                if content.strip() == "/soul evolve":
+                    self.reply_markdown("Soul", "🧬 正在进化中...", incoming_message)
+                    old_soul = _load_soul(conversation_id)
+                    # 重置冷却，加载历史
+                    _evolve_timestamps.pop(conversation_id, None)
+                    history = get_history(session_key)
+                    await _maybe_evolve_soul(conversation_id, history, "")
+                    new_soul = _load_soul(conversation_id)
+                    if new_soul != old_soul:
+                        self.reply_markdown("Soul 进化完成", f"🧬 新 Soul:\n\n{new_soul}", incoming_message)
+                    else:
+                        self.reply_markdown("Soul", "🧬 模型认为当前 Soul 不需要改变", incoming_message)
+                else:
+                    _handle_soul_command(self, incoming_message, conversation_id, content)
                 return AckMessage.STATUS_OK, 'OK'
 
             # 消息缓冲逻辑 (使用 buffer_key 隔离不同用户)
