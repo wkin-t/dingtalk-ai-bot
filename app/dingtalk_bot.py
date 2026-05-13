@@ -634,6 +634,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
         }
         if OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
+            kwargs["custom_llm_provider"] = "openai"
         if OPENAI_API_KEY_CUSTOM:
             kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
 

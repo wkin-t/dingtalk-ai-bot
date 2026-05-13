@@ -113,6 +113,7 @@ async def call_litellm_stream(
 
         if OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
+            kwargs["custom_llm_provider"] = "openai"
         if OPENAI_API_KEY_CUSTOM:
             kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
 
