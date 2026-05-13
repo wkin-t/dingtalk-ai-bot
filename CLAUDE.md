@@ -37,6 +37,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── dingtalk_bot.py      # 钉钉 Stream 消息处理
 │   ├── dingtalk_card.py     # 钉钉 AI 卡片管理 (创建/流式更新)
 │   ├── gemini_client.py     # Gemini API 流式调用 (google-genai SDK)
+│   ├── litellm_client.py    # LiteLLM 统一流式客户端 (OpenAI 兼容模型)
 │   ├── openclaw_client.py   # OpenClaw 客户端 (HTTP SSE + WebSocket)
 │   ├── openclaw_tools_client.py  # OpenClaw Tools Invoke (图片识别等)
 │   ├── reference.py         # 历史引用（智能触发）
@@ -61,6 +62,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **双后端切换**: `AI_BACKEND` 环境变量选择 `gemini` 或 `openclaw`，OpenClaw 支持 HTTP SSE 和 WebSocket 两种传输。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
 - **智能路由**: 先用 `gemini-flash-lite` 分析问题复杂度，动态选择模型、thinking level 和是否启用 Google Search。
+- **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul log` 历史。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。
 - **数据降级**: Redis+MySQL 优先，不可用时自动降级到本地文件 (`data/history/`)。
