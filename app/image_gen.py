@@ -32,23 +32,26 @@ def _map_openai_size(aspect_ratio: str) -> str:
     return mapping.get(aspect_ratio, "1024x1024")
 
 
+_openai_image_client = None
+
+
 def _get_openai_client():
-    """创建 OpenAI 客户端（复用代理配置）"""
-    from openai import OpenAI
-    import httpx
+    """创建或复用 OpenAI 客户端"""
+    global _openai_image_client
+    if _openai_image_client is None:
+        from openai import OpenAI
+        import httpx
 
-    proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
-    kwargs = {
-        "timeout": 300.0,
-    }
-    if proxy_url:
-        kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=300.0)
-    if OPENAI_API_BASE:
-        kwargs["base_url"] = OPENAI_API_BASE
-    if OPENAI_API_KEY_CUSTOM:
-        kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
-
-    return OpenAI(**kwargs)
+        proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
+        kwargs = {"timeout": 300.0}
+        if proxy_url:
+            kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=300.0)
+        if OPENAI_API_BASE:
+            kwargs["base_url"] = OPENAI_API_BASE
+        if OPENAI_API_KEY_CUSTOM:
+            kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
+        _openai_image_client = OpenAI(**kwargs)
+    return _openai_image_client
 
 
 async def _generate_with_gemini(

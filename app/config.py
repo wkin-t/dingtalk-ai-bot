@@ -255,6 +255,7 @@ COS_SECRET_KEY = os.getenv("COS_SECRET_KEY", "")
 COS_BUCKET = os.getenv("COS_BUCKET", "")           # 格式: bucket-appid
 COS_REGION = os.getenv("COS_REGION", "ap-guangzhou")
 COS_IMAGE_TTL_HOURS = max(1, _get_int("COS_IMAGE_TTL_HOURS", 24))  # COS 生命周期参考（控制台配置）
+COS_PRESIGN_EXPIRES = max(60, _get_int("COS_PRESIGN_EXPIRES", 600))
 
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing

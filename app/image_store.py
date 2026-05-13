@@ -4,12 +4,9 @@ import uuid
 
 from qcloud_cos import CosConfig, CosS3Client
 
-from app.config import COS_SECRET_ID, COS_SECRET_KEY, COS_BUCKET, COS_REGION
+from app.config import COS_SECRET_ID, COS_SECRET_KEY, COS_BUCKET, COS_REGION, COS_PRESIGN_EXPIRES
 
 _client = None
-
-# 预签名 URL 有效期（秒），略大于生命周期 TTL 避免卡片渲染时过期
-_PRESIGN_EXPIRES = 600
 
 
 def _get_client() -> CosS3Client:
@@ -40,6 +37,6 @@ def save_image(image_bytes: bytes, ext: str = ".png") -> tuple[str, str]:
         Method="GET",
         Bucket=COS_BUCKET,
         Key=key,
-        Expired=_PRESIGN_EXPIRES,
+        Expired=COS_PRESIGN_EXPIRES,
     )
     return key, url
