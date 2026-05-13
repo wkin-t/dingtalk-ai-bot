@@ -165,11 +165,12 @@ def _load_soul(conversation_id: str) -> str:
 
 
 def _handle_soul_command(handler, incoming_message, conversation_id: str, content: str):
-    """处理 /soul 命令：查看、设置、重置群级 Soul"""
+    """处理 /soul 命令：查看、设置、重置、历史群级 Soul"""
     import os
     soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
     os.makedirs(soul_dir, exist_ok=True)
     soul_file = os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.md")
+    changelog_file = os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.changelog.md")
 
     parts = content.strip().split(None, 1)
     sub = parts[1].strip() if len(parts) > 1 else ""
@@ -178,8 +179,19 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
         # /soul — 查看当前 soul
         current = _load_soul(conversation_id)
         source = "群专属" if os.path.isfile(soul_file) else "默认"
-        msg = f"## 🎭 Soul 配置 ({source})\n\n{current or '(空)'}\n\n---\n设置方式: `/soul 你的个性设定内容`\n重置为默认: `/soul reset`"
+        msg = f"## 🎭 Soul 配置 ({source})\n\n{current or '(空)'}\n\n---\n查看进化历史: `/soul log`\n设置方式: `/soul 你的个性设定内容`\n重置为默认: `/soul reset`"
         handler.reply_markdown("Soul 配置", msg, incoming_message)
+    elif sub == "log":
+        # /soul log — 查看进化历史
+        if os.path.isfile(changelog_file):
+            with open(changelog_file, "r", encoding="utf-8") as f:
+                log = f.read().strip()
+            # 钉钉卡片有长度限制，截取最近部分
+            if len(log) > 3000:
+                log = "*(仅显示最近记录)*\n\n" + log[-3000:]
+            handler.reply_markdown("Soul 进化史", log, incoming_message)
+        else:
+            handler.reply_markdown("Soul 进化史", "暂无进化记录", incoming_message)
     elif sub == "reset":
         # /soul reset — 删除群专属，回退到 default
         if os.path.isfile(soul_file):
@@ -280,7 +292,15 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
 - 你当前的 Soul 是否还适合这个群？有没有可以微调的地方？
 
 如果不需要改变，只回复: NO_CHANGE
-如果需要进化，输出完整的新 Soul（5-10 行，第一人称，简洁有力）。
+
+如果需要进化，严格按以下格式输出（两个部分用 --- 分隔）:
+
+【反思】
+你对群氛围、人物关系、自己角色定位的内心独白（2-5 句话，真诚坦率）
+
+---
+【新Soul】
+完整的新 Soul（5-10 行，第一人称，简洁有力，纯净的角色定义，不带任何元分析或标题标记）
 
 进化要渐进——保留你认可的核心特质，只调整需要变化的部分。"""
 
@@ -290,15 +310,48 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
         print(f"🧬 [Soul进化] 保持不变: {conversation_id[:20]}...")
         return
 
-    # 保存进化后的 Soul
+    # 解析：分离反思和新 Soul
+    import re as _re
+    reflection = ""
+    new_soul = result.strip()
+
+    ref_match = _re.search(r'【反思】\s*(.*?)(?=【新Soul】|---)', result, _re.DOTALL)
+    soul_match = _re.search(r'【新Soul】\s*(.*)', result, _re.DOTALL)
+
+    if soul_match:
+        new_soul = soul_match.group(1).strip()
+        if ref_match:
+            reflection = ref_match.group(1).strip()
+    else:
+        # 兼容旧格式：尝试用 --- 分隔
+        parts = result.strip().split("---", 1)
+        if len(parts) == 2:
+            new_soul = parts[1].strip()
+            reflection = parts[0].strip()
+
+    # 保存纯净的 Soul
     import os as _os
     soul_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "data", "souls")
     _os.makedirs(soul_dir, exist_ok=True)
     soul_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.md")
     with open(soul_file, "w", encoding="utf-8") as f:
-        f.write(result.strip())
+        f.write(new_soul)
     print(f"🧬 [Soul进化] 已更新: {conversation_id[:20]}...")
-    print(f"🧬 [Soul进化] 新内容: {result.strip()[:100]}")
+    print(f"🧬 [Soul进化] 新内容: {new_soul[:100]}")
+
+    # 追加 changelog
+    if reflection or new_soul:
+        from datetime import datetime, timezone, timedelta
+        beijing_tz = timezone(timedelta(hours=8))
+        ts = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M")
+        changelog_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.changelog.md")
+        entry = f"\n## {ts}\n\n"
+        if reflection:
+            entry += f"### 🧠 内心独白\n\n{reflection}\n\n"
+        entry += f"### 🎭 Soul 变更\n\n{new_soul}\n\n---\n"
+        with open(changelog_file, "a", encoding="utf-8") as f:
+            f.write(entry)
+        print(f"🧬 [Soul进化] changelog 已追加")
 
 
 # 复杂度关键词
