@@ -418,3 +418,72 @@ class TestSoulJsonParsing:
         """无 JSON 时返回 None"""
         from app.dingtalk_bot import _parse_evolution_json
         assert _parse_evolution_json("纯文本，没有 JSON") is None
+
+
+# ─── 内存与文件管理测试 ──────────────────────────────────────────
+
+class TestEvolveTimestampsCleanup:
+    def test_stale_entries_cleaned(self):
+        """超过 24h 的 cooldown 条目应被清理"""
+        from app.dingtalk_bot import _evolve_timestamps, _cleanup_evolve_timestamps
+        import time
+        old_val = _evolve_timestamps.copy()
+        _evolve_timestamps.clear()
+        try:
+            _evolve_timestamps["old_cid"] = time.time() - 100000  # 28h 前
+            _evolve_timestamps["new_cid"] = time.time() - 100     # 2 分钟前
+            # 强制执行清理（绕过 interval 检查）
+            import app.dingtalk_bot as _mod
+            _mod._evolve_last_cleanup = 0
+            _cleanup_evolve_timestamps()
+            assert "old_cid" not in _evolve_timestamps
+            assert "new_cid" in _evolve_timestamps
+        finally:
+            _evolve_timestamps.clear()
+            _evolve_timestamps.update(old_val)
+
+    def test_max_entries_enforced(self):
+        """超过上限时清理最旧的条目"""
+        from app.dingtalk_bot import _evolve_timestamps, _cleanup_evolve_timestamps
+        import app.dingtalk_bot as _mod
+        old_val = _evolve_timestamps.copy()
+        _evolve_timestamps.clear()
+        try:
+            import time
+            for i in range(510):
+                _evolve_timestamps[f"cid_{i}"] = time.time() - i
+            _mod._evolve_last_cleanup = 0
+            _cleanup_evolve_timestamps(max_entries=500)
+            assert len(_evolve_timestamps) <= 500
+        finally:
+            _evolve_timestamps.clear()
+            _evolve_timestamps.update(old_val)
+
+
+class TestChangelogSize:
+    def test_changelog_truncated(self):
+        """changelog 超过上限时截断"""
+        import tempfile, os
+        from app.dingtalk_bot import _trim_changelog
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write("## 旧记录\n\n" + "x" * 60000)
+            f.flush()
+            path = f.name
+        _trim_changelog(path, max_bytes=50000)
+        size = os.path.getsize(path)
+        os.unlink(path)
+        assert size <= 50200  # 允许截断标记的额外开销
+
+    def test_small_changelog_untouched(self):
+        """小文件不做截断"""
+        import tempfile, os
+        from app.dingtalk_bot import _trim_changelog
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write("## 小文件\n\n内容不多")
+            f.flush()
+            path = f.name
+        orig_size = os.path.getsize(path)
+        _trim_changelog(path, max_bytes=50000)
+        new_size = os.path.getsize(path)
+        os.unlink(path)
+        assert orig_size == new_size

@@ -229,6 +229,52 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
 # ---------------------------------------------------------------------------
 _evolve_timestamps: dict[str, float] = {}
 EVOLVE_MIN_INTERVAL = 1800  # 同一群至少间隔 30 分钟才进化一次
+_EVOLVE_CLEANUP_INTERVAL = 3600   # 每小时清理一次
+_evolve_last_cleanup: float = 0.0
+
+
+def _cleanup_evolve_timestamps(max_entries: int = 500, max_age: float = 86400):
+    """清理过期的 cooldown 条目，防止内存泄漏。"""
+    global _evolve_last_cleanup
+    now = time.time()
+    if now - _evolve_last_cleanup < _EVOLVE_CLEANUP_INTERVAL:
+        return
+    _evolve_last_cleanup = now
+    # 清理超过 24h 的条目
+    stale = [k for k, v in _evolve_timestamps.items() if now - v > max_age]
+    for k in stale:
+        del _evolve_timestamps[k]
+    # 如仍超过上限，删除最旧的
+    if len(_evolve_timestamps) > max_entries:
+        sorted_keys = sorted(_evolve_timestamps, key=_evolve_timestamps.get)
+        for k in sorted_keys[:len(_evolve_timestamps) - max_entries]:
+            del _evolve_timestamps[k]
+
+
+_CHANGELOG_MAX_BYTES = 50000  # 50KB
+
+
+def _trim_changelog(filepath: str, max_bytes: int = _CHANGELOG_MAX_BYTES):
+    """如果 changelog 文件超过 max_bytes，截断保留最近部分。"""
+    try:
+        import os as _os
+        if not _os.path.isfile(filepath):
+            return
+        size = _os.path.getsize(filepath)
+        if size <= max_bytes:
+            return
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        # 保留最后 max_bytes 的内容，从 ## 标题对齐
+        truncated = content[-max_bytes:]
+        header_pos = truncated.find("\n## ")
+        if header_pos >= 0:
+            truncated = truncated[header_pos + 1:]
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(f"*(旧记录已清理，仅保留最近部分)*\n\n{truncated}")
+        print(f"🧬 [Soul进化] changelog 已截断: {filepath}")
+    except Exception as e:
+        print(f"⚠️ [Soul进化] changelog 截断失败: {e}")
 
 
 async def _ask_lightweight_model(prompt: str) -> str:
@@ -301,6 +347,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
     回顾最近对话，反思性格设定是否需要调整。
     渐进进化：保留核心特质，微调风格。
     """
+    _cleanup_evolve_timestamps()
     now = time.time()
     last = _evolve_timestamps.get(conversation_id, 0)
     if now - last < EVOLVE_MIN_INTERVAL:
@@ -386,6 +433,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
     with open(changelog_file, "a", encoding="utf-8") as f:
         f.write(entry)
     print(f"🧬 [Soul进化] changelog 已追加")
+    _trim_changelog(changelog_file)
 
 
 # 复杂度关键词
