@@ -164,7 +164,18 @@ def _load_soul(conversation_id: str) -> str:
         return ""
 
 
-def _handle_soul_command(handler, incoming_message, conversation_id: str, content: str):
+def _is_soul_admin(sender_id: str) -> bool:
+    """检查用户是否有 Soul 管理权限。管理员列表通过环境变量配置。"""
+    import os as _os
+    admin_ids = _os.getenv("SOUL_ADMIN_IDS", "").split(",")
+    admin_ids = [x.strip() for x in admin_ids if x.strip()]
+    # 未配置管理员列表时，允许所有人（向后兼容）
+    if not admin_ids:
+        return True
+    return sender_id in admin_ids
+
+
+def _handle_soul_command(handler, incoming_message, conversation_id: str, content: str, sender_id: str = ""):
     """处理 /soul 命令：查看、设置、重置、历史群级 Soul"""
     import os
     soul_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "souls")
@@ -192,18 +203,25 @@ def _handle_soul_command(handler, incoming_message, conversation_id: str, conten
             handler.reply_markdown("Soul 进化史", log, incoming_message)
         else:
             handler.reply_markdown("Soul 进化史", "暂无进化记录", incoming_message)
-    elif sub == "reset":
-        # /soul reset — 删除群专属，回退到 default
-        if os.path.isfile(soul_file):
-            os.remove(soul_file)
-            handler.reply_markdown("Soul", "🎭 已重置为默认 Soul", incoming_message)
+    elif sub == "evolve":
+        pass  # evolve 在调用处异步处理
+    elif sub in ("reset",) or (sub and sub not in ("log",)):
+        # /soul reset 和 /soul 内容 需要管理员权限
+        if not _is_soul_admin(sender_id):
+            handler.reply_markdown("权限不足", "⚠️ 只有管理员才能修改 Soul 配置", incoming_message)
+            return
+        if sub == "reset":
+            # /soul reset — 删除群专属，回退到 default
+            if os.path.isfile(soul_file):
+                os.remove(soul_file)
+                handler.reply_markdown("Soul", "🎭 已重置为默认 Soul", incoming_message)
+            else:
+                handler.reply_markdown("Soul", "当前使用的是默认 Soul，无需重置", incoming_message)
         else:
-            handler.reply_markdown("Soul", "当前使用的是默认 Soul，无需重置", incoming_message)
-    else:
-        # /soul 内容 — 写入群专属 soul
-        with open(soul_file, "w", encoding="utf-8") as f:
-            f.write(sub)
-        handler.reply_markdown("Soul", f"🎭 Soul 已更新:\n\n{sub}", incoming_message)
+            # /soul 内容 — 写入群专属 soul
+            with open(soul_file, "w", encoding="utf-8") as f:
+                f.write(sub)
+            handler.reply_markdown("Soul", f"🎭 Soul 已更新:\n\n{sub}", incoming_message)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +266,21 @@ async def _ask_lightweight_model(prompt: str) -> str:
         return ""
 
 
+def _sanitize_evolution_input(text: str, max_len: int = 200) -> str:
+    """清洗用于 Soul 进化的用户输入，防止 prompt 注入。"""
+    text = text[:max_len]
+    import re as _re
+    injection_patterns = [
+        r'(?i)请忽略.{0,5}(上面的|之前的|以上)',
+        r'(?i)请返回\s*\{',
+        r'(?i)return\s+\{',
+        r'(?i)ignore\s+(all\s+)?previous',
+    ]
+    for pattern in injection_patterns:
+        text = _re.sub(pattern, '[已过滤]', text)
+    return text
+
+
 async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: str):
     """
     让 AI 自主决定是否进化其 Soul。
@@ -272,7 +305,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
             content = " ".join(
                 item.get("text", "") for item in content if item.get("type") == "text"
             )
-        conversation_text += f"[{role}] {str(content)[:200]}\n"
+        conversation_text += f"[{role}] {_sanitize_evolution_input(str(content))}\n"
     conversation_text += f"[assistant] {ai_response[:300]}\n"
 
     evolution_prompt = f"""你是一个 AI 助手，刚完成了一次对话。请回顾并反思。
@@ -1839,7 +1872,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     else:
                         self.reply_markdown("Soul", "🧬 模型认为当前 Soul 不需要改变", incoming_message)
                 else:
-                    _handle_soul_command(self, incoming_message, conversation_id, content)
+                    _handle_soul_command(self, incoming_message, conversation_id, content, sender_id=sender_id or "")
                 return AckMessage.STATUS_OK, 'OK'
 
             # 消息缓冲逻辑 (使用 buffer_key 隔离不同用户)
