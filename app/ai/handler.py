@@ -299,7 +299,11 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 # 历史消息标注 AI 来源（仅用于上下文区分，不作为输出格式）
                 msg_bot_id = msg["bot_id"]
                 bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(msg_bot_id, msg_bot_id)
-                formatted_msg["content"] = f"[来自{bot_source}] {msg_content}"
+                tag = f"[来自{bot_source}]"
+                if not msg_content.startswith(tag):
+                    formatted_msg["content"] = f"{tag} {msg_content}"
+                else:
+                    formatted_msg["content"] = msg_content
             else:
                 formatted_msg["content"] = msg_content
 

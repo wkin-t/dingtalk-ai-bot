@@ -394,3 +394,35 @@ async def call_gemini_stream(
         error_msg = str(e)
         print(f"❌ Gemini API 错误: {error_msg}")
         yield {"error": f"Gemini API Error: {error_msg}"}
+
+
+async def google_search(query: str) -> Optional[str]:
+    """
+    用 Gemini Flash + Google Search grounding 做实时搜索。
+    返回搜索摘要文本，供其他后端（如 OpenAI/LiteLLM）注入 prompt。
+
+    Returns:
+        搜索结果文本，搜索失败时返回 None
+    """
+    loop = asyncio.get_running_loop()
+
+    def _search():
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite",
+            contents=f"请搜索以下问题并给出简洁的事实性回答，包含关键信息来源：\n\n{query}",
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                max_output_tokens=2048,
+            ),
+        )
+        return response
+
+    try:
+        response = await loop.run_in_executor(None, _search)
+        if response.text:
+            print(f"🔍 [Google Search] 搜索完成: {query[:50]}...")
+            return response.text
+        return None
+    except Exception as e:
+        print(f"⚠️ [Google Search] 搜索失败: {e}")
+        return None

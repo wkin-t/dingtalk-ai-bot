@@ -67,6 +67,38 @@ async def call_litellm_stream(
     input_tokens = 0
     output_tokens = 0
 
+    # 如果需要搜索，用 Gemini Google Search grounding 获取结果后注入消息
+    if enable_search:
+        try:
+            from app.gemini_client import google_search
+            # 从最后一条用户消息提取搜索 query
+            search_query = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        search_query = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
+                    else:
+                        search_query = str(content)
+                    break
+
+            if search_query:
+                search_result = await google_search(search_query)
+                if search_result:
+                    search_context = f"\n\n## 实时搜索结果（来自 Google Search）\n{search_result}\n\n请基于以上搜索结果回答用户问题。如果搜索结果与你的训练数据冲突，优先使用搜索结果。"
+                    # 注入到 system 消息或第一条消息
+                    injected = False
+                    for msg in messages:
+                        if msg.get("role") == "system":
+                            msg["content"] = msg.get("content", "") + search_context
+                            injected = True
+                            break
+                    if not injected:
+                        messages = [{"role": "system", "content": f"你是一个智能助手。{search_context}"}] + messages
+                    print(f"🔍 [LiteLLM] 已注入 Google Search 结果到上下文")
+        except Exception as e:
+            print(f"⚠️ [LiteLLM] 搜索注入失败，继续无搜索模式: {e}")
+
     try:
         kwargs = {
             "model": model,
@@ -85,9 +117,6 @@ async def call_litellm_stream(
         effort = EFFORT_MAPPING.get(thinking_level)
         if config["supports_reasoning"] and effort is not None:
             kwargs["reasoning_effort"] = effort
-
-        if config["supports_search"] and enable_search:
-            kwargs["tools"] = [{"googleSearch": {}}]
 
         if not config["supports_vision"]:
             kwargs["messages"] = _strip_images(messages)
