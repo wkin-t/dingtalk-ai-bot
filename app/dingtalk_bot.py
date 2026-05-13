@@ -265,8 +265,9 @@ def _trim_changelog(filepath: str, max_bytes: int = _CHANGELOG_MAX_BYTES):
             return
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
-        # 保留最后 max_bytes 的内容，从 ## 标题对齐
-        truncated = content[-max_bytes:]
+        # 按字节截断，避免中文/emoji 超出预期大小
+        encoded = content.encode("utf-8")
+        truncated = encoded[-max_bytes:].decode("utf-8", errors="ignore")
         header_pos = truncated.find("\n## ")
         if header_pos >= 0:
             truncated = truncated[header_pos + 1:]
@@ -328,17 +329,22 @@ def _sanitize_evolution_input(text: str, max_len: int = 200) -> str:
 
 
 def _parse_evolution_json(text: str) -> dict | None:
-    """从模型返回文本中提取第一个有效 JSON。非贪婪匹配，避免多 JSON 块粘连。"""
+    """从模型返回文本中提取第一个有效 JSON。逐位置扫描，支持任意嵌套。"""
     import json as _json
-    import re as _re
-    # 非贪婪匹配第一个完整的 {...} 块（支持一层嵌套）
-    json_match = _re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, _re.DOTALL)
-    if not json_match:
-        return None
-    try:
-        return _json.loads(json_match.group())
-    except _json.JSONDecodeError:
-        return None
+    decoder = _json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        brace = text.find("{", idx)
+        if brace < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, brace)
+            if isinstance(obj, dict):
+                return obj
+        except _json.JSONDecodeError:
+            pass
+        idx = brace + 1
+    return None
 
 
 async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: str):
@@ -1913,6 +1919,9 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     return AckMessage.STATUS_OK, 'OK'
                 # /soul evolve 需要异步处理
                 if content.strip() == "/soul evolve":
+                    if not _is_soul_admin(sender_id or ""):
+                        self.reply_markdown("Soul", "⚠️ 仅管理员可触发手动进化", incoming_message)
+                        return AckMessage.STATUS_OK, 'OK'
                     self.reply_markdown("Soul", "🧬 正在进化中...", incoming_message)
                     old_soul = _load_soul(conversation_id)
                     # 重置冷却，加载历史
