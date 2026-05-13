@@ -40,6 +40,6 @@ def save_image(image_bytes: bytes, ext: str = ".png") -> tuple[str, str]:
         Method="GET",
         Bucket=COS_BUCKET,
         Key=key,
-        Expires=_PRESIGN_EXPIRES,
+        Expired=_PRESIGN_EXPIRES,
     )
     return key, url

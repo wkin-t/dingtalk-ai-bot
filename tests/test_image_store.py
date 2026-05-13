@@ -29,7 +29,7 @@ def test_save_image_returns_key_and_presigned_url(cos_env):
         assert url == "https://cos.example.com/signed?token=abc"
         mock_instance.put_object.assert_called_once()
         mock_instance.get_presigned_url.assert_called_once_with(
-            Method="GET", Bucket="test-bucket-1234567890", Key=key, Expires=600
+            Method="GET", Bucket="test-bucket-1234567890", Key=key, Expired=600
         )
 
 
