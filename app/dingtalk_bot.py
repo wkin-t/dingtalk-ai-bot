@@ -291,43 +291,44 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
 - 你对群里的人和对话氛围有什么新的感受？
 - 你当前的 Soul 是否还适合这个群？有没有可以微调的地方？
 
-如果不需要改变，只回复: NO_CHANGE
+如果不需要改变，返回:
+{{"changed": false}}
 
-如果需要进化，严格按以下格式输出（两个部分用 --- 分隔）:
+如果需要进化，返回:
+{{"changed": true, "reflection": "你对群氛围、人物关系、自己角色定位的内心独白（2-5 句话，真诚坦率）", "new_soul": "完整的新 Soul（5-10 行，第一人称，简洁有力，纯净的角色定义）"}}
 
-【反思】
-你对群氛围、人物关系、自己角色定位的内心独白（2-5 句话，真诚坦率）
-
----
-【新Soul】
-完整的新 Soul（5-10 行，第一人称，简洁有力，纯净的角色定义，不带任何元分析或标题标记）
-
-进化要渐进——保留你认可的核心特质，只调整需要变化的部分。"""
+进化要渐进——保留你认可的核心特质，只调整需要变化的部分。
+只返回 JSON，不要其他内容。"""
 
     result = await _ask_lightweight_model(evolution_prompt)
 
-    if not result.strip() or result.strip() == "NO_CHANGE":
+    if not result.strip():
+        print(f"🧬 [Soul进化] 模型返回为空: {conversation_id[:20]}...")
+        return
+
+    # 解析 JSON
+    import json as _json
+    import re as _re
+    json_match = _re.search(r'\{.*\}', result, _re.DOTALL)
+    if not json_match:
+        print(f"🧬 [Soul进化] 无法解析 JSON: {result[:100]}")
+        return
+
+    try:
+        parsed = _json.loads(json_match.group())
+    except _json.JSONDecodeError as e:
+        print(f"🧬 [Soul进化] JSON 解析失败: {e}")
+        return
+
+    if not parsed.get("changed"):
         print(f"🧬 [Soul进化] 保持不变: {conversation_id[:20]}...")
         return
 
-    # 解析：分离反思和新 Soul
-    import re as _re
-    reflection = ""
-    new_soul = result.strip()
-
-    ref_match = _re.search(r'【反思】\s*(.*?)(?=【新Soul】|---)', result, _re.DOTALL)
-    soul_match = _re.search(r'【新Soul】\s*(.*)', result, _re.DOTALL)
-
-    if soul_match:
-        new_soul = soul_match.group(1).strip()
-        if ref_match:
-            reflection = ref_match.group(1).strip()
-    else:
-        # 兼容旧格式：尝试用 --- 分隔
-        parts = result.strip().split("---", 1)
-        if len(parts) == 2:
-            new_soul = parts[1].strip()
-            reflection = parts[0].strip()
+    new_soul = parsed.get("new_soul", "").strip()
+    reflection = parsed.get("reflection", "").strip()
+    if not new_soul:
+        print(f"🧬 [Soul进化] new_soul 为空，跳过")
+        return
 
     # 保存纯净的 Soul
     import os as _os
@@ -340,18 +341,17 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
     print(f"🧬 [Soul进化] 新内容: {new_soul[:100]}")
 
     # 追加 changelog
-    if reflection or new_soul:
-        from datetime import datetime, timezone, timedelta
-        beijing_tz = timezone(timedelta(hours=8))
-        ts = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M")
-        changelog_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.changelog.md")
-        entry = f"\n## {ts}\n\n"
-        if reflection:
-            entry += f"### 🧠 内心独白\n\n{reflection}\n\n"
-        entry += f"### 🎭 Soul 变更\n\n{new_soul}\n\n---\n"
-        with open(changelog_file, "a", encoding="utf-8") as f:
-            f.write(entry)
-        print(f"🧬 [Soul进化] changelog 已追加")
+    from datetime import datetime, timezone, timedelta
+    beijing_tz = timezone(timedelta(hours=8))
+    ts = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M")
+    changelog_file = _os.path.join(soul_dir, f"{_soul_filename(conversation_id)}.changelog.md")
+    entry = f"\n## {ts}\n\n"
+    if reflection:
+        entry += f"### 🧠 内心独白\n\n{reflection}\n\n"
+    entry += f"### 🎭 Soul 变更\n\n{new_soul}\n\n---\n"
+    with open(changelog_file, "a", encoding="utf-8") as f:
+        f.write(entry)
+    print(f"🧬 [Soul进化] changelog 已追加")
 
 
 # 复杂度关键词
