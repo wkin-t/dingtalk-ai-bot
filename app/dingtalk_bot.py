@@ -29,6 +29,7 @@ from app.config import (
     DINGTALK_REFERENCE_AUTO_ENABLED,
     DINGTALK_IMAGE_MSG_KEY,
     DINGTALK_IMAGE_MSG_PARAM_TEMPLATE,
+    STREAM_UPDATE_THROTTLE,
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
@@ -813,20 +814,19 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         return "".join(parts)
 
     async def _update_card_throttled(self, out_track_id: str, content: str, last_update_time: float, is_first: bool) -> float:
-        """节流更新卡片 - 增加节流间隔以减少 API 压力"""
+        """节流更新卡片 - 控制更新间隔以减少钉钉 API 调用"""
         import time
         current_time = time.time()
 
-        # 增加节流间隔：第一次立即更新，后续至少间隔 1 秒
-        if is_first or current_time - last_update_time > 1.0:
+        if is_first or current_time - last_update_time > STREAM_UPDATE_THROTTLE:
             await self.card_helper.stream_update(out_track_id, content, is_finalize=False, content_key="msgContent")
             return current_time
 
         return last_update_time
 
-    async def handle_gemini_stream(self, incoming_message, content, conversation_id, at_user_ids, image_data_list=None, group_info=None):
-        print(f"🚀 开始处理 Gemini 请求: {content} (User: {incoming_message.sender_id})")
-        print(f"🔍 [调试] handle_gemini_stream 接收到的 content 参数: '{content}'")
+    async def handle_ai_stream(self, incoming_message, content, conversation_id, at_user_ids, image_data_list=None, group_info=None):
+        print(f"🚀 开始处理 AI 请求: {content} (User: {incoming_message.sender_id})")
+        print(f"🔍 [调试] handle_ai_stream 接收到的 content 参数: '{content}'")
         if image_data_list:
             print(f"🖼️ 收到图片数量: {len(image_data_list)}")
 
@@ -1301,8 +1301,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                         continue
 
                     current_time = time.time()
-                    # 增加节流间隔到 1 秒，减少 API 请求频率
-                    if current_time - last_update_time > 1.0:
+                    # 节流更新，减少钉钉 API 调用频率
+                    if current_time - last_update_time > STREAM_UPDATE_THROTTLE:
                         await self.card_helper.stream_update(out_track_id, display_content, is_finalize=False, content_key="msgContent")
                         last_update_time = current_time
 
@@ -1604,7 +1604,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 # 不再提前保存用户消息，延迟到 AI 回复后保存（避免历史记录中包含当前正在处理的消息）
                 print(f"📥 [DingTalk Stream] 处理合并消息: {history_content} (User: {sender_nick})")
 
-                await self.handle_gemini_stream(incoming_message, full_content, incoming_message.conversation_id, at_user_ids, image_list, group_info)
+                await self.handle_ai_stream(incoming_message, full_content, incoming_message.conversation_id, at_user_ids, image_list, group_info)
             finally:
                 # 清除正在处理标记
                 processing_sessions.discard(buffer_key)

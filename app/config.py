@@ -224,6 +224,9 @@ DINGTALK_PUSH_IP_ALLOWLIST_RAW = os.getenv("DINGTALK_PUSH_IP_ALLOWLIST", "").str
 # 钉钉侧对 streaming_update 的并发/频率比较敏感；该效果在部分客户端也不明显，默认关闭。
 DINGTALK_TYPING_ENABLED = _get_bool("DINGTALK_TYPING_ENABLED", False)
 DINGTALK_TYPING_INTERVAL_MS = max(200, _get_int("DINGTALK_TYPING_INTERVAL_MS", 650))
+
+# 卡片流式更新节流间隔（秒），减少钉钉 API 调用频率
+STREAM_UPDATE_THROTTLE = max(1.0, _get_float("STREAM_UPDATE_THROTTLE", 3.0))
 DINGTALK_TYPING_FRAMES_RAW = os.getenv(
     "DINGTALK_TYPING_FRAMES",
     "⌨️ 正在敲键盘.|⌨️ 正在敲键盘..|⌨️ 正在敲键盘...",
