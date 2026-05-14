@@ -1,0 +1,46 @@
+# 凭证文件 — 绝不打进镜像
+secrets/
+*.sa.json
+*.key.json
+*service-account*.json
+credentials/
+
+# 环境变量
+.env
+.env.*
+
+# 数据目录
+data/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+
+# 文档和计划
+docs/
+*.md
+!README.md
+
+# 测试
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 开发工具
+.claude/
+.serena/
+.playwright-mcp/
+.tmp/
+demo/
+1panel/
+tailscale_data/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.venv/

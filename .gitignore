@@ -61,5 +61,12 @@ htmlcov/
 # GitHub Actions（如果是本地测试生成的）
 .github/
 
+# 凭证文件（Service Account、API Key 等）
+secrets/
+credentials/
+*.sa.json
+*.key.json
+*service-account*.json
+
 # 内部修复文档（包含服务器路径等敏感信息）
 FIX_*.md
