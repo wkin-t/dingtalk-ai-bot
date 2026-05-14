@@ -8,6 +8,7 @@ from app.config import (
     get_route_key, get_litellm_model_config,
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
     LITELLM_MAX_RETRIES, OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM,
+    VERTEX_PROJECT,
 )
 
 # LiteLLM 通过环境变量识别代理
@@ -111,15 +112,30 @@ async def call_litellm_stream(
             "timeout": LITELLM_READ_TIMEOUT,
         }
 
-        if OPENAI_API_BASE:
+        if config["model"].startswith("vertex_ai/"):
+            # Vertex AI 路径 — 互斥，不走 OpenAI 兼容逻辑
+            kwargs["vertex_ai_project"] = VERTEX_PROJECT
+            kwargs["vertex_ai_location"] = config.get("region", "us-east5")
+            # thinking 参数适配
+            reasoning_param = config.get("reasoning_param", "openai_effort")
+            if reasoning_param == "anthropic_thinking":
+                effort = EFFORT_MAPPING.get(thinking_level)
+                if effort and effort != "none":
+                    budget = {"low": 2048, "medium": 8192, "high": 32768}.get(effort, 8192)
+                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        elif OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
             kwargs["custom_llm_provider"] = "openai"
-        if OPENAI_API_KEY_CUSTOM:
-            kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
-
-        effort = EFFORT_MAPPING.get(thinking_level)
-        if config["supports_reasoning"] and effort is not None:
-            kwargs["reasoning_effort"] = effort
+            if OPENAI_API_KEY_CUSTOM:
+                kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
+            effort = EFFORT_MAPPING.get(thinking_level)
+            if config["supports_reasoning"] and effort is not None:
+                kwargs["reasoning_effort"] = effort
+        else:
+            # 无 api_base 的默认路径
+            effort = EFFORT_MAPPING.get(thinking_level)
+            if config["supports_reasoning"] and effort is not None:
+                kwargs["reasoning_effort"] = effort
 
         if not config["supports_vision"]:
             kwargs["messages"] = _strip_images(messages)
@@ -134,7 +150,7 @@ async def call_litellm_stream(
 
             delta = chunk.choices[0].delta
 
-            reasoning = getattr(delta, "reasoning_content", None)
+            reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
             if reasoning:
                 if not thinking_sent:
                     yield {"thinking_start": True}

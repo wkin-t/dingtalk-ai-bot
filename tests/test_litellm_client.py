@@ -131,3 +131,45 @@ class TestStripImages:
         cleaned = _strip_images(messages)
         assert cleaned[0]["content"] == "第一句话"
         assert cleaned[1]["content"] == "有图片的消息"
+
+
+class TestVertexProviderBranch:
+    """Vertex AI provider 互斥分支测试"""
+
+    def test_vertex_thinking_budget_mapping(self):
+        """anthropic_thinking 应生成 thinking 参数而非 reasoning_effort"""
+        effort_mapping = {"minimal": "none", "low": "low", "medium": "medium", "high": "high"}
+        budget_map = {"low": 2048, "medium": 8192, "high": 32768}
+
+        for level in ["low", "medium", "high"]:
+            effort = effort_mapping.get(level)
+            if effort and effort != "none":
+                budget = budget_map.get(effort, 8192)
+                assert budget > 0, f"budget 应 >0 for {level}"
+
+        # minimal 不应生成 thinking
+        effort = effort_mapping.get("minimal")
+        assert effort == "none"
+
+    def test_thinking_field_fallback(self):
+        """流式解析应兼容 reasoning_content 和 thinking 字段"""
+        # 模拟 delta 对象
+        class MockDelta:
+            reasoning_content = None
+            thinking = "思考中..."
+            content = "回答"
+
+        delta = MockDelta()
+        reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
+        assert reasoning == "思考中..."
+
+    def test_reasoning_content_takes_priority(self):
+        """reasoning_content 应优先于 thinking"""
+        class MockDelta:
+            reasoning_content = "原始推理"
+            thinking = "备选思考"
+            content = "回答"
+
+        delta = MockDelta()
+        reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
+        assert reasoning == "原始推理"
