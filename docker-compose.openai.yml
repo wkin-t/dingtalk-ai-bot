@@ -14,10 +14,12 @@ services:
     environment:
       - AI_BACKEND=openai
       - FLASK_PORT=35001
+      - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json
     env_file:
       - .env.openai
     volumes:
       - ./data-openai:/app/data
+      - ${VERTEX_SA_HOST_PATH:-/dev/null}:/run/secrets/gcp-key.json:ro
     deploy:
       resources:
         limits:
