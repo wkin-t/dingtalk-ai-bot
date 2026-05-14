@@ -303,6 +303,9 @@ LITELLM_MODEL_PRO = os.getenv("OPENAI_MODEL_PRO", "deepseek/deepseek-reasoner")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")
 OPENAI_API_KEY_CUSTOM = os.getenv("OPENAI_API_KEY", "")
 
+# Vertex AI 配置（LiteLLM vertex_ai/ 路由使用）
+VERTEX_PROJECT = os.getenv("VERTEX_PROJECT", "")
+
 # 网络控制
 LITELLM_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
 LITELLM_CONNECT_TIMEOUT = _get_int("LITELLM_CONNECT_TIMEOUT", 30)
@@ -313,15 +316,19 @@ LITELLM_MAX_RETRIES = _get_int("LITELLM_MAX_RETRIES", 2)
 LITELLM_MODEL_CONFIG = {
     "fast": {
         "model": LITELLM_MODEL_FLASH,
+        "region": os.getenv("VERTEX_REGION_FAST", "europe-west1"),
         "supports_reasoning": _get_bool("OPENAI_FLASH_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENAI_FLASH_SUPPORTS_SEARCH", False),
         "supports_vision": _get_bool("OPENAI_FLASH_SUPPORTS_VISION", True),
+        "reasoning_param": os.getenv("VERTEX_REASONING_PARAM_FAST", "openai_effort"),
     },
     "pro": {
         "model": LITELLM_MODEL_PRO,
+        "region": os.getenv("VERTEX_REGION_PRO", "us-east5"),
         "supports_reasoning": _get_bool("OPENAI_PRO_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENAI_PRO_SUPPORTS_SEARCH", False),
         "supports_vision": _get_bool("OPENAI_PRO_SUPPORTS_VISION", True),
+        "reasoning_param": os.getenv("VERTEX_REASONING_PARAM_PRO", "openai_effort"),
     },
 }
 

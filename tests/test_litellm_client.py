@@ -49,6 +49,20 @@ class TestModelConfig:
         config = get_litellm_model_config("nonexistent")
         assert config["model"] == LITELLM_MODEL_CONFIG["fast"]["model"]
 
+    def test_vertex_project_config_exists(self):
+        from app.config import VERTEX_PROJECT
+        assert isinstance(VERTEX_PROJECT, str)
+
+    def test_config_has_region_field(self):
+        config = get_litellm_model_config("fast")
+        assert "region" in config
+        assert isinstance(config["region"], str)
+
+    def test_config_has_reasoning_param_field(self):
+        config = get_litellm_model_config("fast")
+        assert "reasoning_param" in config
+        assert config["reasoning_param"] in ("openai_effort", "anthropic_thinking", "none")
+
 
 class TestCapabilityFiltering:
     """Capability 过滤测试"""
