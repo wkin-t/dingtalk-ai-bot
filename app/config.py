@@ -369,7 +369,7 @@ OPENROUTER_MODEL_CONFIG = {
         "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
         "supports_reasoning": False,
-        "supports_search": _get_bool("OPENROUTER_LITE_SUPPORTS_SEARCH", False),
+        "supports_search": _get_bool("OPENROUTER_LITE_SUPPORTS_SEARCH", True),
         "supports_vision": _get_bool("OPENROUTER_LITE_SUPPORTS_VISION", True),
     },
     # fast: 普通工作 (Sonnet)
