@@ -711,9 +711,10 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
 有图片: {"是" if has_images else "否"}
 
 选择规则:
-1. model:
-   - "gemini-3-flash-preview": 日常问答、代码、一般分析 (默认)
-   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+1. model（三个选项）:
+   - "lite": 简单问候、闲聊、一句话基础问答（有图片时禁用此选项）
+   - "fast": 日常问答、代码、一般分析、图片分析（默认；有图片时最低选此）
+   - "pro": 仅用于复杂数学证明、学术研究、系统架构设计
 
 2. thinking_level:
    - "minimal": 简单问候如"你好"、"谢谢"
@@ -751,7 +752,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+{{"model":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     try:
         kwargs = {
@@ -777,8 +778,8 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
-            if result.get("model") not in ["gemini-3-flash-preview", "gemini-3.1-pro-preview"]:
-                result["model"] = "gemini-3-flash-preview"
+            if result.get("model") not in ["lite", "fast", "pro"]:
+                result["model"] = "fast"
             if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
                 result["thinking_level"] = "low"
             if "need_search" not in result:
@@ -798,7 +799,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
         print(f"⚠️ [LiteLLM预分析] 失败: {e}")
 
     return {
-        "model": "gemini-3-flash-preview",
+        "model": "fast",
         "thinking_level": "low",
         "need_search": False,
         "need_image_gen": False,
@@ -1202,10 +1203,21 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
 
                 for i, img_data in enumerate(image_data_list):
                     b64_image = base64.b64encode(img_data).decode('utf-8')
-                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes")
+                    # 根据魔数检测实际格式，避免 Bedrock 等严格 provider 校验 MIME 失败
+                    if img_data[:8] == b'\x89PNG\r\n\x1a\n':
+                        mime = "image/png"
+                    elif img_data[:3] == b'\xff\xd8\xff':
+                        mime = "image/jpeg"
+                    elif img_data[:4] == b'GIF8':
+                        mime = "image/gif"
+                    elif img_data[8:12] == b'WEBP':
+                        mime = "image/webp"
+                    else:
+                        mime = "image/jpeg"
+                    print(f"🖼️ 处理第 {i+1} 张图片，大小: {len(img_data)} bytes，类型: {mime}")
                     user_message_content.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                        "image_url": {"url": f"data:{mime};base64,{b64_image}"}
                     })
 
                 messages.extend(formatted_history)
@@ -1249,14 +1261,14 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
                 complexity = {
-                    "model": "gemini-3-flash-preview",
+                    "model": "fast",
                     "thinking_level": "low",
                     "need_search": False,
                     "temperature": "balanced",
                     "reason": "路由异常，使用默认",
                     "thinking_text": "思考中..."
                 }
-            target_model = complexity.get("model", "gemini-3-flash-preview")
+            target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
             temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
@@ -1270,14 +1282,14 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
                 complexity = {
-                    "model": "gemini-3-flash-preview",
+                    "model": "fast",
                     "thinking_level": "low",
                     "need_search": False,
                     "temperature": "balanced",
                     "reason": "路由异常，使用默认",
                     "thinking_text": "思考中..."
                 }
-            target_model = complexity.get("model", "gemini-3-flash-preview")
+            target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
             temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)

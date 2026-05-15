@@ -336,7 +336,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             except Exception as e:
                 print(f"❌ [OR路由] 异常: {e}")
                 complexity = {
-                    "model": "gemini-3-flash-preview",
+                    "model": "fast",
                     "thinking_level": "low",
                     "need_search": False,
                     "reason": "路由异常，使用默认"
@@ -355,7 +355,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "reason": "路由异常，使用默认"
                 }
 
-        target_model = complexity.get("model", "gemini-3-flash-preview")
+        target_model = complexity.get("model", "fast")
         thinking_level = complexity.get("thinking_level", "low")
         need_search = complexity.get("need_search", False)
         temp_label = complexity.get("temperature", "balanced")

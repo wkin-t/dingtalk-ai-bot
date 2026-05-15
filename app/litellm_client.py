@@ -65,7 +65,7 @@ async def call_litellm_stream(
 
     Args:
         messages: OpenAI 格式消息列表
-        target_model: 智能路由输出的模型名（如 gemini-3-flash-preview）
+        target_model: 智能路由输出的模型名（lite/fast/pro 或 Gemini 模型名，经 ROUTE_KEY_MAP 归一化）
         thinking_level: minimal/low/medium/high
         enable_search: 是否启用联网搜索
 
@@ -279,9 +279,9 @@ async def analyze_complexity_with_openrouter(
 
 选择规则:
 1. model（三个选项）:
-   - "gemini-3-flash-lite": 简单问候、闲聊、一句话基础问答（有图片时禁用此选项）
-   - "gemini-3-flash-preview": 日常问答、代码、一般分析、图片分析（默认；有图片时最低选此）
-   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计、复杂图片分析
+   - "lite": 简单问候、闲聊、一句话基础问答（有图片时禁用此选项）
+   - "fast": 日常问答、代码、一般分析、图片分析（默认；有图片时最低选此）
+   - "pro": 仅用于复杂数学证明、学术研究、系统架构设计、复杂图片分析
 
 2. thinking_level:
    - "minimal": 简单问候如"你好"、"谢谢"、"再见"
@@ -310,7 +310,7 @@ async def analyze_complexity_with_openrouter(
    - false: 默认（无图片 或 仅聊天/文字生图）
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+{{"model":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     try:
         response = await litellm.acompletion(
@@ -329,8 +329,8 @@ async def analyze_complexity_with_openrouter(
         if json_match:
             result = json.loads(json_match.group())
             # 有图片时强制升级到 fast 层，防止 prompt 判断失误
-            if has_images and result.get("model") == "gemini-3-flash-lite":
-                result["model"] = "gemini-3-flash-preview"
+            if has_images and result.get("model") == "lite":
+                result["model"] = "fast"
                 result["reason"] = result.get("reason", "") + " [图片升级→fast]"
             print(f"🔄 [OR路由] Haiku 分析: {result.get('model')} / {result.get('thinking_level')} / reason={result.get('reason')}")
             return result

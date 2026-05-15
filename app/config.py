@@ -332,8 +332,13 @@ LITELLM_MODEL_CONFIG = {
     },
 }
 
-# 路由名归一化：把路由输出的各种模型名统一到 fast/pro
+# 路由名归一化：把路由输出的各种模型名统一到 lite/fast/pro
 ROUTE_KEY_MAP = {
+    # 抽象 tier 名直通（OpenRouter/OpenAI 路由 prompt 输出这些）
+    "lite": "lite",
+    "fast": "fast",
+    "pro": "pro",
+    # 旧 Gemini 名兼容（Gemini 后端路由 prompt 和关键词降级路径继续使用）
     "gemini-3-flash-lite": "lite",
     "gemini-3-flash-lite-preview": "lite",
     "gemini-3-flash-preview": "fast",
