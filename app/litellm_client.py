@@ -266,8 +266,12 @@ async def analyze_complexity_with_openrouter(
    - true: 用户明确要求生成图片、画画、绘制
    - false: 默认
 
+7. need_image_edit:
+   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
+   - false: 默认（无图片 或 仅聊天/文字生图）
+
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         response = await litellm.acompletion(

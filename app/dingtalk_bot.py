@@ -34,7 +34,7 @@ from app.config import (
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
-from app.image_gen import generate_image
+from app.image_gen import generate_image, edit_image
 from app.image_store import save_image
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
@@ -709,10 +709,19 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
    - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
    - number_of_images: 解析数量 → 1-4，默认 1
 
+7. need_image_edit:
+   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
+   - false: 默认（无图片 或 仅聊天/文字生图）
+
+8. temperature:
+   - "precise": 代码、数学、翻译、事实查询（需要准确性）
+   - "balanced": 普通问答（默认）
+   - "creative": 写作、诗歌、头脑风暴、创意任务
+
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         kwargs = {
@@ -746,6 +755,10 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
                 result["need_search"] = False
             if "need_image_gen" not in result:
                 result["need_image_gen"] = False
+            if "need_image_edit" not in result:
+                result["need_image_edit"] = False
+            if "temperature" not in result:
+                result["temperature"] = "balanced"
             print(f"🤖 [LiteLLM预分析] 结果: {result}")
             return result
         else:
@@ -759,6 +772,8 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
         "thinking_level": "low",
         "need_search": False,
         "need_image_gen": False,
+        "need_image_edit": False,
+        "temperature": "balanced",
         "reason": "LiteLLM预分析失败，使用默认",
         "thinking_text": "正在思考 💭"
     }
@@ -1215,6 +1230,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         soul_text = _load_soul(conversation_id)
         complexity = {}  # 预分析结果，openclaw 模式留空
 
+        temperature = 0.7  # 默认值，各路由分支会覆盖
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
             target_model = "openclaw"
@@ -1233,13 +1249,37 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "model": "gemini-3-flash-preview",
                     "thinking_level": "low",
                     "need_search": False,
+                    "temperature": "balanced",
                     "reason": "路由异常，使用默认",
                     "thinking_text": "思考中..."
                 }
             target_model = complexity.get("model", "gemini-3-flash-preview")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
-            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
+        elif AI_BACKEND == "openrouter":
+            # OpenRouter 模式: 使用 Haiku 替代 Gemini flash-lite 做预分析
+            print(f"🔄 [路由] OpenRouter 模式，使用 Haiku 预分析...")
+            try:
+                from app.litellm_client import analyze_complexity_with_openrouter
+                complexity = await analyze_complexity_with_openrouter(content, has_images, soul_text=soul_text)
+                print(f"🔄 [路由] 预分析返回: {complexity}")
+            except Exception as e:
+                print(f"❌ [路由] 预分析异常: {e}")
+                complexity = {
+                    "model": "gemini-3-flash-preview",
+                    "thinking_level": "low",
+                    "need_search": False,
+                    "temperature": "balanced",
+                    "reason": "路由异常，使用默认",
+                    "thinking_text": "思考中..."
+                }
+            target_model = complexity.get("model", "gemini-3-flash-preview")
+            thinking_level = complexity.get("thinking_level", "low")
+            need_search = complexity.get("need_search", False)
+            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
             # Gemini 模式: 使用 Gemini Flash Lite 做预分析
             print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
@@ -1252,13 +1292,15 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "model": "gemini-3-flash-preview",
                     "thinking_level": "low",
                     "need_search": False,
+                    "temperature": "balanced",
                     "reason": "路由异常，使用默认",
                     "thinking_text": "思考中..."
                 }
             target_model = complexity.get("model", "gemini-3-flash-preview")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
-            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}")
+            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
         # ===== 生图分支 =====
         need_image_gen = complexity.get("need_image_gen", False) if AI_BACKEND != "openclaw" else False
@@ -1334,6 +1376,49 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             return  # 跳过正常 AI 流
         # ===== 生图分支结束 =====
 
+        # ===== 改图分支 =====
+        need_image_edit = (
+            complexity.get("need_image_edit", False)
+            if AI_BACKEND not in ("openclaw", "openrouter") else False
+        )
+        if need_image_edit and image_data_list:
+            edit_prompt = complexity.get("image_gen_params", {}).get("prompt", content) or content
+            aspect_ratio = complexity.get("image_gen_params", {}).get("aspect_ratio", "1:1")
+            print(f"✏️ [改图] prompt={edit_prompt[:80]}, ratio={aspect_ratio}, backend={AI_BACKEND}")
+            try:
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    "正在修改图片... ✏️",
+                    is_finalize=False,
+                    is_full=True,
+                    content_key="thinkingText",
+                )
+                edited = await edit_image(
+                    image_bytes=image_data_list[0],
+                    prompt=edit_prompt,
+                    backend=AI_BACKEND,
+                    aspect_ratio=aspect_ratio,
+                )
+                if not edited:
+                    raise RuntimeError("改图 API 未返回任何图片")
+
+                _, url = save_image(edited[0])
+                card_text = f"已为你修改图片 ✨\n\n![修改结果]({url})"
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    card_text,
+                    is_finalize=True,
+                    is_full=True,
+                )
+                print(f"✅ [改图] 完成，已上传 COS")
+            except RuntimeError as e:
+                await self.card_helper.stream_update(out_track_id, f"图片修改失败：{e}", is_finalize=True, is_full=True)
+            except Exception as e:
+                print(f"❌ [改图] 异常: {e}")
+                await self.card_helper.stream_update(out_track_id, "图片修改失败，请稍后重试 🥲", is_finalize=True, is_full=True)
+            return  # 跳过正常 AI 流
+        # ===== 改图分支结束 =====
+
         # 预分析完成后，用 AI 生成的思考状态更新卡片
         dynamic_thinking_text = complexity.get("thinking_text", "").strip()
         if not dynamic_thinking_text:
@@ -1403,6 +1488,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 target_model=target_model,
                 thinking_level=thinking_level,
                 enable_search=need_search,
+                temperature=temperature,
                 conversation_id=conversation_id,
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,

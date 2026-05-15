@@ -119,6 +119,96 @@ async def _generate_with_openai(
     return images
 
 
+async def _edit_with_openai(
+    image_bytes: bytes,
+    prompt: str,
+    aspect_ratio: str = "1:1",
+) -> List[bytes]:
+    """OpenAI gpt-image-2 图片编辑（img2img）"""
+    import io
+    loop = asyncio.get_running_loop()
+    client = _get_openai_client()
+    size = _map_openai_size(aspect_ratio)
+
+    def _call():
+        return client.images.edit(
+            model=OPENAI_IMAGE_MODEL,
+            image=("image.png", io.BytesIO(image_bytes), "image/png"),
+            prompt=prompt,
+            n=1,
+            size=size,
+            response_format="b64_json",
+        )
+
+    response = await loop.run_in_executor(None, _call)
+    images = []
+    for img in response.data:
+        if img.b64_json:
+            images.append(base64.b64decode(img.b64_json))
+    if not images:
+        raise RuntimeError("OpenAI edit 未返回有效图片数据")
+    return images
+
+
+async def _edit_with_gemini(
+    image_bytes: bytes,
+    prompt: str,
+) -> List[bytes]:
+    """Gemini 2.0 Flash 图片编辑（多模态输出）"""
+    from google.genai import types
+    loop = asyncio.get_running_loop()
+
+    def _call():
+        response = genai_client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=image_bytes)),
+                types.Part(text=prompt),
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+            ),
+        )
+        result = []
+        for candidate in response.candidates:
+            for part in candidate.content.parts:
+                if (hasattr(part, "inline_data") and part.inline_data
+                        and part.inline_data.mime_type.startswith("image/")):
+                    result.append(part.inline_data.data)
+        return result
+
+    images = await loop.run_in_executor(None, _call)
+    if not images:
+        raise RuntimeError("Gemini 图片编辑未返回图片，模型可能拒绝了该操作")
+    return images
+
+
+async def edit_image(
+    image_bytes: bytes,
+    prompt: str,
+    backend: str = "gemini",
+    aspect_ratio: str = "1:1",
+) -> List[bytes]:
+    """
+    统一改图接口（img2img）
+
+    Args:
+        image_bytes: 原图 bytes
+        prompt: 修改描述（英文）
+        backend: "gemini" 或 "openai"
+        aspect_ratio: 输出比例（仅 openai 有效）
+
+    Returns:
+        改后图片 bytes 列表
+    """
+    if backend == "gemini":
+        return await _edit_with_gemini(image_bytes, prompt)
+    elif backend == "openai":
+        return await _edit_with_openai(image_bytes, prompt, aspect_ratio)
+    else:
+        raise ValueError(f"后端 {backend} 不支持图片编辑（Claude/OpenRouter 无图像生成能力）")
+
+
 async def generate_image(
     prompt: str,
     backend: str = "gemini",

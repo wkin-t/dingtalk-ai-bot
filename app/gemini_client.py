@@ -101,7 +101,11 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
    - number_of_images: 解析数量 → 1-4，默认 1
 
-7. temperature:
+7. need_image_edit:
+   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
+   - false: 默认（无图片 或 仅聊天/文字生图）
+
+8. temperature:
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
    - "balanced": 普通问答（默认）
    - "creative": 写作、诗歌、头脑风暴、创意任务
@@ -109,7 +113,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
@@ -144,6 +148,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
                 result["need_search"] = False
             if "need_image_gen" not in result:
                 result["need_image_gen"] = False
+            if "need_image_edit" not in result:
+                result["need_image_edit"] = False
             print(f"🤖 预分析结果: {result}")
             return result
         else:
