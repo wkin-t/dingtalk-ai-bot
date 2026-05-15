@@ -281,21 +281,37 @@ def _trim_changelog(filepath: str, max_bytes: int = _CHANGELOG_MAX_BYTES):
 async def _ask_lightweight_model(prompt: str) -> str:
     """调用轻量模型（复用预分析模型），用于 Soul 进化等后台任务"""
     try:
-        if AI_BACKEND == "openai":
+        if AI_BACKEND in ("openai", "openrouter"):
             import litellm
+            import warnings
             litellm.suppress_debug_info = True
-            from app.config import LITELLM_MODEL_FLASH as _flash_model
-            response = await litellm.acompletion(
-                model=_flash_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=500,
-                drop_params=True,
-                reasoning_effort="none",
-            )
+            warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
+            if AI_BACKEND == "openrouter":
+                from app.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_ROUTER_MODEL
+                response = await litellm.acompletion(
+                    model=OPENROUTER_ROUTER_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    api_base=OPENROUTER_BASE_URL,
+                    api_key=OPENROUTER_API_KEY,
+                    custom_llm_provider="openai",
+                    temperature=0.7,
+                    max_tokens=500,
+                    timeout=15,
+                )
+            else:
+                from app.config import LITELLM_MODEL_FLASH as _flash_model
+                response = await litellm.acompletion(
+                    model=_flash_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=500,
+                    drop_params=True,
+                    reasoning_effort="none",
+                )
             return response.choices[0].message.content or ""
         else:
             from app.gemini_client import client as _gemini_client
+            from google.genai import types
             loop = asyncio.get_running_loop()
 
             def _call():
@@ -306,7 +322,6 @@ async def _ask_lightweight_model(prompt: str) -> str:
                 )
                 return resp.text
 
-            from google.genai import types
             return await loop.run_in_executor(None, _call)
     except Exception as e:
         print(f"⚠️ [Soul进化] 模型调用失败: {e}")
