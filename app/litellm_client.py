@@ -240,9 +240,9 @@ async def analyze_complexity_with_openrouter(
 
 选择规则:
 1. model（三个选项）:
-   - "gemini-3-flash-lite": 简单问候、闲聊、一句话基础问答
-   - "gemini-3-flash-preview": 日常问答、代码、一般分析（默认）
-   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+   - "gemini-3-flash-lite": 简单问候、闲聊、一句话基础问答（有图片时禁用此选项）
+   - "gemini-3-flash-preview": 日常问答、代码、一般分析、图片分析（默认；有图片时最低选此）
+   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计、复杂图片分析
 
 2. thinking_level:
    - "minimal": 简单问候如"你好"、"谢谢"、"再见"
@@ -285,6 +285,10 @@ async def analyze_complexity_with_openrouter(
         json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
+            # 有图片时强制升级到 fast 层，防止 prompt 判断失误
+            if has_images and result.get("model") == "gemini-3-flash-lite":
+                result["model"] = "gemini-3-flash-preview"
+                result["reason"] = result.get("reason", "") + " [图片升级→fast]"
             print(f"🔄 [OR路由] Haiku 分析: {result.get('model')} / {result.get('thinking_level')} / reason={result.get('reason')}")
             return result
     except Exception as e:
