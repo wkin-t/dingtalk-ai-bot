@@ -1354,7 +1354,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
 
                 # 卡片 markdown 展示图片
                 img_markdown = "\n".join(f"![图片{i+1}]({url})" for i, url in enumerate(image_urls))
-                card_text = f"已为你生成 {len(images)} 张图片 ✨\n\n{img_markdown}"
+                prompt_display = image_prompt[:150] + ("..." if len(image_prompt) > 150 else "")
+                card_text = f"🎨 `{prompt_display}`\n\n已生成 {len(images)} 张图片 ✨\n\n{img_markdown}"
 
                 await self.card_helper.stream_update(
                     out_track_id,
@@ -1414,7 +1415,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     raise RuntimeError("改图 API 未返回任何图片")
 
                 _, url = save_image(edited[0])
-                card_text = f"已为你修改图片 ✨\n\n![修改结果]({url})"
+                prompt_display = edit_prompt[:150] + ("..." if len(edit_prompt) > 150 else "")
+                card_text = f"✏️ `{prompt_display}`\n\n已修改图片 ✨\n\n![修改结果]({url})"
                 await self.card_helper.stream_update(
                     out_track_id,
                     card_text,
