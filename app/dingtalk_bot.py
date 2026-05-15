@@ -1199,46 +1199,19 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
                 print(f"🔍 [调试] 当前消息: {text_content}")
 
-        # 初始化 AI 卡片
-        thinking_text = "思考中..."
-        
-        card_data = {
-            "msgTitle": {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI"}.get(AI_BACKEND, "AI"),
-            "thinkingText": thinking_text,
-            "msgContent": "Thinking...", 
-            "isError": "false",
-            "flowStatus": "1",
-            "config": {"autoLayout": True} 
-        }
-        
-        out_track_id = await self.card_helper.create_and_deliver(
-            conversation_id, 
-            self.card_template_id,
-            card_data,
-            at_user_ids
-        )
-        
-        if not out_track_id:
-            self.reply_markdown("系统错误", "⚠️ 无法创建 AI 卡片，请检查权限或模板 ID。", incoming_message)
-            return
-
-        print(f"✅ 卡片创建成功，ID: {out_track_id}")
-
-        # 智能路由：根据 AI_BACKEND 选择后端
+        # 智能路由（提前到卡片创建前，让初始卡片直接显示正确的思考文字）
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
         has_images = bool(image_data_list)
         soul_text = _load_soul(conversation_id)
-        complexity = {}  # 预分析结果，openclaw 模式留空
+        complexity = {}
 
-        temperature = 0.7  # 默认值，各路由分支会覆盖
+        temperature = 0.7
         if AI_BACKEND == "openclaw":
-            # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
             target_model = "openclaw"
             thinking_level = "default"
             need_search = False
             print(f"🎯 OpenClaw 模式: 由 Gateway 处理")
         elif AI_BACKEND == "openai":
-            # OpenAI 模式: 使用 LiteLLM + gpt-5.4-mini 做预分析
             print(f"🔄 [路由] OpenAI 模式，使用 GPT 预分析...")
             try:
                 complexity = await _analyze_with_litellm(content, has_images, soul_text=soul_text)
@@ -1259,7 +1232,6 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         elif AI_BACKEND == "openrouter":
-            # OpenRouter 模式: 使用 Haiku 替代 Gemini flash-lite 做预分析
             print(f"🔄 [路由] OpenRouter 模式，使用 Haiku 预分析...")
             try:
                 from app.litellm_client import analyze_complexity_with_openrouter
@@ -1281,7 +1253,6 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
-            # Gemini 模式: 使用 Gemini Flash Lite 做预分析
             print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
             try:
                 complexity = await _analyze_with_gemini(content, has_images, soul_text=soul_text)
@@ -1301,6 +1272,31 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             need_search = complexity.get("need_search", False)
             temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
+
+        # 初始化 AI 卡片（路由已完成，thinkingText 使用模型生成的思考文字）
+        thinking_text = complexity.get("thinking_text", "").strip() or "思考中..."
+        _BACKEND_TITLES = {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI", "openrouter": "OpenRouter AI"}
+        card_data = {
+            "msgTitle": _BACKEND_TITLES.get(AI_BACKEND, "AI"),
+            "thinkingText": thinking_text,
+            "msgContent": "Thinking...",
+            "isError": "false",
+            "flowStatus": "1",
+            "config": {"autoLayout": True}
+        }
+
+        out_track_id = await self.card_helper.create_and_deliver(
+            conversation_id,
+            self.card_template_id,
+            card_data,
+            at_user_ids
+        )
+
+        if not out_track_id:
+            self.reply_markdown("系统错误", "⚠️ 无法创建 AI 卡片，请检查权限或模板 ID。", incoming_message)
+            return
+
+        print(f"✅ 卡片创建成功，ID: {out_track_id}")
 
         # ===== 生图分支 =====
         need_image_gen = complexity.get("need_image_gen", False) if AI_BACKEND != "openclaw" else False
@@ -1418,24 +1414,6 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 await self.card_helper.stream_update(out_track_id, "图片修改失败，请稍后重试 🥲", is_finalize=True, is_full=True)
             return  # 跳过正常 AI 流
         # ===== 改图分支结束 =====
-
-        # 预分析完成后，用 AI 生成的思考状态更新卡片
-        dynamic_thinking_text = complexity.get("thinking_text", "").strip()
-        if not dynamic_thinking_text:
-            dynamic_thinking_text = "思考中... 🤔"
-        print(f"💡 [thinkingText] 预分析返回: '{dynamic_thinking_text}'")
-        if AI_BACKEND != "openclaw":
-            try:
-                ok = await self.card_helper.stream_update(
-                    out_track_id,
-                    dynamic_thinking_text,
-                    is_finalize=False,
-                    is_full=True,
-                    content_key="thinkingText",
-                )
-                print(f"💡 [thinkingText] stream_update 结果: {ok}")
-            except Exception as e:
-                print(f"⚠️ [thinkingText] 更新失败: {e}")
 
         full_response = ""
         full_thinking = ""  # 真实的 thinking 内容
@@ -1658,7 +1636,11 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 else:
                     model_short = target_model.replace("gemini-", "").replace("-preview", "")
                 search_icon = "🌐" if need_search else ""
-                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} {search_icon}</font>"
+                temp_icon = {"precise": "🎯", "balanced": "", "creative": "🎨"}.get(
+                    str(complexity.get("temperature", "balanced")), ""
+                )
+                temp_display = f" | 🌡️{temp_icon} {temperature:.1f}" if temp_icon else f" | 🌡️ {temperature:.1f}"
+                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level}{temp_display} {search_icon}</font>"
 
             buttons = [
                 {
