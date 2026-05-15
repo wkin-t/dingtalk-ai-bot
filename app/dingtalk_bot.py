@@ -1106,7 +1106,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             day = current_date.day
 
             # 根据 AI_BACKEND 动态设置 bot 名称
-            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(AI_BACKEND, "Gem")
+            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI", "openrouter": "Claude"}.get(AI_BACKEND, "Gem")
 
             system_prompt = f"""## 身份
 你的名字是 {bot_name}。你的个性和风格由你的 Soul 定义（在下方注入）。
@@ -1649,6 +1649,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             else:
                 if usage_info and usage_info.get("model"):
                     actual_model = usage_info["model"]
+                    if "/" in actual_model:
+                        actual_model = actual_model.split("/")[-1]
                     model_short = actual_model.replace("gemini-", "").replace("-preview", "")
                 else:
                     model_short = target_model.replace("gemini-", "").replace("-preview", "")
