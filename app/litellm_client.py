@@ -183,9 +183,10 @@ async def call_litellm_stream(
             effort = EFFORT_MAPPING.get(thinking_level)
             if config["supports_reasoning"] and effort is not None:
                 kwargs["reasoning_effort"] = effort
-            # GPT-5/o1/o3/o4 系列只接受 temperature=1；按模型名检测，兼容 supports_reasoning=false 的旧配置
+            # GPT-5/o1/o3/o4 系列只接受 temperature=1；去掉 provider/ 前缀再检测，兼容 supports_reasoning=false 的旧配置
+            _model_name = model.split("/")[-1]
             _no_temp_model = config["supports_reasoning"] or any(
-                model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+                _model_name.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
             )
             if _no_temp_model:
                 kwargs.pop("temperature", None)
@@ -194,8 +195,9 @@ async def call_litellm_stream(
             effort = EFFORT_MAPPING.get(thinking_level)
             if config["supports_reasoning"] and effort is not None:
                 kwargs["reasoning_effort"] = effort
+            _model_name = model.split("/")[-1]
             _no_temp_model = config["supports_reasoning"] or any(
-                model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+                _model_name.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
             )
             if _no_temp_model:
                 kwargs.pop("temperature", None)
