@@ -140,9 +140,15 @@ async def call_litellm_stream(
             if fallbacks:
                 extra_body["models"] = [model] + fallbacks
                 extra_body["route"] = "fallback"
+            provider_dict: dict = {}
+            provider_order = config.get("provider_order", [])
+            if provider_order:
+                provider_dict["order"] = provider_order
             provider_sort = config.get("provider_sort", "")
             if provider_sort:
-                extra_body["provider"] = {"sort": {"by": provider_sort}}
+                provider_dict["sort"] = {"by": provider_sort}
+            if provider_dict:
+                extra_body["provider"] = provider_dict
             if enable_search and config.get("supports_search"):
                 extra_body["tools"] = [{"type": "openrouter:web_search"}]
             if conversation_id:
@@ -192,8 +198,12 @@ async def call_litellm_stream(
         response = await litellm.acompletion(**kwargs)
 
         thinking_sent = False
+        actual_model = model  # 跟踪实际响应模型（fallback 时与请求模型不同）
 
         async for chunk in response:
+            # 从流式 chunk 读取真实模型名（fallback 后 OpenRouter 会更新此字段）
+            if hasattr(chunk, "model") and chunk.model:
+                actual_model = chunk.model
             # usage 先采集，final chunk 可能 choices 为空
             if hasattr(chunk, "usage") and chunk.usage:
                 input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
@@ -227,7 +237,7 @@ async def call_litellm_stream(
 
         yield {
             "usage": {
-                "model": model,
+                "model": actual_model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "latency_ms": latency_ms,

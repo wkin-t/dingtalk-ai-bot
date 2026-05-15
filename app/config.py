@@ -365,7 +365,8 @@ OPENROUTER_MODEL_CONFIG = {
     # lite: 简单问候、闲聊 (Haiku，仅执行不路由)
     "lite": {
         "model": os.getenv("OPENROUTER_MODEL_LITE", "anthropic/claude-haiku-4-5"),
-        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_LITE", "openai/gpt-4.1-nano")),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_LITE", "")),
+        "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
         "supports_reasoning": False,
         "supports_search": _get_bool("OPENROUTER_LITE_SUPPORTS_SEARCH", False),
@@ -374,7 +375,8 @@ OPENROUTER_MODEL_CONFIG = {
     # fast: 普通工作 (Sonnet)
     "fast": {
         "model": os.getenv("OPENROUTER_MODEL_FAST", "anthropic/claude-sonnet-4-5"),
-        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "openai/gpt-4.1")),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "")),
+        "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
         "supports_reasoning": _get_bool("OPENROUTER_FAST_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENROUTER_FAST_SUPPORTS_SEARCH", True),
@@ -383,7 +385,8 @@ OPENROUTER_MODEL_CONFIG = {
     # pro: 高阶推理 (Opus)
     "pro": {
         "model": os.getenv("OPENROUTER_MODEL_PRO", "anthropic/claude-opus-4-5"),
-        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "anthropic/claude-sonnet-4-5")),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "")),
+        "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
         "supports_reasoning": _get_bool("OPENROUTER_PRO_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENROUTER_PRO_SUPPORTS_SEARCH", True),
