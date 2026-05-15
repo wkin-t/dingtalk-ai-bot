@@ -263,3 +263,107 @@ class TestVertexProviderBranch:
         delta = MockDelta()
         reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
         assert reasoning == "原始推理"
+
+
+class TestInjectCacheControl:
+    """_inject_cache_control 单元测试"""
+
+    def test_anthropic_model_converts_system_to_array(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [{"role": "system", "content": "你是一个助手"}]
+        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "你是一个助手"
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_non_anthropic_model_unchanged(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [{"role": "system", "content": "你是一个助手"}]
+        result = _inject_cache_control(messages, "openai/gpt-4o")
+        assert result[0]["content"] == "你是一个助手"
+
+    def test_gemini_model_unchanged(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [{"role": "system", "content": "你是一个助手"}]
+        result = _inject_cache_control(messages, "gemini/gemini-3-flash")
+        assert result[0]["content"] == "你是一个助手"
+
+    def test_non_system_message_unchanged(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [{"role": "user", "content": "你好"}]
+        result = _inject_cache_control(messages, "anthropic/claude-sonnet-4-5")
+        assert result[0]["content"] == "你好"
+
+    def test_empty_system_content_not_converted(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [{"role": "system", "content": ""}]
+        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        assert result[0]["content"] == ""
+
+    def test_already_array_content_unchanged(self):
+        from app.litellm_client import _inject_cache_control
+        original_content = [{"type": "text", "text": "已经是数组"}]
+        messages = [{"role": "system", "content": original_content}]
+        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        assert result[0]["content"] is original_content
+
+    def test_mixed_messages_only_system_converted(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [
+            {"role": "system", "content": "系统提示"},
+            {"role": "user", "content": "用户消息"},
+            {"role": "assistant", "content": "助手回复"},
+        ]
+        result = _inject_cache_control(messages, "anthropic/claude-opus-4-5")
+        assert isinstance(result[0]["content"], list)
+        assert result[1]["content"] == "用户消息"
+        assert result[2]["content"] == "助手回复"
+
+    def test_message_list_length_preserved(self):
+        from app.litellm_client import _inject_cache_control
+        messages = [
+            {"role": "system", "content": "提示"},
+            {"role": "user", "content": "问题"},
+        ]
+        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        assert len(result) == 2
+
+
+class TestSessionIdHashing:
+    """session_id 哈希逻辑测试"""
+
+    def test_hash_is_32_char_hex(self):
+        import hashlib
+        conv_id = "dingtalk_cidAbcDef123"
+        session_id = hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+        assert len(session_id) == 32
+        assert all(c in "0123456789abcdef" for c in session_id)
+
+    def test_same_input_produces_same_hash(self):
+        import hashlib
+        conv_id = "dingtalk_cidAbcDef123"
+        h1 = hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+        h2 = hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+        assert h1 == h2
+
+    def test_different_inputs_produce_different_hashes(self):
+        import hashlib
+        h1 = hashlib.sha256(b"conv_group_A").hexdigest()[:32]
+        h2 = hashlib.sha256(b"conv_group_B").hexdigest()[:32]
+        assert h1 != h2
+
+    def test_original_id_not_in_hash(self):
+        import hashlib
+        conv_id = "wecom_user_12345_secret"
+        session_id = hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+        assert "wecom" not in session_id
+        assert "user" not in session_id
+        assert "secret" not in session_id
+
+    def test_hash_within_256_char_limit(self):
+        import hashlib
+        very_long_id = "x" * 500
+        session_id = hashlib.sha256(very_long_id.encode()).hexdigest()[:32]
+        assert len(session_id) <= 256

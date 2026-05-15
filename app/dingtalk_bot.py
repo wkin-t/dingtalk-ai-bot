@@ -164,6 +164,19 @@ def _load_soul(conversation_id: str) -> str:
         return ""
 
 
+def _get_bot_name(backend: str) -> str:
+    """根据 AI 后端返回 bot 显示名称"""
+    return {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(backend, "Gem")
+
+
+def _shorten_model_name(model: str) -> str:
+    """归一化模型名用于 UI 显示：去掉 provider 前缀、版本后缀、Gemini 系列前缀"""
+    if "/" in model:
+        model = model.split("/")[-1]
+    model = re.sub(r'[@:].*$', '', model)
+    return model.replace("gemini-", "").replace("-preview", "")
+
+
 def _is_soul_admin(sender_id: str) -> bool:
     """检查用户是否有 Soul 管理权限。管理员列表通过环境变量配置。"""
     import os as _os
@@ -1106,7 +1119,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             day = current_date.day
 
             # 根据 AI_BACKEND 动态设置 bot 名称
-            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(AI_BACKEND, "Gem")
+            bot_name = _get_bot_name(AI_BACKEND)
 
             system_prompt = f"""## 身份
 你的名字是 {bot_name}。你的个性和风格由你的 Soul 定义（在下方注入）。
@@ -1648,14 +1661,9 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 status_text += f"\n\n<font color='#808080' size='2'>🧠 {thinking_level} {search_icon}</font>"
             else:
                 if usage_info and usage_info.get("model"):
-                    actual_model = usage_info["model"]
-                    if "/" in actual_model:
-                        actual_model = actual_model.split("/")[-1]
-                    # 剥掉 @版本号 / :beta 等后缀，统一显示风格
-                    actual_model = re.sub(r'[@:].*$', '', actual_model)
-                    model_short = actual_model.replace("gemini-", "").replace("-preview", "")
+                    model_short = _shorten_model_name(usage_info["model"])
                 else:
-                    model_short = target_model.replace("gemini-", "").replace("-preview", "")
+                    model_short = _shorten_model_name(target_model)
                 search_icon = "🌐" if need_search else ""
                 status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} | t={temperature:.1f} {search_icon}</font>"
 

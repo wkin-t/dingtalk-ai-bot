@@ -132,6 +132,32 @@ class TestBackendSelection:
         finally:
             cfg.AI_BACKEND = original
 
+    @pytest.mark.asyncio
+    async def test_openai_passes_conversation_id_to_litellm(self):
+        """openai 后端应将 conversation_id 透传给 call_litellm_stream"""
+        import app.config as cfg
+        from unittest.mock import patch, call
+
+        original = cfg.AI_BACKEND
+        try:
+            cfg.AI_BACKEND = "openai"
+            from app.ai.backend import create_backend_stream
+
+            async def fake_stream(*args, **kwargs):
+                yield {"content": "ok"}
+
+            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream) as mock:
+                async for _ in create_backend_stream(
+                    [{"role": "user", "content": "hi"}],
+                    target_model="gemini-3-flash-preview",
+                    conversation_id="test-conv-openai",
+                ):
+                    pass
+                mock.assert_called_once()
+                assert mock.call_args[1]["conversation_id"] == "test-conv-openai"
+        finally:
+            cfg.AI_BACKEND = original
+
     def test_openrouter_backend_selectable(self):
         import app.config as cfg
         original = cfg.AI_BACKEND
@@ -167,5 +193,31 @@ class TestBackendSelection:
                     chunks.append(chunk)
                 assert len(chunks) == 1
                 assert chunks[0]["content"] == "openrouter response"
+        finally:
+            cfg.AI_BACKEND = original
+
+    @pytest.mark.asyncio
+    async def test_openrouter_passes_conversation_id_to_litellm(self):
+        """openrouter 后端应将 conversation_id 透传给 call_litellm_stream"""
+        import app.config as cfg
+        from unittest.mock import patch
+
+        original = cfg.AI_BACKEND
+        try:
+            cfg.AI_BACKEND = "openrouter"
+            from app.ai.backend import create_backend_stream
+
+            async def fake_stream(*args, **kwargs):
+                yield {"content": "ok"}
+
+            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream) as mock:
+                async for _ in create_backend_stream(
+                    [{"role": "user", "content": "hi"}],
+                    target_model="gemini-3-flash-preview",
+                    conversation_id="test-conv-openrouter",
+                ):
+                    pass
+                mock.assert_called_once()
+                assert mock.call_args[1]["conversation_id"] == "test-conv-openrouter"
         finally:
             cfg.AI_BACKEND = original
