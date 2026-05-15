@@ -152,9 +152,12 @@ class TestOpenRouterConfig:
             assert "supports_search" in config
             assert "supports_vision" in config
 
-    def test_openrouter_fast_model_has_fallbacks(self):
+    def test_openrouter_fallback_default_is_empty(self):
+        """默认不配置 fallback，避免无感知切换到 GPT 等其他供应商"""
         from app.config import OPENROUTER_MODEL_CONFIG
-        assert len(OPENROUTER_MODEL_CONFIG["fast"]["fallbacks"]) >= 1
+        for key in ("lite", "fast", "pro"):
+            assert OPENROUTER_MODEL_CONFIG[key]["fallbacks"] == [], \
+                f"{key} 档默认 fallback 应为空，当前: {OPENROUTER_MODEL_CONFIG[key]['fallbacks']}"
 
     def test_openrouter_base_url_is_correct(self):
         from app.config import OPENROUTER_BASE_URL
@@ -165,19 +168,24 @@ class TestOpenRouterConfig:
         tool = {"type": "openrouter:web_search"}
         assert tool["type"] == "openrouter:web_search"
 
-    def test_openrouter_extra_body_fallback_structure(self):
-        """模型回退 extra_body 结构验证"""
+    def test_openrouter_extra_body_no_fallback_by_default(self):
+        """默认 fallback 为空时，extra_body 不应包含 models/route 字段"""
         from app.config import OPENROUTER_MODEL_CONFIG
         config = OPENROUTER_MODEL_CONFIG["fast"]
-        model = config["model"]
         fallbacks = config["fallbacks"]
-        extra_body = {
-            "models": [model] + fallbacks,
-            "route": "fallback",
-        }
-        assert extra_body["models"][0] == model
-        assert extra_body["route"] == "fallback"
-        assert len(extra_body["models"]) >= 2
+        extra_body: dict = {}
+        if fallbacks:
+            extra_body["models"] = [config["model"]] + fallbacks
+            extra_body["route"] = "fallback"
+        assert "models" not in extra_body
+        assert "route" not in extra_body
+
+    def test_openrouter_provider_order_default_is_anthropic(self):
+        """默认 provider_order 为 Anthropic，确保 cache_control 能被识别"""
+        from app.config import OPENROUTER_MODEL_CONFIG
+        for key in ("lite", "fast", "pro"):
+            order = OPENROUTER_MODEL_CONFIG[key]["provider_order"]
+            assert "Anthropic" in order, f"{key} 档默认 provider_order 应含 Anthropic"
 
     def test_openrouter_provider_sort_empty_by_default(self):
         """默认不设 provider_sort，让 OpenRouter 自动决策"""
