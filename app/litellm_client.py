@@ -183,11 +183,16 @@ async def call_litellm_stream(
             effort = EFFORT_MAPPING.get(thinking_level)
             if config["supports_reasoning"] and effort is not None:
                 kwargs["reasoning_effort"] = effort
+            # GPT-5 推理模型只接受 temperature=1，传其他值会报 UnsupportedParamsError
+            if config["supports_reasoning"]:
+                kwargs.pop("temperature", None)
         else:
             # 无 api_base 的默认路径
             effort = EFFORT_MAPPING.get(thinking_level)
             if config["supports_reasoning"] and effort is not None:
                 kwargs["reasoning_effort"] = effort
+            if config["supports_reasoning"]:
+                kwargs.pop("temperature", None)
 
         if not config["supports_vision"]:
             kwargs["messages"] = _strip_images(messages)
