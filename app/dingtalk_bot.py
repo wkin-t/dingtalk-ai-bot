@@ -724,9 +724,9 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
    - false: 不需要联网（默认）
 
 4. thinking_text:
-   - 一句简短的思考状态（10字以内，带emoji），要和问题内容相关，风格符合你的性格
-   - {soul_instruction}例如: 代码问题→"正在编译思路中 ⚡", 数学问题→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
-   - 要有趣、有个性、不重复
+   - 一句简短的思考状态（10字以内，不用emoji），要和问题内容相关，风格符合你的性格
+   - {soul_instruction}例如: 代码问题→"正在编译思路中", 数学问题→"开始推演计算", 闲聊→"让我想想"
+   - 要有个性、不重复
 
 5. need_image_gen:
    - true: 用户明确要求生成图片、画画、插图、绘制、画一张、生成图片
@@ -749,7 +749,7 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     try:
         kwargs = {

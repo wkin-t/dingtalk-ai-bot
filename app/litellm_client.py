@@ -277,8 +277,8 @@ async def analyze_complexity_with_openrouter(
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期）
    - false: 不需要（默认）
 
-4. thinking_text: 一句简短思考状态（10字以内，带emoji），和问题内容相关
-   {soul_instruction}例如: 代码→"正在编译思路中 ⚡", 数学→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+4. thinking_text: 一句简短思考状态（10字以内，不用emoji），和问题内容相关
+   {soul_instruction}例如: 代码→"正在编译思路中", 数学→"开始推演计算", 闲聊→"让我想想"
 
 5. temperature:
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
@@ -294,7 +294,7 @@ async def analyze_complexity_with_openrouter(
    - false: 默认（无图片 或 仅聊天/文字生图）
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     try:
         response = await litellm.acompletion(
