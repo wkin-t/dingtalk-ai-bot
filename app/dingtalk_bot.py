@@ -164,17 +164,6 @@ def _load_soul(conversation_id: str) -> str:
         return ""
 
 
-def _extract_soul_name(soul_text: str) -> str:
-    """从 soul 文本前 5 行提取自定义名字（格式：name:xxx 或 名字:xxx）"""
-    for line in soul_text.splitlines()[:5]:
-        line = line.strip()
-        if line.lower().startswith("name:") or line.startswith("名字:"):
-            name = line.split(":", 1)[1].strip()
-            if name:
-                return name
-    return ""
-
-
 def _is_soul_admin(sender_id: str) -> bool:
     """检查用户是否有 Soul 管理权限。管理员列表通过环境变量配置。"""
     import os as _os
@@ -421,7 +410,7 @@ async def _maybe_evolve_soul(conversation_id: str, messages: list, ai_response: 
 {{"changed": false}}
 
 如果需要进化，返回:
-{{"changed": true, "new_soul": "完整的新 Soul。可以在开头用 1-2 句话写下你的近期感悟（帮助未来的你理解为何这样定义），然后是核心角色定义。5-12 行，第一人称，简洁有力。如果你想给自己起一个新名字，在 Soul 文本最前面写一行 name:你的名字（如 name:星火），省略则继续使用默认名字。"}}
+{{"changed": true, "new_soul": "完整的新 Soul。可以在开头用 1-2 句话写下你的近期感悟（帮助未来的你理解为何这样定义），然后是核心角色定义。5-12 行，第一人称，简洁有力。"}}
 
 进化要渐进——保留你认可的核心特质，只调整需要变化的部分。
 只返回 JSON，不要其他内容。"""
@@ -1147,9 +1136,6 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
             # 注入群级 Soul 配置
             soul_content = _load_soul(conversation_id)
             if soul_content:
-                soul_name = _extract_soul_name(soul_content)
-                if soul_name:
-                    bot_name = soul_name
                 system_prompt += f"\n\n{bot_name} 的个性设定:\n{soul_content}"
 
             messages = []

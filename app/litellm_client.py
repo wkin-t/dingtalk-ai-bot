@@ -38,6 +38,20 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
+def _inject_cache_control(messages: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
+    """为 Anthropic 模型的 system 消息注入 cache_control breakpoint（节省最多 90% 输入 token）"""
+    if not model.startswith("anthropic/"):
+        return messages
+    result = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content:
+                msg = {**msg, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
+        result.append(msg)
+    return result
+
+
 async def call_litellm_stream(
     messages: List[Dict[str, Any]],
     target_model: str,
@@ -171,6 +185,9 @@ async def call_litellm_stream(
 
         if not config["supports_vision"]:
             kwargs["messages"] = _strip_images(messages)
+
+        if OPENROUTER_API_KEY:
+            kwargs["messages"] = _inject_cache_control(kwargs["messages"], model)
 
         response = await litellm.acompletion(**kwargs)
 
