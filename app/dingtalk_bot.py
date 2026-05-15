@@ -1178,7 +1178,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 elif msg["role"] == "assistant" and msg.get("bot_id"):
                     # 历史消息标注 AI 来源（仅用于上下文区分，不作为输出格式）
                     msg_bot_id = msg["bot_id"]
-                    bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(msg_bot_id, msg_bot_id)
+                    bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(msg_bot_id, msg_bot_id)
                     # 只有当内容本身不以来源标签开头时才添加，避免累积
                     tag = f"[来自{bot_source}]"
                     if not msg_content.startswith(tag):
