@@ -102,8 +102,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - number_of_images: 解析数量 → 1-4，默认 1
 
 7. need_image_edit:
-   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
-   - false: 默认（无图片 或 仅聊天/文字生图）
+   - true: 有图片(has_images=是) 且用户文字中明确包含修改指令（"帮我改"、"修改"、"换颜色"、"去掉背景"、"再生成类似的"等）
+   - false: 默认 — 以下情况均为 false：无图片；只发图片没有文字；文字是提问/分析（"这是什么"、"帮我看看"、"分析一下"）；没有明确修改词
 
 8. temperature:
    - "precise": 代码、数学、翻译、事实查询（需要准确性）

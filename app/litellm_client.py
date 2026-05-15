@@ -319,8 +319,8 @@ async def analyze_complexity_with_openrouter(
    - false: 默认
 
 7. need_image_edit:
-   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
-   - false: 默认（无图片 或 仅聊天/文字生图）
+   - true: 有图片(has_images=是) 且用户文字中明确包含修改指令（"帮我改"、"修改"、"换颜色"、"去掉背景"、"再生成类似的"等）
+   - false: 默认 — 以下情况均为 false：无图片；只发图片没有文字；文字是提问/分析（"这是什么"、"帮我看看"）；没有明确修改词
 
 只返回JSON:
 {{"model":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""

@@ -741,8 +741,8 @@ async def _analyze_with_litellm(content: str, has_images: bool = False, soul_tex
    - number_of_images: 解析数量 → 1-4，默认 1
 
 7. need_image_edit:
-   - true: 有图片(has_images=是) 且用户要求修改/编辑/调整这张图（"帮我改颜色"、"去掉背景"、"再生成类似的"）
-   - false: 默认（无图片 或 仅聊天/文字生图）
+   - true: 有图片(has_images=是) 且用户文字中明确包含修改指令（"帮我改"、"修改"、"换颜色"、"去掉背景"、"再生成类似的"等）
+   - false: 默认 — 以下情况均为 false：无图片；只发图片没有文字；文字是提问/分析（"这是什么"、"帮我看看"）；没有明确修改词
 
 8. temperature:
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
@@ -1416,8 +1416,9 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         # ===== 生图分支结束 =====
 
         # ===== 改图分支 =====
+        # content 为空（只发图片无文字）时，无论路由怎么判断都不触发改图
         need_image_edit = (
-            complexity.get("need_image_edit", False)
+            complexity.get("need_image_edit", False) and bool(content.strip())
             if AI_BACKEND not in ("openclaw", "openrouter") else False
         )
         if need_image_edit and image_data_list:
