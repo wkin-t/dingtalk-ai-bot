@@ -214,7 +214,13 @@ async def call_litellm_stream(
 
             delta = chunk.choices[0].delta
 
-            reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
+            model_extra = getattr(delta, "model_extra", None) or {}
+            reasoning = (
+                getattr(delta, "reasoning_content", None)
+                or getattr(delta, "thinking", None)
+                or model_extra.get("reasoning_content")
+                or model_extra.get("thinking")
+            )
             if reasoning:
                 if not thinking_sent:
                     yield {"thinking_start": True}
