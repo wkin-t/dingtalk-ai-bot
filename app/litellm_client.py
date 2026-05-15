@@ -43,6 +43,7 @@ async def call_litellm_stream(
     target_model: str,
     thinking_level: str = "low",
     enable_search: bool = False,
+    temperature: float = 0.7,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     通过 LiteLLM 调用任意 OpenAI 兼容模型（流式）
@@ -114,6 +115,7 @@ async def call_litellm_stream(
             "stream_options": {"include_usage": True},
             "num_retries": LITELLM_MAX_RETRIES,
             "timeout": LITELLM_READ_TIMEOUT,
+            "temperature": temperature,
         }
 
         if OPENROUTER_API_KEY:
@@ -255,12 +257,17 @@ async def analyze_complexity_with_openrouter(
 4. thinking_text: 一句简短思考状态（10字以内，带emoji），和问题内容相关
    {soul_instruction}例如: 代码→"正在编译思路中 ⚡", 数学→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
 
-5. need_image_gen:
+5. temperature:
+   - "precise": 代码、数学、翻译、事实查询（需要准确性）
+   - "balanced": 普通问答（默认）
+   - "creative": 写作、诗歌、头脑风暴、创意任务
+
+6. need_image_gen:
    - true: 用户明确要求生成图片、画画、绘制
    - false: 默认
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         response = await litellm.acompletion(

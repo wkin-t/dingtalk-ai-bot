@@ -13,6 +13,7 @@ async def create_backend_stream(
     target_model: str,
     thinking_level: str = "low",
     enable_search: bool = False,
+    temperature: float = 0.7,
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -47,6 +48,7 @@ async def create_backend_stream(
             target_model=target_model,
             thinking_level=thinking_level,
             enable_search=enable_search,
+            temperature=temperature,
         )
     else:
         from app.gemini_client import call_gemini_stream
@@ -55,6 +57,7 @@ async def create_backend_stream(
             target_model=target_model,
             thinking_level=thinking_level,
             enable_search=enable_search,
+            temperature=temperature,
         )
 
     async for chunk in stream:

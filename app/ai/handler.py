@@ -16,6 +16,12 @@ from app.memory import get_history, update_history
 from app.gemini_client import analyze_complexity_with_model
 from app.ai.router import analyze_complexity_unified
 
+TEMPERATURE_MAP = {
+    "precise": 0.1,   # 代码、数学、事实查询
+    "balanced": 0.7,  # 默认
+    "creative": 0.9,  # 写作、头脑风暴、诗歌
+}
+
 
 class AIHandler:
     """
@@ -175,9 +181,9 @@ class AIHandler:
 
         # 智能路由
         has_images = bool(image_data_list)
-        target_model, thinking_level, need_search = await self._route_model(content, has_images)
+        target_model, thinking_level, need_search, temperature = await self._route_model(content, has_images)
 
-        print(f"🎯 [AIHandler] 路由结果: model={target_model}, thinking={thinking_level}, search={need_search}")
+        print(f"🎯 [AIHandler] 路由结果: model={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
         # 调用 AI 流式接口
         full_response = ""
@@ -191,6 +197,7 @@ class AIHandler:
                 target_model=target_model,
                 thinking_level=thinking_level,
                 enable_search=need_search,
+                temperature=temperature,
                 conversation_id=session_key,
                 sender_id=user_id,
                 sender_nick=sender_nick,
@@ -351,5 +358,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         target_model = complexity.get("model", "gemini-3-flash-preview")
         thinking_level = complexity.get("thinking_level", "low")
         need_search = complexity.get("need_search", False)
+        temp_label = complexity.get("temperature", "balanced")
+        temperature = TEMPERATURE_MAP.get(str(temp_label), 0.7)
 
-        return (target_model, thinking_level, need_search)
+        return (target_model, thinking_level, need_search, temperature)

@@ -101,10 +101,15 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
    - number_of_images: 解析数量 → 1-4，默认 1
 
+7. temperature:
+   - "precise": 代码、数学、翻译、事实查询（需要准确性）
+   - "balanced": 普通问答（默认）
+   - "creative": 写作、诗歌、头脑风暴、创意任务
+
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
@@ -225,7 +230,8 @@ async def call_gemini_stream(
     messages: List[Dict[str, Any]],
     target_model: str = DEFAULT_MODEL,
     thinking_level: str = "low",
-    enable_search: bool = False  # 由智能路由决定是否启用搜索
+    enable_search: bool = False,
+    temperature: float = 0.7,
 ) -> AsyncGenerator[Dict[str, str], None]:
     """
     调用 Gemini API 进行流式生成
@@ -258,7 +264,7 @@ async def call_gemini_stream(
 
         # 配置生成参数
         config = types.GenerateContentConfig(
-            temperature=0.7,
+            temperature=temperature,
             max_output_tokens=8192,
             system_instruction=system_instruction,
             tools=tools if tools else None,
