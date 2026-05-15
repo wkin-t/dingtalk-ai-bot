@@ -350,5 +350,31 @@ def get_route_key(target_model: str) -> str:
 def get_litellm_model_config(route_key: str) -> dict:
     return LITELLM_MODEL_CONFIG.get(route_key, LITELLM_MODEL_CONFIG["fast"])
 
+# ===== OpenRouter 后端 =====
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+def _parse_fallbacks(env_val: str) -> list:
+    return [m.strip() for m in env_val.split(",") if m.strip()]
+
+OPENROUTER_MODEL_CONFIG = {
+    "fast": {
+        "model": os.getenv("OPENROUTER_MODEL_FAST", "openai/gpt-4.1-mini"),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "google/gemini-2.5-flash")),
+        "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
+        "supports_reasoning": _get_bool("OPENROUTER_FAST_SUPPORTS_REASONING", False),
+        "supports_search": _get_bool("OPENROUTER_FAST_SUPPORTS_SEARCH", True),
+        "supports_vision": _get_bool("OPENROUTER_FAST_SUPPORTS_VISION", True),
+    },
+    "pro": {
+        "model": os.getenv("OPENROUTER_MODEL_PRO", "anthropic/claude-opus-4-5"),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "openai/gpt-4.1")),
+        "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
+        "supports_reasoning": _get_bool("OPENROUTER_PRO_SUPPORTS_REASONING", True),
+        "supports_search": _get_bool("OPENROUTER_PRO_SUPPORTS_SEARCH", True),
+        "supports_vision": _get_bool("OPENROUTER_PRO_SUPPORTS_VISION", True),
+    },
+}
+
 # 注意: 代理配置在 gemini_client.py 中设置
 # 使用 NO_PROXY 排除钉钉域名，确保钉钉 SDK 不走代理

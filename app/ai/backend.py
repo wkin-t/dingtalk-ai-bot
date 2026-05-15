@@ -40,7 +40,7 @@ async def create_backend_stream(
             model=target_model,
             image_data_list=kwargs.get("image_data_list"),
         )
-    elif backend == "openai":
+    elif backend in ("openai", "openrouter"):
         from app.litellm_client import call_litellm_stream
         stream = call_litellm_stream(
             messages,

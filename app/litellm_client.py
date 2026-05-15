@@ -9,6 +9,7 @@ from app.config import (
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
     LITELLM_MAX_RETRIES, OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM,
     VERTEX_PROJECT,
+    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL_CONFIG,
 )
 
 # LiteLLM 通过环境变量识别代理
@@ -61,7 +62,10 @@ async def call_litellm_stream(
     warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
     route_key = get_route_key(target_model)
-    config = get_litellm_model_config(route_key)
+    if OPENROUTER_API_KEY:
+        config = OPENROUTER_MODEL_CONFIG.get(route_key, OPENROUTER_MODEL_CONFIG["fast"])
+    else:
+        config = get_litellm_model_config(route_key)
     model = config["model"]
 
     print(f"📡 [LiteLLM] 请求模型: {model} (路由: {route_key}, thinking: {thinking_level})")
@@ -70,8 +74,8 @@ async def call_litellm_stream(
     input_tokens = 0
     output_tokens = 0
 
-    # 如果需要搜索，用 Gemini Google Search grounding 获取结果后注入消息
-    if enable_search:
+    # OpenRouter 原生搜索工具更可靠，跳过 Gemini 搜索注入
+    if enable_search and not OPENROUTER_API_KEY:
         try:
             from app.gemini_client import google_search
             # 从最后一条用户消息提取搜索 query
@@ -112,7 +116,27 @@ async def call_litellm_stream(
             "timeout": LITELLM_READ_TIMEOUT,
         }
 
-        if config["model"].startswith("vertex_ai/"):
+        if OPENROUTER_API_KEY:
+            # OpenRouter 路径：模型回退 + 供应商路由 + 原生 Web Search
+            extra_body = {}
+            fallbacks = config.get("fallbacks", [])
+            if fallbacks:
+                extra_body["models"] = [model] + fallbacks
+                extra_body["route"] = "fallback"
+            provider_sort = config.get("provider_sort", "")
+            if provider_sort:
+                extra_body["provider"] = {"sort": {"by": provider_sort}}
+            if enable_search and config.get("supports_search"):
+                extra_body["tools"] = [{"type": "openrouter:web_search"}]
+            kwargs["api_base"] = OPENROUTER_BASE_URL
+            kwargs["api_key"] = OPENROUTER_API_KEY
+            kwargs["custom_llm_provider"] = "openai"
+            effort = EFFORT_MAPPING.get(thinking_level)
+            if config.get("supports_reasoning") and effort and effort != "none":
+                kwargs["reasoning_effort"] = effort
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+        elif config["model"].startswith("vertex_ai/"):
             # Vertex AI 路径 — 互斥，不走 OpenAI 兼容逻辑
             kwargs["vertex_ai_project"] = VERTEX_PROJECT
             kwargs["vertex_ai_location"] = config.get("region", "us-east5")
@@ -145,6 +169,11 @@ async def call_litellm_stream(
         thinking_sent = False
 
         async for chunk in response:
+            # usage 先采集，final chunk 可能 choices 为空
+            if hasattr(chunk, "usage") and chunk.usage:
+                input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+
             if not chunk.choices:
                 continue
 
@@ -163,10 +192,6 @@ async def call_litellm_stream(
                     yield {"thinking_end": True}
                     thinking_sent = False
                 yield {"content": content}
-
-            if hasattr(chunk, "usage") and chunk.usage:
-                input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
-                output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
 
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ [LiteLLM] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 延迟: {latency_ms}ms")

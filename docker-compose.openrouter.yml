@@ -1,0 +1,24 @@
+# 1Panel 管理的 DingTalk AI 机器人服务 (OpenRouter 后端)
+# 代码位置: /opt/1panel/docker/compose/dingtalk-ai-bot/
+# 依赖: v2raya (由 1Panel 单独管理，提供 socks5://127.0.0.1:1080 代理)
+
+services:
+  dingtalk-ai-bot-openrouter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-ai-bot:openrouter
+    container_name: dingtalk-ai-bot-openrouter
+    restart: always
+    network_mode: "host"
+    environment:
+      - AI_BACKEND=openrouter
+      - FLASK_PORT=35002
+    env_file:
+      - .env.openrouter
+    volumes:
+      - ./data-openrouter:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M

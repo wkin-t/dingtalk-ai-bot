@@ -131,3 +131,41 @@ class TestBackendSelection:
                 assert call_kwargs[1]["sender_id"] == "user1"
         finally:
             cfg.AI_BACKEND = original
+
+    def test_openrouter_backend_selectable(self):
+        import app.config as cfg
+        original = cfg.AI_BACKEND
+        try:
+            cfg.AI_BACKEND = "openrouter"
+            from app.ai.backend import _get_backend_name
+            assert _get_backend_name() == "openrouter"
+        finally:
+            cfg.AI_BACKEND = original
+
+    @pytest.mark.asyncio
+    async def test_openrouter_backend_dispatches_to_litellm(self):
+        """openrouter 后端应复用 call_litellm_stream"""
+        import app.config as cfg
+        from unittest.mock import patch
+
+        original = cfg.AI_BACKEND
+        try:
+            cfg.AI_BACKEND = "openrouter"
+            from app.ai.backend import create_backend_stream
+
+            async def fake_stream(*args, **kwargs):
+                yield {"content": "openrouter response"}
+
+            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream):
+                chunks = []
+                async for chunk in create_backend_stream(
+                    [{"role": "user", "content": "hi"}],
+                    target_model="gemini-3-flash-preview",
+                    thinking_level="low",
+                    enable_search=False,
+                ):
+                    chunks.append(chunk)
+                assert len(chunks) == 1
+                assert chunks[0]["content"] == "openrouter response"
+        finally:
+            cfg.AI_BACKEND = original

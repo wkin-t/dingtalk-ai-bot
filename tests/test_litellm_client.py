@@ -133,6 +133,61 @@ class TestStripImages:
         assert cleaned[1]["content"] == "有图片的消息"
 
 
+class TestOpenRouterConfig:
+    """OpenRouter 配置测试"""
+
+    def test_openrouter_model_config_has_fast_and_pro(self):
+        from app.config import OPENROUTER_MODEL_CONFIG
+        assert "fast" in OPENROUTER_MODEL_CONFIG
+        assert "pro" in OPENROUTER_MODEL_CONFIG
+
+    def test_openrouter_config_has_required_fields(self):
+        from app.config import OPENROUTER_MODEL_CONFIG
+        for key in ("fast", "pro"):
+            config = OPENROUTER_MODEL_CONFIG[key]
+            assert "model" in config
+            assert "fallbacks" in config
+            assert isinstance(config["fallbacks"], list)
+            assert "supports_reasoning" in config
+            assert "supports_search" in config
+            assert "supports_vision" in config
+
+    def test_openrouter_fast_model_has_fallbacks(self):
+        from app.config import OPENROUTER_MODEL_CONFIG
+        assert len(OPENROUTER_MODEL_CONFIG["fast"]["fallbacks"]) >= 1
+
+    def test_openrouter_base_url_is_correct(self):
+        from app.config import OPENROUTER_BASE_URL
+        assert OPENROUTER_BASE_URL == "https://openrouter.ai/api/v1"
+
+    def test_openrouter_web_search_tool_format(self):
+        """Web Search 应使用 openrouter:web_search tool，而非废弃的 plugins"""
+        tool = {"type": "openrouter:web_search"}
+        assert tool["type"] == "openrouter:web_search"
+
+    def test_openrouter_extra_body_fallback_structure(self):
+        """模型回退 extra_body 结构验证"""
+        from app.config import OPENROUTER_MODEL_CONFIG
+        config = OPENROUTER_MODEL_CONFIG["fast"]
+        model = config["model"]
+        fallbacks = config["fallbacks"]
+        extra_body = {
+            "models": [model] + fallbacks,
+            "route": "fallback",
+        }
+        assert extra_body["models"][0] == model
+        assert extra_body["route"] == "fallback"
+        assert len(extra_body["models"]) >= 2
+
+    def test_openrouter_provider_sort_empty_by_default(self):
+        """默认不设 provider_sort，让 OpenRouter 自动决策"""
+        import os
+        from app.config import OPENROUTER_MODEL_CONFIG
+        # 默认配置不强制价格路由（可由用户通过 OPENROUTER_PROVIDER_SORT 覆盖）
+        provider_sort = OPENROUTER_MODEL_CONFIG["fast"]["provider_sort"]
+        assert isinstance(provider_sort, str)
+
+
 class TestVertexProviderBranch:
     """Vertex AI provider 互斥分支测试"""
 

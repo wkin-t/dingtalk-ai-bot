@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-多平台 AI 机器人服务，支持钉钉和企业微信，后端可切换 Gemini 或 OpenClaw。Python + Flask，Docker 部署。
+多平台 AI 机器人服务，支持钉钉和企业微信，后端可切换 Gemini、OpenClaw 或 LiteLLM（OpenAI/Vertex AI）。Python + Flask，Docker 部署。
 
 ## 常用命令
 
@@ -20,6 +20,9 @@ python -m compileall -q app main.py  # 编译检查 (CI 也用这个)
 # Docker
 docker-compose up -d --build      # gemini 版本
 docker-compose -f docker-compose.openclaw.yml up -d --build  # openclaw 版本
+docker-compose -f docker-compose.openai.yml up -d --build    # openai/litellm 版本
+docker-compose -f docker-compose.openrouter.yml up -d --build # openrouter 版本 (端口 35002)
+docker-compose -f docker-compose.wecom.yml up -d --build     # 企业微信版本
 docker logs -f dingtalk-ai-bot-gemini   # 查看日志
 
 # 部署 (使用 skill)
@@ -37,15 +40,18 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── dingtalk_bot.py      # 钉钉 Stream 消息处理
 │   ├── dingtalk_card.py     # 钉钉 AI 卡片管理 (创建/流式更新)
 │   ├── gemini_client.py     # Gemini API 流式调用 (google-genai SDK)
-│   ├── litellm_client.py    # LiteLLM 统一流式客户端 (OpenAI 兼容模型)
+│   ├── litellm_client.py    # LiteLLM 统一流式客户端 (OpenAI/Vertex AI 兼容模型)
 │   ├── openclaw_client.py   # OpenClaw 客户端 (HTTP SSE + WebSocket)
 │   ├── openclaw_tools_client.py  # OpenClaw Tools Invoke (图片识别等)
+│   ├── image_gen.py         # 生图 (Gemini Imagen / OpenAI gpt-image-2)
+│   ├── image_store.py       # 生图存储 → 腾讯云 COS → 预签名 URL
 │   ├── reference.py         # 历史引用（智能触发）
 │   ├── memory.py            # 对话历史 (Redis+MySQL → 文件降级)
 │   ├── database.py          # 数据层 (Redis 缓存 + MySQL 持久化)
 │   ├── ai/
 │   │   ├── handler.py       # AIHandler - 统一 AI 处理层，抽象平台差异
-│   │   ├── router.py        # 智能路由 (模型选择)
+│   │   ├── backend.py       # 后端分派 (gemini/openclaw/openai → 各客户端)
+│   │   ├── router.py        # 智能路由 (关键词匹配 → 模型/thinking level)
 │   │   └── buffer.py        # 消息缓冲器 (2秒窗口合并连续消息)
 │   └── wecom/
 │       ├── crypto.py        # 企业微信消息加解密 (WXBizMsgCrypt)
@@ -59,9 +65,10 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 ### 关键设计
 
 - **Monkey Patch**: `main.py` 顶部对 `aiohttp` 和 `requests` 打补丁，统一注入代理和重试逻辑。必须在所有其他导入之前执行。
-- **双后端切换**: `AI_BACKEND` 环境变量选择 `gemini` 或 `openclaw`，OpenClaw 支持 HTTP SSE 和 WebSocket 两种传输。
+- **三后端切换**: `AI_BACKEND` 环境变量选择 `gemini`、`openclaw` 或 `openai`（LiteLLM/Vertex AI）。OpenClaw 支持 HTTP SSE 和 WebSocket 两种传输。切换点是 `app/ai/backend.py` 的 `create_backend_stream()`，handler/bot 层不感知具体后端。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
-- **智能路由**: 先用 `gemini-flash-lite` 分析问题复杂度，动态选择模型、thinking level 和是否启用 Google Search。
+- **智能路由**: `app/ai/router.py` 先做本地关键词匹配（`COMPLEX_KEYWORDS`/`PRO_KEYWORDS`/`SIMPLE_KEYWORDS`）决定模型和 thinking level，无需额外 API 调用；Gemini 后端也可选用 `gemini-flash-lite` 做更细粒度分析。
+- **生图流水线**: 用户发送 `/draw` 触发 `image_gen.py`（Gemini Imagen 或 OpenAI gpt-image-2）→ `image_store.py` 上传腾讯云 COS → 预签名 URL → 钉钉原生图片消息。
 - **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制 reset/set/evolve 权限（空=允许所有）。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。
@@ -75,7 +82,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `.env.openclaw` → OpenClaw 后端
 - `.env.wecom` → 企业微信+钉钉双平台
 
-核心变量: `AI_BACKEND`, `PLATFORM`, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`。
+核心变量: `AI_BACKEND`（gemini/openclaw/openai）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
 
 所有配置集中在 `app/config.py`，含环境变量读取辅助函数 (`_get_int`, `_get_bool`, `_get_float`)。
 
