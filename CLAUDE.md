@@ -71,7 +71,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **生图+改图流水线**: 路由检测 `need_image_gen` → `image_gen.generate_image()`（Gemini Imagen 或 OpenAI gpt-image-2）；检测 `need_image_edit`（用户发图+修改指令）→ `image_gen.edit_image()`（Gemini Flash exp 或 OpenAI images.edit，OpenRouter/OpenClaw 不支持）。图片经 `image_store.py` 上传 COS → 预签名 URL 展示。
 - **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。后台调用轻量模型：openrouter 用 Haiku，openai 用 flash，其余用 Gemini flash-lite。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制（空=允许所有）。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
-- **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。
+- **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。Soul 文件命名 `{BOT_ID}__{cid}.md`（双下划线），防止多容器共享 soul（群聊 cid 跨容器相同）。
 - **数据降级**: Redis+MySQL 优先，不可用时自动降级到本地文件 (`data/history/`)。
 - **OpenClaw 多 Agent 路由**: `OPENCLAW_GROUP_AGENT_MAPPING` 按 conversationId 映射到不同 agent，严格模式 (`OPENCLAW_STRICT_ROUTING=true`) 下未映射的群拒绝访问。
 
@@ -85,7 +85,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 
 核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
 
-OpenRouter 专属变量: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL_LITE/FAST/PRO`（三档模型），`OPENROUTER_ROUTER_MODEL`（路由用 Haiku，默认 `anthropic/claude-haiku-4-5`），`OPENROUTER_PROVIDER_SORT`（`price` 按价格排序）。
+OpenRouter 专属变量: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL_LITE/FAST/PRO`（三档模型），`OPENROUTER_ROUTER_MODEL`（路由用 Haiku，默认 `anthropic/claude-haiku-4-5`），`OPENROUTER_PROVIDER_ORDER`（默认 `Anthropic`，必须走 Anthropic 官方 provider 才能命中 prompt cache；Bedrock 忽略 `cache_control`），`OPENROUTER_PROVIDER_SORT`（`price` 按价格排序）。Fallback 默认禁用，按需设 `OPENROUTER_FALLBACK_LITE/FAST/PRO`。
 
 所有配置集中在 `app/config.py`，含环境变量读取辅助函数 (`_get_int`, `_get_bool`, `_get_float`)。
 
