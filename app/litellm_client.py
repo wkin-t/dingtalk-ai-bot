@@ -132,7 +132,10 @@ async def call_litellm_stream(
             if enable_search and config.get("supports_search"):
                 extra_body["tools"] = [{"type": "openrouter:web_search"}]
             if conversation_id:
-                extra_body["session_id"] = conversation_id
+                # session_id 用于 OpenRouter 可观测性（trace 分组），不影响 prompt cache
+                # 哈希处理：避免用户标识明文传到境外服务，同时满足 256 字符上限
+                import hashlib
+                extra_body["session_id"] = hashlib.sha256(conversation_id.encode()).hexdigest()[:32]
             kwargs["api_base"] = OPENROUTER_BASE_URL
             kwargs["api_key"] = OPENROUTER_API_KEY
             kwargs["custom_llm_provider"] = "openai"
