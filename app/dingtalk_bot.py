@@ -135,8 +135,10 @@ def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
     return cleaned, payload if isinstance(payload, dict) else None
 
 def _soul_filename(conversation_id: str) -> str:
-    """将 conversation_id 转为安全的文件名（替换 / 等路径分隔符）"""
-    return conversation_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    """将 conversation_id 转为安全的文件名，含 BOT_ID 前缀区分不同机器人"""
+    safe_cid = conversation_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+    safe_bot = BOT_ID.replace("/", "_").replace("\\", "_").replace(":", "_")
+    return f"{safe_bot}__{safe_cid}"
 
 
 def _load_soul(conversation_id: str) -> str:

@@ -19,28 +19,48 @@ from app.dingtalk_bot import (
     _maybe_evolve_soul,
     _handle_soul_command,
 )
+from app.config import BOT_ID
 
 
 # ─── _soul_filename 测试 ──────────────────────────────────────
 
 class TestSoulFilename:
+    """soul 文件名格式: {BOT_ID}__{safe_cid}"""
+
+    def _prefix(self, cid: str) -> str:
+        safe_bot = BOT_ID.replace("/", "_").replace("\\", "_").replace(":", "_")
+        return f"{safe_bot}__{cid}"
+
     def test_normal_id(self):
-        assert _soul_filename("cidABC123") == "cidABC123"
+        assert _soul_filename("cidABC123") == self._prefix("cidABC123")
 
     def test_slashes_replaced(self):
-        assert _soul_filename("cid/with/slashes") == "cid_with_slashes"
+        assert _soul_filename("cid/with/slashes") == self._prefix("cid_with_slashes")
 
     def test_backslashes_replaced(self):
-        assert _soul_filename("cid\\back") == "cid_back"
+        assert _soul_filename("cid\\back") == self._prefix("cid_back")
 
     def test_colons_replaced(self):
-        assert _soul_filename("dingtalk:cid123:user") == "dingtalk_cid123_user"
+        assert _soul_filename("dingtalk:cid123:user") == self._prefix("dingtalk_cid123_user")
 
     def test_mixed_special_chars(self):
-        assert _soul_filename("a/b:c\\d") == "a_b_c_d"
+        assert _soul_filename("a/b:c\\d") == self._prefix("a_b_c_d")
 
     def test_empty_string(self):
-        assert _soul_filename("") == ""
+        assert _soul_filename("") == self._prefix("")
+
+    def test_bot_id_prefix_present(self):
+        result = _soul_filename("cidTest")
+        assert result.startswith(f"{BOT_ID}__"), f"期望前缀 {BOT_ID}__，实际: {result}"
+
+    def test_different_bots_produce_different_filenames(self):
+        """不同 BOT_ID 下同一 cid 应产生不同文件名"""
+        with patch("app.dingtalk_bot.BOT_ID", "gemini"):
+            from app.dingtalk_bot import _soul_filename as fn
+            name_gem = fn("cidX")
+        with patch("app.dingtalk_bot.BOT_ID", "openrouter"):
+            name_or = fn("cidX")
+        assert name_gem != name_or
 
 
 # ─── _load_soul 测试 ──────────────────────────────────────────
