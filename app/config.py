@@ -334,6 +334,8 @@ LITELLM_MODEL_CONFIG = {
 
 # 路由名归一化：把路由输出的各种模型名统一到 fast/pro
 ROUTE_KEY_MAP = {
+    "gemini-3-flash-lite": "lite",
+    "gemini-3-flash-lite-preview": "lite",
     "gemini-3-flash-preview": "fast",
     "gemini-3-flash": "fast",
     "gemini-3.1-pro-preview": "pro",
@@ -353,22 +355,35 @@ def get_litellm_model_config(route_key: str) -> dict:
 # ===== OpenRouter 后端 =====
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# 路由大脑：用于分析复杂度的轻量模型（替代 Gemini flash-lite）
+OPENROUTER_ROUTER_MODEL = os.getenv("OPENROUTER_ROUTER_MODEL", "anthropic/claude-haiku-4-5")
 
 def _parse_fallbacks(env_val: str) -> list:
     return [m.strip() for m in env_val.split(",") if m.strip()]
 
 OPENROUTER_MODEL_CONFIG = {
-    "fast": {
-        "model": os.getenv("OPENROUTER_MODEL_FAST", "openai/gpt-4.1-mini"),
-        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "google/gemini-2.5-flash")),
+    # lite: 简单问候、闲聊 (Haiku，仅执行不路由)
+    "lite": {
+        "model": os.getenv("OPENROUTER_MODEL_LITE", "anthropic/claude-haiku-4-5"),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_LITE", "openai/gpt-4.1-nano")),
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
-        "supports_reasoning": _get_bool("OPENROUTER_FAST_SUPPORTS_REASONING", False),
+        "supports_reasoning": False,
+        "supports_search": _get_bool("OPENROUTER_LITE_SUPPORTS_SEARCH", False),
+        "supports_vision": _get_bool("OPENROUTER_LITE_SUPPORTS_VISION", True),
+    },
+    # fast: 普通工作 (Sonnet)
+    "fast": {
+        "model": os.getenv("OPENROUTER_MODEL_FAST", "anthropic/claude-sonnet-4-5"),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "openai/gpt-4.1")),
+        "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
+        "supports_reasoning": _get_bool("OPENROUTER_FAST_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENROUTER_FAST_SUPPORTS_SEARCH", True),
         "supports_vision": _get_bool("OPENROUTER_FAST_SUPPORTS_VISION", True),
     },
+    # pro: 高阶推理 (Opus)
     "pro": {
         "model": os.getenv("OPENROUTER_MODEL_PRO", "anthropic/claude-opus-4-5"),
-        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "openai/gpt-4.1")),
+        "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "anthropic/claude-sonnet-4-5")),
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
         "supports_reasoning": _get_bool("OPENROUTER_PRO_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENROUTER_PRO_SUPPORTS_SEARCH", True),

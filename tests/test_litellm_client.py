@@ -183,9 +183,44 @@ class TestOpenRouterConfig:
         """默认不设 provider_sort，让 OpenRouter 自动决策"""
         import os
         from app.config import OPENROUTER_MODEL_CONFIG
-        # 默认配置不强制价格路由（可由用户通过 OPENROUTER_PROVIDER_SORT 覆盖）
         provider_sort = OPENROUTER_MODEL_CONFIG["fast"]["provider_sort"]
         assert isinstance(provider_sort, str)
+
+    def test_openrouter_model_config_has_lite_tier(self):
+        """三级模型：lite/fast/pro 均存在"""
+        from app.config import OPENROUTER_MODEL_CONFIG
+        assert "lite" in OPENROUTER_MODEL_CONFIG
+        for key in ("lite", "fast", "pro"):
+            assert "model" in OPENROUTER_MODEL_CONFIG[key]
+            assert "fallbacks" in OPENROUTER_MODEL_CONFIG[key]
+
+    def test_lite_tier_reasoning_disabled(self):
+        """lite 层（Haiku）不开启 reasoning，避免不必要费用"""
+        from app.config import OPENROUTER_MODEL_CONFIG
+        assert OPENROUTER_MODEL_CONFIG["lite"]["supports_reasoning"] is False
+
+    def test_openrouter_router_model_configured(self):
+        """路由大脑模型有配置"""
+        from app.config import OPENROUTER_ROUTER_MODEL
+        assert isinstance(OPENROUTER_ROUTER_MODEL, str)
+        assert len(OPENROUTER_ROUTER_MODEL) > 0
+
+    def test_route_key_map_has_lite(self):
+        """ROUTE_KEY_MAP 包含 lite 映射"""
+        from app.config import ROUTE_KEY_MAP
+        assert ROUTE_KEY_MAP.get("gemini-3-flash-lite") == "lite"
+        assert ROUTE_KEY_MAP.get("gemini-3-flash-lite-preview") == "lite"
+
+    def test_get_route_key_lite_model(self):
+        """get_route_key 能识别 lite 逻辑模型名"""
+        from app.config import get_route_key
+        assert get_route_key("gemini-3-flash-lite") == "lite"
+
+    def test_analyze_complexity_with_openrouter_importable(self):
+        """analyze_complexity_with_openrouter 可导入"""
+        from app.litellm_client import analyze_complexity_with_openrouter
+        import asyncio
+        assert callable(analyze_complexity_with_openrouter)
 
 
 class TestVertexProviderBranch:

@@ -9,7 +9,7 @@ from app.config import (
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
     LITELLM_MAX_RETRIES, OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM,
     VERTEX_PROJECT,
-    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL_CONFIG,
+    OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL_CONFIG, OPENROUTER_ROUTER_MODEL,
 )
 
 # LiteLLM 通过环境变量识别代理
@@ -214,3 +214,75 @@ async def call_litellm_stream(
         print(f"❌ [LiteLLM] 调用失败: {error_msg}")
         traceback.print_exc()
         yield {"error": f"LiteLLM API Error: {error_msg}"}
+
+
+async def analyze_complexity_with_openrouter(
+    content: str,
+    has_images: bool = False,
+    soul_text: str = "",
+) -> dict:
+    """
+    用 OpenRouter Haiku 分析消息复杂度，替代 Gemini flash-lite 的路由职责。
+    返回与 analyze_complexity_with_model 相同的 dict 格式。
+    """
+    import litellm
+    import json
+    import re
+
+    soul_instruction = f"你的性格设定: {soul_text[:100]}\n   " if soul_text else ""
+
+    prompt = f"""分析用户问题，返回 JSON 路由建议。
+
+问题: {content[:300]}
+有图片: {"是" if has_images else "否"}
+
+选择规则:
+1. model（三个选项）:
+   - "gemini-3-flash-lite": 简单问候、闲聊、一句话基础问答
+   - "gemini-3-flash-preview": 日常问答、代码、一般分析（默认）
+   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+
+2. thinking_level:
+   - "minimal": 简单问候如"你好"、"谢谢"、"再见"
+   - "low": 普通问答、事实查询
+   - "medium": 需要推理、代码问题
+   - "high": 复杂分析、算法设计
+
+3. need_search:
+   - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期）
+   - false: 不需要（默认）
+
+4. thinking_text: 一句简短思考状态（10字以内，带emoji），和问题内容相关
+   {soul_instruction}例如: 代码→"正在编译思路中 ⚡", 数学→"大脑开始运算了 🧮", 闲聊→"让我想想... 🤔"
+
+5. need_image_gen:
+   - true: 用户明确要求生成图片、画画、绘制
+   - false: 默认
+
+只返回JSON:
+{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"need_image_gen":false,"reason":"简短原因","thinking_text":"正在思考 💭"}}"""
+
+    try:
+        response = await litellm.acompletion(
+            model=OPENROUTER_ROUTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            api_base=OPENROUTER_BASE_URL,
+            api_key=OPENROUTER_API_KEY,
+            custom_llm_provider="openai",
+            stream=False,
+            timeout=8,
+            max_tokens=200,
+            num_retries=1,
+        )
+        raw = response.choices[0].message.content or ""
+        json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            print(f"🔄 [OR路由] Haiku 分析: {result.get('model')} / {result.get('thinking_level')} / reason={result.get('reason')}")
+            return result
+    except Exception as e:
+        print(f"⚠️ [OR路由] Haiku 分析失败，降级关键词匹配: {e}")
+
+    # 降级：关键词匹配
+    from app.ai.router import analyze_complexity_unified
+    return analyze_complexity_unified(content, has_images)

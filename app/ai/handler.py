@@ -321,8 +321,21 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
             return ("openclaw", "default", False)
+        elif AI_BACKEND == "openrouter":
+            # OpenRouter 模式: 用 Haiku 替代 Gemini flash-lite 做路由判断
+            from app.litellm_client import analyze_complexity_with_openrouter
+            try:
+                complexity = await analyze_complexity_with_openrouter(content, has_images)
+            except Exception as e:
+                print(f"❌ [OR路由] 异常: {e}")
+                complexity = {
+                    "model": "gemini-3-flash-preview",
+                    "thinking_level": "low",
+                    "need_search": False,
+                    "reason": "路由异常，使用默认"
+                }
         else:
-            # Gemini 模式: 智能路由分析
+            # Gemini / LiteLLM 模式: 用 Gemini flash-lite 做路由判断
             try:
                 complexity = await analyze_complexity_with_model(content, has_images)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
@@ -335,8 +348,8 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                     "reason": "路由异常，使用默认"
                 }
 
-            target_model = complexity.get("model", "gemini-3-flash-preview")
-            thinking_level = complexity.get("thinking_level", "low")
-            need_search = complexity.get("need_search", False)
+        target_model = complexity.get("model", "gemini-3-flash-preview")
+        thinking_level = complexity.get("thinking_level", "low")
+        need_search = complexity.get("need_search", False)
 
-            return (target_model, thinking_level, need_search)
+        return (target_model, thinking_level, need_search)
