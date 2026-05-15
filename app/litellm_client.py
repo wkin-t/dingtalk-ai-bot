@@ -44,6 +44,7 @@ async def call_litellm_stream(
     thinking_level: str = "low",
     enable_search: bool = False,
     temperature: float = 0.7,
+    conversation_id: str = "",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     通过 LiteLLM 调用任意 OpenAI 兼容模型（流式）
@@ -130,6 +131,8 @@ async def call_litellm_stream(
                 extra_body["provider"] = {"sort": {"by": provider_sort}}
             if enable_search and config.get("supports_search"):
                 extra_body["tools"] = [{"type": "openrouter:web_search"}]
+            if conversation_id:
+                extra_body["session_id"] = conversation_id
             kwargs["api_base"] = OPENROUTER_BASE_URL
             kwargs["api_key"] = OPENROUTER_API_KEY
             kwargs["custom_llm_provider"] = "openai"

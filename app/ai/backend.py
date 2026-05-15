@@ -49,6 +49,7 @@ async def create_backend_stream(
             thinking_level=thinking_level,
             enable_search=enable_search,
             temperature=temperature,
+            conversation_id=kwargs.get("conversation_id", ""),
         )
     else:
         from app.gemini_client import call_gemini_stream
