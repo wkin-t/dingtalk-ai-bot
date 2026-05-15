@@ -1636,11 +1636,7 @@ LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
                 else:
                     model_short = target_model.replace("gemini-", "").replace("-preview", "")
                 search_icon = "🌐" if need_search else ""
-                temp_icon = {"precise": "🎯", "balanced": "", "creative": "🎨"}.get(
-                    str(complexity.get("temperature", "balanced")), ""
-                )
-                temp_display = f" | 🌡️{temp_icon} {temperature:.1f}" if temp_icon else f" | 🌡️ {temperature:.1f}"
-                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level}{temp_display} {search_icon}</font>"
+                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} | t={temperature:.1f} {search_icon}</font>"
 
             buttons = [
                 {
