@@ -19,7 +19,7 @@ if LITELLM_PROXY:
 
 EFFORT_MAPPING = {
     "minimal": "none",      # GPT-5: 关闭推理 | Gemini: 映射为 minimal
-    "low": "low",
+    "low": "none",          # 普通问答不开启 extended thinking，medium 及以上才开
     "medium": "medium",
     "high": "high",
     "xhigh": "xhigh",       # GPT-5 独有：极限推理
