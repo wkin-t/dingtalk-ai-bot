@@ -135,7 +135,7 @@ async def call_litellm_stream(
             kwargs["custom_llm_provider"] = "openai"
             effort = EFFORT_MAPPING.get(thinking_level)
             if config.get("supports_reasoning") and effort and effort != "none":
-                kwargs["reasoning_effort"] = effort
+                extra_body["reasoning"] = {"effort": effort}
             if extra_body:
                 kwargs["extra_body"] = extra_body
         elif config["model"].startswith("vertex_ai/"):
