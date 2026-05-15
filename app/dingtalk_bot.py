@@ -1106,7 +1106,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             day = current_date.day
 
             # 根据 AI_BACKEND 动态设置 bot 名称
-            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI", "openrouter": "Claude"}.get(AI_BACKEND, "Gem")
+            bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(AI_BACKEND, "Gem")
 
             system_prompt = f"""## 身份
 你的名字是 {bot_name}。你的个性和风格由你的 Soul 定义（在下方注入）。
