@@ -10,6 +10,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from google import genai
 from google.genai import types
+from app.ai.sampling_clamp import clamp_top_p
 from app.config import GEMINI_API_KEY, DEFAULT_MODEL, ENABLE_THINKING, SOCKS_PROXY, ENABLE_SEARCH
 
 # 配置代理 (仅 Gemini API 使用代理，通过 httpx_client 单独配置)
@@ -109,6 +110,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
    - "balanced": 普通问答（默认）
    - "creative": 写作、诗歌、头脑风暴、创意任务
+   - "wild": highly creative, exploratory tone (temp ~1.3)
+   - "chaotic": maximally creative, experimental (temp ~1.8)
 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
@@ -243,6 +246,7 @@ async def call_gemini_stream(
     thinking_level: str = "low",
     enable_search: bool = False,
     temperature: float = 0.7,
+    top_p: Optional[float] = None,
 ) -> AsyncGenerator[Dict[str, str], None]:
     """
     调用 Gemini API 进行流式生成
@@ -252,6 +256,7 @@ async def call_gemini_stream(
         target_model: 模型名称
         thinking_level: 思考深度
         enable_search: 是否启用 Google Search
+        top_p: 核采样参数，None 表示使用 Gemini 默认值
 
     Yields:
         {"content": "...", "thinking": "..."} 或 {"error": "..."}
@@ -274,12 +279,12 @@ async def call_gemini_stream(
             print("🔍 已启用 Google Search (实时搜索)")
 
         # 配置生成参数
-        config = types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=8192,
-            system_instruction=system_instruction,
-            tools=tools if tools else None,
-            safety_settings=[
+        config_kwargs = {
+            "temperature": temperature,
+            "max_output_tokens": 8192,
+            "system_instruction": system_instruction,
+            "tools": tools if tools else None,
+            "safety_settings": [
                 types.SafetySetting(
                     category="HARM_CATEGORY_HARASSMENT",
                     threshold="BLOCK_NONE"
@@ -296,8 +301,12 @@ async def call_gemini_stream(
                     category="HARM_CATEGORY_DANGEROUS_CONTENT",
                     threshold="BLOCK_NONE"
                 ),
-            ]
-        )
+            ],
+        }
+        if top_p is not None:
+            top_p = clamp_top_p(top_p, "gemini")
+            config_kwargs["top_p"] = top_p
+        config = types.GenerateContentConfig(**config_kwargs)
 
         # Gemini 3 系列支持 thinking，配置 thinking level
         # thinking_level: minimal (最快) | low | medium | high (最深度)

@@ -1,5 +1,5 @@
 """统一后端入口 — handler 和 dingtalk_bot 都调用此模块"""
-from typing import Dict, Any, List, AsyncGenerator
+from typing import Dict, Any, List, AsyncGenerator, Optional
 
 import app.config as cfg
 
@@ -14,6 +14,7 @@ async def create_backend_stream(
     thinking_level: str = "low",
     enable_search: bool = False,
     temperature: float = 0.7,
+    top_p: Optional[float] = None,
     **kwargs,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -24,6 +25,7 @@ async def create_backend_stream(
         target_model: 智能路由输出的模型名
         thinking_level: minimal/low/medium/high
         enable_search: 是否启用联网搜索
+        top_p: 核采样参数，None 表示后端默认
         **kwargs: 后端特定参数（openclaw 需要 conversation_id, sender_id, sender_nick, image_data_list）
 
     Yields:
@@ -40,6 +42,7 @@ async def create_backend_stream(
             sender_nick=kwargs.get("sender_nick", ""),
             model=target_model,
             image_data_list=kwargs.get("image_data_list"),
+            top_p=top_p,
         )
     elif backend in ("openai", "openrouter"):
         from app.litellm_client import call_litellm_stream
@@ -49,6 +52,7 @@ async def create_backend_stream(
             thinking_level=thinking_level,
             enable_search=enable_search,
             temperature=temperature,
+            top_p=top_p,
             conversation_id=kwargs.get("conversation_id", ""),
         )
     else:
@@ -59,6 +63,7 @@ async def create_backend_stream(
             thinking_level=thinking_level,
             enable_search=enable_search,
             temperature=temperature,
+            top_p=top_p,
         )
 
     async for chunk in stream:

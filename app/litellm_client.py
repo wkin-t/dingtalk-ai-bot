@@ -2,8 +2,11 @@
 import os
 import time
 import traceback
-from typing import Dict, Any, List, AsyncGenerator
+from typing import Dict, Any, List, AsyncGenerator, Optional
 
+import litellm
+
+from app.ai.sampling_clamp import clamp_top_p
 from app.config import (
     get_route_key, get_litellm_model_config,
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
@@ -64,6 +67,7 @@ async def call_litellm_stream(
     thinking_level: str = "low",
     enable_search: bool = False,
     temperature: float = 0.7,
+    top_p: Optional[float] = None,
     conversation_id: str = "",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -74,11 +78,11 @@ async def call_litellm_stream(
         target_model: 智能路由输出的模型名（lite/fast/pro 或 Gemini 模型名，经 ROUTE_KEY_MAP 归一化）
         thinking_level: minimal/low/medium/high
         enable_search: 是否启用联网搜索
+        top_p: 核采样参数，None 表示使用 provider 默认值
 
     Yields:
         {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
     """
-    import litellm
     import warnings
     litellm.suppress_debug_info = True
     warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
@@ -86,9 +90,13 @@ async def call_litellm_stream(
     route_key = get_route_key(target_model)
     if OPENROUTER_API_KEY:
         config = OPENROUTER_MODEL_CONFIG.get(route_key, OPENROUTER_MODEL_CONFIG["fast"])
+        provider = "openrouter"
     else:
         config = get_litellm_model_config(route_key)
+        provider = "openai"
     model = config["model"]
+    if top_p is not None:
+        top_p = clamp_top_p(top_p, provider)
 
     print(f"📡 [LiteLLM] 请求模型: {model} (路由: {route_key}, thinking: {thinking_level})")
 
@@ -138,6 +146,8 @@ async def call_litellm_stream(
             "timeout": LITELLM_READ_TIMEOUT,
             "temperature": temperature,
         }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
 
         if OPENROUTER_API_KEY:
             # OpenRouter 路径：模型回退 + 供应商路由 + 原生 Web Search
@@ -319,6 +329,8 @@ async def analyze_complexity_with_openrouter(
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
    - "balanced": 普通问答（默认）
    - "creative": 写作、诗歌、头脑风暴、创意任务
+   - "wild": highly creative, exploratory tone (temp ~1.3)
+   - "chaotic": maximally creative, experimental (temp ~1.8)
 
 6. need_image_gen:
    - true: 用户明确要求生成图片、画画、绘制

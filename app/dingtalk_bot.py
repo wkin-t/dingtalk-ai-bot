@@ -32,6 +32,8 @@ from app.config import (
     STREAM_UPDATE_THROTTLE,
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
+from app.ai.handler import TEMPERATURE_MAP
+from app.ai.sampling_clamp import clamp_temperature
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
 from app.image_gen import generate_image, edit_image
@@ -133,6 +135,11 @@ def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
     remove_end = start + len(marker) + end_in_tail
     cleaned = (src[:start] + src[remove_end:]).strip()
     return cleaned, payload if isinstance(payload, dict) else None
+
+
+def _resolve_temperature(temp_label) -> float:
+    temperature = TEMPERATURE_MAP.get(str(temp_label), 0.7)
+    return clamp_temperature(temperature, AI_BACKEND)
 
 def _soul_filename(conversation_id: str) -> str:
     """将 conversation_id 转为安全的文件名，含 BOT_ID 前缀区分不同机器人"""
@@ -1243,7 +1250,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
-            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         elif AI_BACKEND == "openrouter":
             print(f"🔄 [路由] OpenRouter 模式，使用 Haiku 预分析...")
@@ -1264,7 +1271,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
-            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
             print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
@@ -1284,7 +1291,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "gemini-3-flash-preview")
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
-            temperature = {"precise": 0.1, "balanced": 0.7, "creative": 0.9}.get(str(complexity.get("temperature", "balanced")), 0.7)
+            temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
         # 初始化 AI 卡片（路由已完成，thinkingText 使用模型生成的思考文字）
@@ -1484,6 +1491,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 thinking_level=thinking_level,
                 enable_search=need_search,
                 temperature=temperature,
+                top_p=None,
                 conversation_id=conversation_id,
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,

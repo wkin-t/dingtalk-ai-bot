@@ -306,6 +306,7 @@ async def call_openclaw_stream(
     sender_nick: str = "User",
     model: str = "openclaw",
     image_data_list: Optional[List[bytes]] = None,
+    top_p: Optional[float] = None,
 ) -> AsyncGenerator[Dict, None]:
     """
     调用 OpenClaw Gateway HTTP API 进行流式对话
@@ -318,6 +319,7 @@ async def call_openclaw_stream(
         sender_id: 发送者 ID
         sender_nick: 发送者昵称
         model: 模型建议 (Gateway 可自行决定是否接受)
+        top_p: HTTP 路径透传核采样参数；WebSocket 路径忽略
 
     Yields:
         {"content": "..."}   - 正式回复内容 (增量文本)
@@ -381,6 +383,8 @@ async def call_openclaw_stream(
         # 给 Gateway 一个稳定的 user，有助于会话粘性（同一群/同一用户）。
         "user": f"dingtalk:{conversation_id}:{sender_id}",
     }
+    if top_p is not None:
+        request_body["top_p"] = top_p
 
     headers = {
         "Content-Type": "application/json",

@@ -15,11 +15,14 @@ from app.config import (
 from app.memory import get_history, update_history
 from app.gemini_client import analyze_complexity_with_model
 from app.ai.router import analyze_complexity_unified
+from app.ai.sampling_clamp import clamp_temperature
 
 TEMPERATURE_MAP = {
     "precise": 0.1,   # 代码、数学、事实查询
     "balanced": 0.7,  # 默认
     "creative": 0.9,  # 写作、头脑风暴、诗歌
+    "wild": 1.3,      # 高创意、探索性表达
+    "chaotic": 1.8,   # 最大创意、实验性表达
 }
 
 
@@ -198,6 +201,7 @@ class AIHandler:
                 thinking_level=thinking_level,
                 enable_search=need_search,
                 temperature=temperature,
+                top_p=None,
                 conversation_id=session_key,
                 sender_id=user_id,
                 sender_nick=sender_nick,
@@ -350,5 +354,6 @@ class AIHandler:
         need_search = complexity.get("need_search", False)
         temp_label = complexity.get("temperature", "balanced")
         temperature = TEMPERATURE_MAP.get(str(temp_label), 0.7)
+        temperature = clamp_temperature(temperature, AI_BACKEND)
 
         return (target_model, thinking_level, need_search, temperature)
