@@ -994,8 +994,6 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             filtered_lines = [line for line in lines if not line.strip().startswith("> 📝 概要：")]
             display_response = "\n".join(filtered_lines).strip()
 
-            if thinking:
-                parts.append("\n---\n")
             parts.append(display_response)
         # thinking 阶段（response 为空）不再追加占位文案——让副标题的 thinkingText
         # （由路由模型生成的 10 字提示，如"正在思考 💭"）独立承担进度展示，
