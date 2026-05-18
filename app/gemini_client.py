@@ -194,7 +194,12 @@ def _convert_openai_to_gemini(messages: List[Dict[str, Any]]) -> tuple[Optional[
 
         # 提取 system prompt
         if role == "system":
-            system_instruction = content
+            if isinstance(content, list):
+                # 兼容 list of blocks 形态：提取所有 text part 拼接
+                texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                system_instruction = "\n\n".join(t for t in texts if t)
+            else:
+                system_instruction = content
             continue
 
         # 转换角色名称: assistant -> model
