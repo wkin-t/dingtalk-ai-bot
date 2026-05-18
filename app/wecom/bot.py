@@ -89,11 +89,17 @@ class WeComBotHandler:
             session_key = get_session_key(conversation_id, from_user)
 
             if content in ["/clear", "清空上下文", "🧹 清空记忆"]:
-                clear_history(session_key)
+                # 软清空：仅当前 agent 看不到 cutoff 之前的历史，与钉钉端一致
+                from app.clear_cutoff import set_cutoff
+                from app.config import BOT_ID
+                cutoff_at = set_cutoff(session_key, set_by=from_user, set_by_nick=from_user)
                 stream_id = self._new_stream_id()
                 reply = self._build_stream_payload(
                     stream_id=stream_id,
-                    content="🧹 上下文已清空",
+                    content=(
+                        f"🧹 已重置我（{BOT_ID}）的上下文起始点为 `{cutoff_at}`\n"
+                        f"——之后只读取此时间之后的消息，其他 agent 的上下文不受影响。"
+                    ),
                     finish=True,
                     include_card=self._use_stream_with_card(),
                 )

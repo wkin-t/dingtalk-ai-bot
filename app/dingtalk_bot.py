@@ -1136,8 +1136,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 messages_raw.append({"role": "system", "content": "\n\n".join(b["text"] for b in blocks)})
 
             from app.ai.history_format import format_history_with_meta
+            from app.clear_cutoff import get_cutoff
+            _cutoff_at = get_cutoff(session_key)
 
-            formatted_history = format_history_with_meta(history_messages, BOT_ID)
+            formatted_history = format_history_with_meta(history_messages, BOT_ID, cutoff_at=_cutoff_at)
 
             if image_data_list:
                 from datetime import datetime, timezone, timedelta
