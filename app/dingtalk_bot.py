@@ -1052,12 +1052,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             else:
                 history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
 
-            messages = []
-            for msg in history_messages:
+            from app.ai.history_format import format_history_with_meta
+
+            messages_raw = []
+            for msg in format_history_with_meta(history_messages, BOT_ID):
                 role = msg.get("role")
                 msg_content = msg.get("content", "")
                 if role in {"user", "assistant"} and msg_content:
-                    messages.append({"role": role, "content": msg_content})
+                    messages_raw.append(msg)
 
             sender_nick = incoming_message.sender_nick or "User"
             if image_data_list:
@@ -1103,12 +1105,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     vision_block = "\n\n".join(vision_sections).strip()
                     if vision_block:
                         text_content += f"\n\n{vision_block}"
-                messages.append({"role": "user", "content": text_content})
+                messages_raw.append({"role": "user", "content": text_content})
             else:
                 text_content = f"{sender_nick}: {content}"
-                messages.append({"role": "user", "content": text_content})
+                messages_raw.append({"role": "user", "content": text_content})
 
-            print(f"🔍 [OpenClaw] 透传历史条数: {len(messages) - 1}, 当前消息已附加")
+            print(f"🔍 [OpenClaw] 透传历史条数: {len(messages_raw) - 1}, 当前消息已附加")
         else:
             # 截取最近的 N 条发送给 Gemini
             if len(full_history) > MAX_HISTORY_LENGTH:
@@ -1132,43 +1134,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 current_date=current_date,
             )
 
-            messages = []
+            messages_raw = []
             if ENABLE_CACHE_BLOCKS and AI_BACKEND in ("openai", "openrouter"):
-                messages.append({"role": "system", "content": blocks})
+                messages_raw.append({"role": "system", "content": blocks})
             else:
                 # 降级：string 拼接（Gemini/OpenClaw）
-                messages.append({"role": "system", "content": "\n\n".join(b["text"] for b in blocks)})
+                messages_raw.append({"role": "system", "content": "\n\n".join(b["text"] for b in blocks)})
 
-            # 格式化历史消息，添加时间戳信息
-            formatted_history = []
-            for msg in history_messages:
-                formatted_msg = {"role": msg["role"]}
-                msg_content = msg.get("content", "")  # 改为 msg_content，避免覆盖参数 content
-                timestamp = msg.get("timestamp")
-                sender_nick_from_history = msg.get("sender_nick")
+            from app.ai.history_format import format_history_with_meta
 
-                # 如果有时间戳，添加到内容前面
-                if timestamp and msg["role"] == "user":
-                    # 用户消息格式: [时间] 昵称: 内容
-                    # 如果 msg_content 已经包含昵称（旧数据），则不再拼接
-                    if sender_nick_from_history and not msg_content.startswith(f"{sender_nick_from_history}:"):
-                        formatted_msg["content"] = f"[{timestamp}] {sender_nick_from_history}: {msg_content}"
-                    else:
-                        formatted_msg["content"] = f"[{timestamp}] {msg_content}"
-                elif msg["role"] == "assistant" and msg.get("bot_id"):
-                    # 历史消息标注 AI 来源（仅用于上下文区分，不作为输出格式）
-                    msg_bot_id = msg["bot_id"]
-                    bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(msg_bot_id, msg_bot_id)
-                    # 只有当内容本身不以来源标签开头时才添加，避免累积
-                    tag = f"[来自{bot_source}]"
-                    if not msg_content.startswith(tag):
-                        formatted_msg["content"] = f"{tag} {msg_content}"
-                    else:
-                        formatted_msg["content"] = msg_content
-                else:
-                    formatted_msg["content"] = msg_content
-
-                formatted_history.append(formatted_msg)
+            formatted_history = format_history_with_meta(history_messages, BOT_ID)
 
             if image_data_list:
                 from datetime import datetime, timezone, timedelta
@@ -1199,8 +1174,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         "image_url": {"url": f"data:{mime};base64,{b64_image}"}
                     })
 
-                messages.extend(formatted_history)
-                messages.append({"role": "user", "content": user_message_content})
+                messages_raw.extend(formatted_history)
+                messages_raw.append({"role": "user", "content": user_message_content})
 
             else:
                 # 无图片时：先添加历史记录，再添加当前用户消息
@@ -1211,14 +1186,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 sender_nick = incoming_message.sender_nick or "User"
                 print(f"🔍 [调试] 构造当前消息 - sender_nick='{sender_nick}', content='{content}'")
                 text_content = f"[{current_timestamp}] {sender_nick}: {content}"
-                messages.extend(formatted_history)
-                messages.append({"role": "user", "content": text_content})
+                messages_raw.extend(formatted_history)
+                messages_raw.append({"role": "user", "content": text_content})
 
                 # 调试：打印发送给 Gemini 的完整消息
                 print(f"🔍 [调试] 发送给 Gemini 的历史记录数量: {len(formatted_history)}")
                 if formatted_history:
                     print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
                 print(f"🔍 [调试] 当前消息: {text_content}")
+
+        from app.ai.messages_pipeline import prepare_messages_for_backend
+
+        messages = prepare_messages_for_backend(messages_raw, BOT_ID)
 
         # 智能路由（提前到卡片创建前，让初始卡片直接显示正确的思考文字）
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
@@ -1329,7 +1308,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 用聊天记录 + Soul 生成精细 prompt
             image_prompt = await _enrich_image_prompt(
-                raw_prompt, content, messages, soul_text
+                raw_prompt, content, messages_raw, soul_text
             )
             print(f"🎨 [生图] prompt={image_prompt[:80]}, ratio={aspect_ratio}, n={num_images}, backend={AI_BACKEND}")
 
@@ -1714,7 +1693,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # Soul 自主进化（异步后台，不阻塞响应）
             try:
-                asyncio.create_task(_maybe_evolve_soul(conversation_id, messages, clean_response))
+                asyncio.create_task(_maybe_evolve_soul(conversation_id, messages_raw, clean_response))
             except Exception as e:
                 print(f"⚠️ [Soul进化] 调度失败: {e}")
             

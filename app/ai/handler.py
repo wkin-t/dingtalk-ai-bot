@@ -83,12 +83,12 @@ class AIHandler:
             else:
                 history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
 
-            messages = []
-            for msg in history_messages:
+            messages_raw = []
+            for msg in self._format_history_with_meta(history_messages, BOT_ID):
                 role = msg.get("role")
                 msg_content = msg.get("content", "")
                 if role in {"user", "assistant"} and msg_content:
-                    messages.append({"role": role, "content": msg_content})
+                    messages_raw.append(msg)
 
             if image_data_list:
                 text_content = f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
@@ -135,9 +135,9 @@ class AIHandler:
                     vision_block = "\n\n".join(vision_sections).strip()
                     if vision_block:
                         text_content += f"\n\n{vision_block}"
-                messages.append({"role": "user", "content": text_content})
+                messages_raw.append({"role": "user", "content": text_content})
             else:
-                messages.append({"role": "user", "content": f"{sender_nick}: {content}"})
+                messages_raw.append({"role": "user", "content": f"{sender_nick}: {content}"})
         else:
             # 截取最近的 N 条发送给 AI
             if len(full_history) > MAX_HISTORY_LENGTH:
@@ -148,10 +148,10 @@ class AIHandler:
             # 构造 System Prompt
             system_prompt = self._build_system_prompt(group_info, soul_content=None)
 
-            messages = [{"role": "system", "content": system_prompt}]
+            messages_raw = [{"role": "system", "content": system_prompt}]
 
-            # 格式化历史消息
-            formatted_history = self._format_history(history_messages)
+            # 格式化历史消息，保留 bot_id 给转换层判断消息来源
+            formatted_history = self._format_history_with_meta(history_messages, BOT_ID)
 
             # 构造当前用户消息
             beijing_tz = timezone(timedelta(hours=8))
@@ -174,13 +174,17 @@ class AIHandler:
                         "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
                     })
 
-                messages.extend(formatted_history)
-                messages.append({"role": "user", "content": user_message_content})
+                messages_raw.extend(formatted_history)
+                messages_raw.append({"role": "user", "content": user_message_content})
             else:
                 # 纯文本消息
                 text_content = f"[{current_timestamp}] {sender_nick}: {content}"
-                messages.extend(formatted_history)
-                messages.append({"role": "user", "content": text_content})
+                messages_raw.extend(formatted_history)
+                messages_raw.append({"role": "user", "content": text_content})
+
+        from app.ai.messages_pipeline import prepare_messages_for_backend
+
+        messages = prepare_messages_for_backend(messages_raw, BOT_ID)
 
         # 智能路由
         has_images = bool(image_data_list)
@@ -285,8 +289,14 @@ class AIHandler:
         # 降级：拼接成 string
         return "\n\n".join(b["text"] for b in blocks)
 
+    def _format_history_with_meta(self, history_messages: List[Dict], current_bot_id: str) -> List[Dict]:
+        """格式化历史消息，保留 bot_id 给后续 transform 层。"""
+        from app.ai.history_format import format_history_with_meta
+
+        return format_history_with_meta(history_messages, current_bot_id)
+
     def _format_history(self, history_messages: List[Dict]) -> List[Dict]:
-        """格式化历史消息"""
+        """# DEPRECATED: 使用 _format_history_with_meta 后再经过 message_transform。"""
         formatted_history = []
         for msg in history_messages:
             formatted_msg = {"role": msg["role"]}
