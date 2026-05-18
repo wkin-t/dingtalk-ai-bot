@@ -112,6 +112,28 @@ class WeComBotHandler:
                 self._cache_reply(msg_id, reply)
                 return reply
 
+            if content == "/resume":
+                from app.clear_cutoff import reset_cutoff
+                from app.agent_history import get_history_for_current_agent
+                from app.config import BOT_ID, MAX_HISTORY_LENGTH
+                reset_cutoff(session_key)
+                history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
+                first_ts = next((m.get("timestamp") for m in history if m.get("timestamp")), None)
+                if first_ts:
+                    text = (f"♻️ 已恢复 {BOT_ID} 的完整上下文\n"
+                            f"现在最早可见: `{first_ts}`（共 {len(history)} 条）")
+                else:
+                    text = f"♻️ 已恢复 {BOT_ID} 的完整上下文\n暂无任何历史消息"
+                stream_id = self._new_stream_id()
+                reply = self._build_stream_payload(
+                    stream_id=stream_id,
+                    content=text,
+                    finish=True,
+                    include_card=self._use_stream_with_card(),
+                )
+                self._cache_reply(msg_id, reply)
+                return reply
+
             if content in ["/clear", "清空上下文", "🧹 清空记忆"]:
                 # 软清空：仅当前 agent 看不到 cutoff 之前的历史，与钉钉端一致
                 from app.clear_cutoff import set_cutoff

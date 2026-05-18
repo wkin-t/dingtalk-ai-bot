@@ -1977,6 +1977,22 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 self.reply_markdown("上下文起点", render_since(session_key), incoming_message)
                 return AckMessage.STATUS_OK, 'OK'
 
+            if content == "/resume":
+                from app.clear_cutoff import reset_cutoff
+                from app.agent_history import get_history_for_current_agent
+                from app.config import MAX_HISTORY_LENGTH
+                reset_cutoff(session_key)
+                # 此时已无 cutoff，读到的是全部可见历史；提取最早时间戳告诉用户
+                history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
+                first_ts = next((m.get("timestamp") for m in history if m.get("timestamp")), None)
+                if first_ts:
+                    msg = (f"♻️ 已恢复 {BOT_ID} 的完整上下文\n"
+                           f"现在最早可见: `{first_ts}`（共 {len(history)} 条）")
+                else:
+                    msg = f"♻️ 已恢复 {BOT_ID} 的完整上下文\n暂无任何历史消息"
+                self.reply_markdown("系统提示", msg, incoming_message)
+                return AckMessage.STATUS_OK, 'OK'
+
             if content == "/clear" or content == "清空上下文" or content == "🧹 清空记忆":
                 # 软清空：仅当前 agent 看不到 cutoff 之前的历史；其他 agent 不受影响
                 from app.clear_cutoff import set_cutoff
