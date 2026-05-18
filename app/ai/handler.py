@@ -83,8 +83,10 @@ class AIHandler:
             else:
                 history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
 
+            from app.clear_cutoff import get_cutoff
+            _cutoff_at = get_cutoff(session_key)
             messages_raw = []
-            for msg in self._format_history_with_meta(history_messages, BOT_ID):
+            for msg in self._format_history_with_meta(history_messages, BOT_ID, cutoff_at=_cutoff_at):
                 role = msg.get("role")
                 msg_content = msg.get("content", "")
                 if role in {"user", "assistant"} and msg_content:
@@ -151,7 +153,9 @@ class AIHandler:
             messages_raw = [{"role": "system", "content": system_prompt}]
 
             # 格式化历史消息，保留 bot_id 给转换层判断消息来源
-            formatted_history = self._format_history_with_meta(history_messages, BOT_ID)
+            from app.clear_cutoff import get_cutoff
+            _cutoff_at = get_cutoff(session_key)
+            formatted_history = self._format_history_with_meta(history_messages, BOT_ID, cutoff_at=_cutoff_at)
 
             # 构造当前用户消息
             beijing_tz = timezone(timedelta(hours=8))
@@ -293,11 +297,11 @@ class AIHandler:
         # 降级：拼接成 string
         return "\n\n".join(b["text"] for b in blocks)
 
-    def _format_history_with_meta(self, history_messages: List[Dict], current_bot_id: str) -> List[Dict]:
+    def _format_history_with_meta(self, history_messages: List[Dict], current_bot_id: str, cutoff_at=None) -> List[Dict]:
         """格式化历史消息，保留 bot_id 给后续 transform 层。"""
         from app.ai.history_format import format_history_with_meta
 
-        return format_history_with_meta(history_messages, current_bot_id)
+        return format_history_with_meta(history_messages, current_bot_id, cutoff_at=cutoff_at)
 
     def _format_history(self, history_messages: List[Dict]) -> List[Dict]:
         """# DEPRECATED: 使用 _format_history_with_meta 后再经过 message_transform。"""

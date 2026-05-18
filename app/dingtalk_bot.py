@@ -982,17 +982,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         """
         parts = []
 
-        # 显示 thinking 内容 (折叠样式)
-        if thinking:
-            # 截取 thinking 内容，避免过长
-            thinking_display = thinking
-            if len(thinking) > 2000:
-                thinking_display = thinking[:2000] + "..."
-
-            if is_thinking:
-                parts.append(f"<details open>\n<summary>🧠 **正在思考中...**</summary>\n\n{thinking_display}\n</details>")
-            else:
-                parts.append(f"<details>\n<summary>🧠 **思考过程** (点击展开)</summary>\n\n{thinking_display}\n</details>")
+        # thinking 内容不再写入卡片正文（避免卡片高度抖动）
+        # thinkingText (10 字 placeholder) 已显示在卡片副标题，足够提示进度
+        # thinking 完整内容仍在 stream log 中保留供 debug
 
         # 显示正式回复
         if response:
@@ -1053,9 +1045,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 history_messages = full_history if OPENCLAW_CONTEXT_MESSAGES > 0 else []
 
             from app.ai.history_format import format_history_with_meta
+            from app.clear_cutoff import get_cutoff
+            _cutoff_at = get_cutoff(session_key)
 
             messages_raw = []
-            for msg in format_history_with_meta(history_messages, BOT_ID):
+            for msg in format_history_with_meta(history_messages, BOT_ID, cutoff_at=_cutoff_at):
                 role = msg.get("role")
                 msg_content = msg.get("content", "")
                 if role in {"user", "assistant"} and msg_content:
@@ -1971,8 +1965,17 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 at_user_ids.append(sender_id)
 
             if content == "/clear" or content == "清空上下文" or content == "🧹 清空记忆":
-                clear_history(session_key)
-                self.reply_markdown("系统提示", "🧹 你的上下文已清空", incoming_message)
+                # 软清空：仅当前 agent 看不到 cutoff 之前的历史；其他 agent 不受影响
+                from app.clear_cutoff import set_cutoff
+                _sender_nick = incoming_message.sender_nick or "User"
+                _sender_id = sender_id or "?"
+                cutoff_at = set_cutoff(session_key, set_by=_sender_id, set_by_nick=_sender_nick)
+                self.reply_markdown(
+                    "系统提示",
+                    f"🧹 已重置我（{BOT_ID}）的上下文起始点为 `{cutoff_at}`\n"
+                    f"——之后只读取此时间之后的消息，其他 agent 的上下文不受影响。",
+                    incoming_message,
+                )
                 return AckMessage.STATUS_OK, 'OK'
 
             # 查看统计命令
@@ -1995,9 +1998,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         return AckMessage.STATUS_OK, 'OK'
                     self.reply_markdown("Soul", "🧬 正在进化中...", incoming_message)
                     old_soul = _load_soul(conversation_id)
-                    # 重置冷却，加载历史
+                    # 重置冷却，加载历史（按 cutoff 过滤，与主 AI 流一致）
                     _evolve_timestamps.pop(conversation_id, None)
-                    history = get_history(session_key)
+                    from app.agent_history import get_history_for_current_agent
+                    history = get_history_for_current_agent(session_key)
                     await _maybe_evolve_soul(conversation_id, history, "")
                     new_soul = _load_soul(conversation_id)
                     if new_soul.strip() != old_soul.strip():
