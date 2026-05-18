@@ -1966,6 +1966,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             if sender_id and sender_id not in at_user_ids:
                 at_user_ids.append(sender_id)
 
+            if content == "/help":
+                from app.help_text import render_help
+                self.reply_markdown("命令帮助", render_help(), incoming_message)
+                return AckMessage.STATUS_OK, 'OK'
+
+            if content == "/since":
+                from app.context_inspector import render_since
+                self.reply_markdown("上下文起点", render_since(session_key), incoming_message)
+                return AckMessage.STATUS_OK, 'OK'
+
             if content == "/clear" or content == "清空上下文" or content == "🧹 清空记忆":
                 # 软清空：仅当前 agent 看不到 cutoff 之前的历史；其他 agent 不受影响
                 from app.clear_cutoff import set_cutoff
