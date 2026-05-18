@@ -39,8 +39,13 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _inject_cache_control(messages: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
-    """为 Anthropic 模型的 system 消息注入 cache_control breakpoint（节省最多 90% 输入 token）"""
-    if not model.startswith("anthropic/"):
+    """为 Anthropic 模型的 system 消息注入 cache_control breakpoint。
+
+    兼容两种 system content 形态：
+      - str: 整体作为单个 ephemeral block（向下兼容）
+      - list of blocks: 原样透传（调用方已自行设好 cache_control）
+    """
+    if not (model.startswith("anthropic/") or "claude" in model.lower()):
         return messages
     result = []
     for msg in messages:
@@ -48,6 +53,7 @@ def _inject_cache_control(messages: List[Dict[str, Any]], model: str) -> List[Di
             content = msg.get("content", "")
             if isinstance(content, str) and content:
                 msg = {**msg, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
+            # list 形态原样透传（保留调用方的 per-block cache_control 设置）
         result.append(msg)
     return result
 
