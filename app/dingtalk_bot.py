@@ -1462,6 +1462,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             print(f"📋 [System Prompt] 群={group_info.get('name','?') if group_info else conversation_id}, 模型={target_model}, 消息数={len(messages)}")
             print(f"📋 [System Prompt] 完整内容:\n{'-'*40}\n{sys_msg}\n{'-'*40}")
 
+            # 解析手动采样覆盖（D.3）
+            from app.ai.sampling_pipeline import resolve_sampling
+            final_temp, final_top_p, override_rec = resolve_sampling(session_key, temperature)
+
             # 统一后端入口
             from app.ai.backend import create_backend_stream
             stream = create_backend_stream(
@@ -1469,8 +1473,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 target_model=target_model,
                 thinking_level=thinking_level,
                 enable_search=need_search,
-                temperature=temperature,
-                top_p=None,
+                temperature=final_temp,
+                top_p=final_top_p,
                 conversation_id=conversation_id,
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,
@@ -2003,6 +2007,68 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 else:
                     _handle_soul_command(self, incoming_message, conversation_id, content, sender_id=sender_id or "")
                 return AckMessage.STATUS_OK, 'OK'
+
+            # 手动采样覆盖命令 /temp /top_p /sample (D.4)
+            if content.startswith("/temp") or content.startswith("/top_p") or content.startswith("/sample"):
+                from app.sample_override import (
+                    get_override, set_override, reset_override,
+                    validate_temperature, validate_top_p,
+                )
+                from app.sample_override_help import render_temp_status, render_top_p_status, render_sample_status
+
+                c = content.strip()
+                _sender_nick = incoming_message.sender_nick or "User"
+                _sender_id = sender_id or "?"
+
+                if c == "/temp":
+                    self.reply_markdown("Temperature", render_temp_status(get_override(session_key)), incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                if c.startswith("/temp "):
+                    arg = c[6:].strip()
+                    if arg == "reset":
+                        reset_override(session_key, what="temperature")
+                        self.reply_markdown("Temperature", "🌡️ 已清除手动温度，回归路由自动", incoming_message)
+                        return AckMessage.STATUS_OK, 'OK'
+                    ok, err = validate_temperature(arg)
+                    if not ok:
+                        self.reply_markdown("Temperature", f"❌ {err}", incoming_message)
+                        return AckMessage.STATUS_OK, 'OK'
+                    set_override(session_key, temperature=float(arg), set_by=_sender_id, set_by_nick=_sender_nick)
+                    self.reply_markdown("Temperature", f"🌡️ 温度已设置为 {arg}（24h 后自动失效）", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+
+                if c == "/top_p":
+                    self.reply_markdown("Top-P", render_top_p_status(get_override(session_key)), incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                if c.startswith("/top_p "):
+                    arg = c[7:].strip()
+                    if arg == "reset":
+                        reset_override(session_key, what="top_p")
+                        self.reply_markdown("Top-P", "🎯 已清除手动 top_p", incoming_message)
+                        return AckMessage.STATUS_OK, 'OK'
+                    ok, err = validate_top_p(arg)
+                    if not ok:
+                        self.reply_markdown("Top-P", f"❌ {err}", incoming_message)
+                        return AckMessage.STATUS_OK, 'OK'
+                    set_override(session_key, top_p=float(arg), set_by=_sender_id, set_by_nick=_sender_nick)
+                    self.reply_markdown("Top-P", f"🎯 top_p 已设置为 {arg}", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+
+                if c == "/sample":
+                    self.reply_markdown("采样配置", render_sample_status(get_override(session_key)), incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                if c in ("/sample reset", "/sample reset all"):
+                    reset_override(session_key, what="all")
+                    self.reply_markdown("采样配置", "⚙️ 已清空所有手动采样设置", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                if c == "/sample reset temp":
+                    reset_override(session_key, what="temperature")
+                    self.reply_markdown("采样配置", "🌡️ 已清除手动温度", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
+                if c == "/sample reset top_p":
+                    reset_override(session_key, what="top_p")
+                    self.reply_markdown("采样配置", "🎯 已清除手动 top_p", incoming_message)
+                    return AckMessage.STATUS_OK, 'OK'
 
             # 消息缓冲逻辑 (使用 buffer_key 隔离不同用户)
             if buffer_key in message_buffer:

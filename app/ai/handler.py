@@ -197,6 +197,10 @@ class AIHandler:
         full_thinking = ""
         usage_info = None
 
+        # 解析手动采样覆盖（D.3）
+        from app.ai.sampling_pipeline import resolve_sampling
+        final_temp, final_top_p, _override_rec = resolve_sampling(session_key, temperature)
+
         try:
             from app.ai.backend import create_backend_stream
             stream = create_backend_stream(
@@ -204,8 +208,8 @@ class AIHandler:
                 target_model=target_model,
                 thinking_level=thinking_level,
                 enable_search=need_search,
-                temperature=temperature,
-                top_p=None,
+                temperature=final_temp,
+                top_p=final_top_p,
                 conversation_id=session_key,
                 sender_id=user_id,
                 sender_nick=sender_nick,
