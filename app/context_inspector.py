@@ -6,11 +6,12 @@ from typing import Optional
 
 def render_since(session_key: str) -> str:
     """返回 markdown，描述当前 agent 能看到的最早消息时间 + cutoff 状态 + 消息总数。"""
-    from app.config import BOT_ID
+    from app.config import BOT_ID, MAX_HISTORY_LENGTH
     from app.agent_history import get_history_for_current_agent
     from app.clear_cutoff import get_cutoff_record
 
-    history = get_history_for_current_agent(session_key, limit=500)
+    # 用 MAX_HISTORY_LENGTH 读，与真实送给模型的上限一致
+    history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
     cutoff_rec = get_cutoff_record(session_key)
 
     total = len(history)
@@ -28,7 +29,11 @@ def render_since(session_key: str) -> str:
     else:
         lines.append("**最早可见消息时间**: 无（暂无任何历史消息）")
 
-    lines.append(f"**当前可见消息数**: {total} 条")
+    # 显示 N/上限 + 满载状态提示
+    if total >= MAX_HISTORY_LENGTH:
+        lines.append(f"**当前可见消息数**: {total} / {MAX_HISTORY_LENGTH} 条（**已满载**，更早的会被自动截掉）")
+    else:
+        lines.append(f"**当前可见消息数**: {total} / {MAX_HISTORY_LENGTH} 条")
 
     if cutoff_rec:
         lines.append("")
