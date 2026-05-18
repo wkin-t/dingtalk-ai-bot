@@ -213,6 +213,12 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 # 是否启用 Google Search (让 AI 自动搜索实时信息)
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "true").lower() == "true"
 
+# 多 agent 角色重塑 + cache + 采样改造 feature flags
+ENABLE_CACHE_BLOCKS    = _get_bool("ENABLE_CACHE_BLOCKS", True)       # B: system prompt 分块 cache
+ENABLE_TOP_P_PIPELINE  = _get_bool("ENABLE_TOP_P_PIPELINE", True)     # C: top_p 贯穿到各 backend
+ENABLE_ROLE_REWRITE    = _get_bool("ENABLE_ROLE_REWRITE", True)       # A: 其他 bot 的 assistant 消息转 user
+ENABLE_SAMPLE_OVERRIDE = _get_bool("ENABLE_SAMPLE_OVERRIDE", True)    # D: /temp /top_p 手动覆盖
+
 # 钉钉 AI 卡片模板 ID
 CARD_TEMPLATE_ID = os.getenv("CARD_TEMPLATE_ID", "ea2d035e-20fe-447d-9fbf-c04658772b24.schema")
 
