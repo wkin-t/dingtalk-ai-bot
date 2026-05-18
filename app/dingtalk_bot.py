@@ -997,8 +997,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             if thinking:
                 parts.append("\n---\n")
             parts.append(display_response)
-        elif is_thinking:
-            parts.append("\n\n⏳ *等待回复生成...*")
+        # thinking 阶段（response 为空）不再追加占位文案——让副标题的 thinkingText
+        # （由路由模型生成的 10 字提示，如"正在思考 💭"）独立承担进度展示，
+        # 避免卡片正文被"等待回复生成..."覆盖。
 
         return "".join(parts)
 
