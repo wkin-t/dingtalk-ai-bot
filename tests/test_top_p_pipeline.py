@@ -31,7 +31,10 @@ def test_litellm_stream_clamps_top_p_when_provided(mock_litellm, mock_clamp_top_
     except StopIteration:
         pass
 
-    mock_clamp_top_p.assert_called_once_with(1.2, "openai")
+    # provider 取决于 OPENROUTER_API_KEY 是否设置；测试不约束具体 provider 字符串
+    mock_clamp_top_p.assert_called_once()
+    args = mock_clamp_top_p.call_args
+    assert args[0][0] == 1.2
 
 
 @patch("app.gemini_client.clamp_top_p")

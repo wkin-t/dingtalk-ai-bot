@@ -95,10 +95,23 @@ async def call_litellm_stream(
         config = get_litellm_model_config(route_key)
         provider = "openai"
     model = config["model"]
+    # 应用 per-provider clamp（OpenRouter→Claude 路由特殊：上限 1.0）
+    from app.ai.sampling_clamp import clamp_temperature
+    is_claude = "claude" in model.lower() or model.startswith("anthropic/")
+    clamp_provider = "openclaw" if is_claude else provider  # 复用 openclaw 的 [0, 1.0] 限制给 Claude
+    clamped_temp = clamp_temperature(temperature, clamp_provider)
+    if clamped_temp != temperature:
+        print(f"⚠️ [LiteLLM/{provider}] temperature {temperature} → clamp 到 {clamped_temp}（model={model}）")
+    temperature = clamped_temp
+
     if top_p is not None:
-        top_p = clamp_top_p(top_p, provider)
+        clamped_top_p = clamp_top_p(top_p, provider)
+        if clamped_top_p != top_p:
+            print(f"⚠️ [LiteLLM/{provider}] top_p {top_p} → clamp 到 {clamped_top_p}")
+        top_p = clamped_top_p
 
     print(f"📡 [LiteLLM] 请求模型: {model} (路由: {route_key}, thinking: {thinking_level})")
+    print(f"🌡️ [LiteLLM] 实际下发 temperature={temperature}, top_p={top_p if top_p is not None else 'default(unset)'}")
 
     start_time = time.time()
     input_tokens = 0

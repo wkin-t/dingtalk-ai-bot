@@ -303,10 +303,20 @@ async def call_gemini_stream(
                 ),
             ],
         }
+        # 应用 per-provider clamp（Gemini 限 [0, 2.0]）
+        from app.ai.sampling_clamp import clamp_temperature
+        clamped_temp = clamp_temperature(temperature, "gemini")
+        if clamped_temp != temperature:
+            print(f"⚠️ [Gemini] temperature {temperature} → clamp 到 {clamped_temp}")
+        config_kwargs["temperature"] = clamped_temp
+
         if top_p is not None:
-            top_p = clamp_top_p(top_p, "gemini")
-            config_kwargs["top_p"] = top_p
+            clamped_top_p = clamp_top_p(top_p, "gemini")
+            if clamped_top_p != top_p:
+                print(f"⚠️ [Gemini] top_p {top_p} → clamp 到 {clamped_top_p}")
+            config_kwargs["top_p"] = clamped_top_p
         config = types.GenerateContentConfig(**config_kwargs)
+        print(f"🌡️ [Gemini] 实际下发 temperature={clamped_temp}, top_p={config_kwargs.get('top_p', 'default(unset)')}")
 
         # Gemini 3 系列支持 thinking，配置 thinking level
         # thinking_level: minimal (最快) | low | medium | high (最深度)
