@@ -1638,7 +1638,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 else:
                     model_short = _shorten_model_name(target_model)
                 search_icon = "🌐" if need_search else ""
-                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} | t={temperature:.1f} {search_icon}</font>"
+                # 显示真实下发温度（手动 override 优先），用 ⚙️ 标记手动设置
+                _display_temp = final_temp if 'final_temp' in dir() else temperature
+                _temp_marker = "⚙️" if (override_rec and override_rec.get("temperature") is not None) else ""
+                _top_p_part = f" | top_p={final_top_p:.2f}⚙️" if (override_rec and override_rec.get("top_p") is not None) else ""
+                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
 
             buttons = [
                 {
