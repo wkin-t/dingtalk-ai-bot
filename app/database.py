@@ -71,7 +71,11 @@ class MySQLClient:
     @staticmethod
     @contextmanager
     def get_connection():
-        """获取 MySQL 连接 (上下文管理器)"""
+        """获取 MySQL 连接 (上下文管理器)。
+
+        强制 session time_zone='+08:00' 保证 TIMESTAMP 列读出为北京时间，
+        与 clear_cutoff / sender 端的时间戳字符串可直接比较。
+        """
         conn = None
         try:
             conn = pymysql.connect(
@@ -84,7 +88,8 @@ class MySQLClient:
                 cursorclass=pymysql.cursors.DictCursor,
                 connect_timeout=5,
                 read_timeout=30,
-                write_timeout=30
+                write_timeout=30,
+                init_command="SET time_zone = '+08:00'",
             )
             yield conn
         finally:

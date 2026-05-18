@@ -9,14 +9,18 @@
 """
 from typing import Optional, Tuple, Dict, Any
 
-from app.config import ENABLE_SAMPLE_OVERRIDE
+from app.config import ENABLE_SAMPLE_OVERRIDE, ENABLE_TOP_P_PIPELINE
 
 
 def resolve_sampling(
     session_key: str,
     router_temperature: float,
 ) -> Tuple[float, Optional[float], Optional[Dict[str, Any]]]:
-    """返回 (final_temp, final_top_p, override_record_or_None)."""
+    """返回 (final_temp, final_top_p, override_record_or_None).
+
+    - ENABLE_SAMPLE_OVERRIDE=False: 忽略手动设置，直接用 router_temperature, top_p=None
+    - ENABLE_TOP_P_PIPELINE=False: 即使有手动 top_p 也不下发到 API（回滚 C stage 用）
+    """
     if not ENABLE_SAMPLE_OVERRIDE:
         return router_temperature, None, None
 
@@ -31,5 +35,5 @@ def resolve_sampling(
         return router_temperature, None, None
 
     final_temp = rec["temperature"] if rec.get("temperature") is not None else router_temperature
-    final_top_p = rec.get("top_p")
+    final_top_p = rec.get("top_p") if ENABLE_TOP_P_PIPELINE else None
     return final_temp, final_top_p, rec

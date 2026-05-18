@@ -106,6 +106,68 @@ class WeComBotHandler:
                 self._cache_reply(msg_id, reply)
                 return reply
 
+            # 手动采样覆盖命令 /temp /top_p /sample (与钉钉端对齐)
+            if content.startswith("/temp") or content.startswith("/top_p") or content.startswith("/sample"):
+                from app.sample_override import (
+                    get_override, set_override, reset_override,
+                    validate_temperature, validate_top_p,
+                )
+                from app.sample_override_help import render_temp_status, render_top_p_status, render_sample_status
+
+                c = content.strip()
+                reply_text = None
+
+                if c == "/temp":
+                    reply_text = render_temp_status(get_override(session_key))
+                elif c.startswith("/temp "):
+                    arg = c[6:].strip()
+                    if arg == "reset":
+                        reset_override(session_key, what="temperature")
+                        reply_text = "🌡️ 已清除手动温度，回归路由自动"
+                    else:
+                        ok, err = validate_temperature(arg)
+                        if not ok:
+                            reply_text = f"❌ {err}"
+                        else:
+                            set_override(session_key, temperature=float(arg), set_by=from_user, set_by_nick=from_user)
+                            reply_text = f"🌡️ 温度已设置为 {arg}（24h 后自动失效）"
+                elif c == "/top_p":
+                    reply_text = render_top_p_status(get_override(session_key))
+                elif c.startswith("/top_p "):
+                    arg = c[7:].strip()
+                    if arg == "reset":
+                        reset_override(session_key, what="top_p")
+                        reply_text = "🎯 已清除手动 top_p"
+                    else:
+                        ok, err = validate_top_p(arg)
+                        if not ok:
+                            reply_text = f"❌ {err}"
+                        else:
+                            set_override(session_key, top_p=float(arg), set_by=from_user, set_by_nick=from_user)
+                            reply_text = f"🎯 top_p 已设置为 {arg}"
+                elif c == "/sample":
+                    reply_text = render_sample_status(get_override(session_key))
+                elif c in ("/sample reset", "/sample reset all"):
+                    reset_override(session_key, what="all")
+                    reply_text = "⚙️ 已清空所有手动采样设置"
+                elif c == "/sample reset temp":
+                    reset_override(session_key, what="temperature")
+                    reply_text = "🌡️ 已清除手动温度"
+                elif c == "/sample reset top_p":
+                    reset_override(session_key, what="top_p")
+                    reply_text = "🎯 已清除手动 top_p"
+
+                if reply_text is not None:
+                    stream_id = self._new_stream_id()
+                    reply = self._build_stream_payload(
+                        stream_id=stream_id,
+                        content=reply_text,
+                        finish=True,
+                        include_card=self._use_stream_with_card(),
+                    )
+                    self._cache_reply(msg_id, reply)
+                    return reply
+
             update_history(session_key, content, assistant_msg=None, sender_nick=from_user)
             print(f"📩 [企业微信] 收到文本消息: {content} (From: {from_user})")
 
