@@ -70,3 +70,4 @@ credentials/
 
 # 内部修复文档（包含服务器路径等敏感信息）
 FIX_*.md
+.pytest-tmp-*/
