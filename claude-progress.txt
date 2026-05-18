@@ -1,24 +1,32 @@
 ## 最近完成
-- Git 历史重写：移除个人邮箱/真实姓名，78 commits 改为 wkin-t 匿名（git filter-repo --mailmap）
-- /soul evolve 命令：支持手动触发 Soul 进化，进化后展示新内容
-- 对抗性代码审查（codex:rescue）：审查 35 个提交，发现 10 个问题，全部修复
-- 安全加固 5 个 commit：admin 权限、prompt injection 防护、JSON 解析升级、内存泄漏防护、字节截断
-- 双后端部署：Gemini(:35000) + OpenAI(:35001) 均已部署最新代码
-- 更新 memory（soul-system、security-audit）和 CLAUDE.md
+- 多 Agent 角色重塑 + Cache 优化 + 采样可控化（spec+plan+4 stages 完整落地，16 commits）
+  - Spec: docs/superpowers/specs/2026-05-18-multi-agent-role-cache-temp-design.md（经 codex:rescue 红军评审 12 个问题修订）
+  - Plan: docs/superpowers/plans/2026-05-18-multi-agent-role-cache-temp-plan.md（4 stages 30+ tasks）
+  - Stage B: system prompt 分块 cache（稳定段/半稳定段/变动段），LiteLLM list blocks
+  - Stage C: TEMPERATURE_MAP 加 wild=1.3/chaotic=2.0；top_p 贯穿 backend → 各 client；Claude clamp 至 1.0
+  - Stage A: 其他 bot 的 assistant 消息转 user；merge 连续同 role；Soul/image_gen 用 raw messages；OpenClaw WS 短路
+  - Stage D: /temp /top_p /sample slash 命令（sticky 24h，显示设置人 + ⚙️）
+- 包工头 + codex 工人协作模式验证：codex 干编码（~3700 行），Claude 兜底 commit + review
+- 8 个新模块 + 4 个 feature flag（独立可回滚）
+- 测试：265 → 331 PASS（+66 新增覆盖）
 
 ## 当前正在做
-- 无
+- 等待用户提出 2 个新需求
 
 ## 下一步应做
-- CLAUDE.md 变更待提交（补充了 /soul evolve 和 push 审计提醒）
-- GitHub Dependabot 报告 6 个漏洞（1 critical, 5 high），可能需要处理依赖升级
-- 对抗性审查改进计划文档 docs/superpowers/plans/2026-05-13-adversarial-review-fixes.md 待清理
+- 用户即将提出 2 个新需求
+- （已完成 plan 后可选）部署到 :35000 / :35002，观察 cache 命中率改善 + 多 bot 群聊连贯性
+- （可选）跑 `python scripts/backfill_bot_id.py --dry-run` 看老历史 NULL bot_id 数量
+- D.5 thinkingText 装饰跳过（按 /effort low 取舍），未来需要时再加
 
 ## 已知问题
-- Pyright 报告多个已有类型标注问题（conversation_id 可能为 None），非本次引入
-- 服务器 GitHub 访问不稳定，git 操作需走代理 http://127.0.0.1:1087
+- Codex companion 不探活僵尸 PID——派任务前需先 `status --all --json` 检查冷 zombie
+- Pyright 报 `app.sample_override_help` 解析失败：缓存问题，runtime 通过测试验证 OK
+- 多个 pre-existing Pyright 类型告警（conversation_id 可能为 None 等），非本次引入
 
 ## 环境状态
 - Git 分支: master
-- 未提交变更: CLAUDE.md (modified), docs/superpowers/plans/ (untracked)
-- 服务状态: dingtalk-ai-bot-gemini(:35000) 运行中, dingtalk-ai-bot-openai(:35001) 运行中
+- 当前 HEAD: 9956f8a (feat(D): integrate manual sampling override + slash commands)
+- 未提交变更: 仅有几个 pre-existing untracked 文件（.playwright-mcp/, .serena/, test_vertex_claude.py, docs/superpowers/plans/2026-05-13-adversarial-review-fixes.md）
+- 服务状态: 钉钉/openrouter 容器待部署最新代码（cache + role 重塑改动）
+- 测试状态: 331 passed, compile OK
