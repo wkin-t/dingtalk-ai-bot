@@ -143,7 +143,7 @@ class AIHandler:
                 history_messages = full_history
 
             # 构造 System Prompt
-            system_prompt = self._build_system_prompt(group_info)
+            system_prompt = self._build_system_prompt(group_info, soul_content=None)
 
             messages = [{"role": "system", "content": system_prompt}]
 
@@ -252,44 +252,34 @@ class AIHandler:
             traceback.print_exc()
             return f"💥 **系统异常**\n\n{error_msg}"
 
-    def _build_system_prompt(self, group_info: Optional[Dict] = None) -> str:
-        """构建 System Prompt"""
+    def _build_system_prompt(self, group_info: Optional[Dict] = None, soul_content: Optional[str] = None):
+        """构建 System Prompt。
+
+        返回:
+          - 如果 ENABLE_CACHE_BLOCKS=True 且后端支持: list of blocks
+          - 否则: str（向下兼容）
+        """
+        from app.config import ENABLE_CACHE_BLOCKS, AI_BACKEND
+        from app.ai.system_prompt import build_system_prompt_blocks
+
         beijing_tz = timezone(timedelta(hours=8))
-        current_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
         current_date = datetime.now(beijing_tz)
-        year = current_date.year
-        month = current_date.month
-        day = current_date.day
 
-        # 根据 AI_BACKEND 动态设置 bot 名称
-        bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI"}.get(AI_BACKEND, "Gem")
+        bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI", "openrouter": "小克"}.get(AI_BACKEND, "Gem")
 
-        system_prompt = f"""## 身份
-你的名字是 {bot_name}。你的个性和风格由你的 Soul 定义（在下方注入）。
+        blocks = build_system_prompt_blocks(
+            group_info=group_info,
+            soul_content=soul_content,
+            bot_name=bot_name,
+            current_date=current_date,
+        )
 
-## 时间
-今天是 {year} 年 {month} 月 {day} 日 {current_time} (北京时间 UTC+8)。
-你的训练数据截止于 2025 年，但现在是 {year} 年了。
+        # LiteLLM/OpenRouter 路径支持 list blocks；Gemini/OpenClaw 用 string 拼接（B.5 处理）
+        if ENABLE_CACHE_BLOCKS and AI_BACKEND in ("openai", "openrouter"):
+            return blocks
 
-## 为什么有这些约定
-这些不是规则，是背景信息——理解它们比遵守它们更重要：
-
-用户把你当作可信赖的参考源，所以信息的准确性至关重要——如果不确定，就说出来。
-对话历史以 '[时间] 昵称: 消息' 的格式展示，帮助你理解对话脉络和谁在说话。历史中 AI 回复前的 '[来自XXX]' 标签是系统注入的元数据，用于区分不同机器人——不是回复格式，你的输出不应包含此标签。
-中文为主，技术术语附英文（如：机器学习 (Machine Learning)），因为大多数用户是中文母语。
-Markdown 让信息更容易被快速扫读——善用它。
-LaTeX 在聊天平台渲染不出来，用 Unicode 代替（x², √x）。
-默认北京时间 (UTC+8) 和中国大陆场景，除非用户明确指定其他。
-
-## 搜索
-启用搜索时结果会自动提供。搜索结果与训练数据冲突时，优先搜索结果——尤其是时间敏感的信息。"""
-
-        # 注入群信息
-        if group_info:
-            group_name = group_info.get('name', 'Unknown Group')
-            system_prompt += f"\n\n当前群聊: '{group_name}'"
-
-        return system_prompt
+        # 降级：拼接成 string
+        return "\n\n".join(b["text"] for b in blocks)
 
     def _format_history(self, history_messages: List[Dict]) -> List[Dict]:
         """格式化历史消息"""
