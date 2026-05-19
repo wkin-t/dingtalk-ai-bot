@@ -11,6 +11,8 @@ from app.config import (
     DINGTALK_CLIENT_SECRET,
     MAX_HISTORY_LENGTH,
     DEFAULT_MODEL,
+    GEMINI_MODEL_LITE,
+    GEMINI_MODEL_FAST,
     CARD_TEMPLATE_ID,
     get_model_pricing,
     AVAILABLE_MODELS,
@@ -338,7 +340,7 @@ async def _ask_lightweight_model(prompt: str) -> str:
 
             def _call():
                 resp = _gemini_client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
+                    model=GEMINI_MODEL_LITE,
                     contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
                     config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=500)
                 )
@@ -622,7 +624,7 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
     content_len = len(content)
 
     # 默认值
-    model = "gemini-3-flash"
+    model = GEMINI_MODEL_FAST
     thinking_level = "low"
     reason = "普通问题"
 
@@ -631,7 +633,7 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
         for kw in SIMPLE_KEYWORDS:
             if kw in content_lower:
                 return {
-                    "model": "gemini-3-flash",
+                    "model": GEMINI_MODEL_FAST,
                     "thinking_level": "minimal",
                     "reason": "简单问候"
                 }
@@ -647,31 +649,31 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
 
     # 超复杂问题 → Pro + high
     if pro_count >= 2 or (pro_count >= 1 and complex_count >= 3):
-        model = "gemini-3.1-pro-preview"
+        model = DEFAULT_MODEL
         thinking_level = "high"
         reason = f"深度推理 (Pro关键词={pro_count}, 复杂={complex_count})"
 
     # 复杂问题 + 长文本 → Pro + high
     elif complex_count >= 4 and content_len > 300:
-        model = "gemini-3.1-pro-preview"
+        model = DEFAULT_MODEL
         thinking_level = "high"
         reason = f"复杂长文 (关键词={complex_count}, 长度={content_len})"
 
     # 复杂代码问题 → Flash + high (Flash 代码能力也很强)
     elif has_code and complex_count >= 2:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "high"
         reason = f"代码问题 (关键词={complex_count})"
 
     # 复杂问题 → Flash + high
     elif complex_count >= 3:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "high"
         reason = f"复杂问题 (关键词={complex_count})"
 
     # 中等复杂 → Flash + medium
     elif complex_count >= 1 or has_code:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "medium"
         reason = f"中等复杂 (关键词={complex_count})"
 
@@ -679,7 +681,7 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
     if content_len > 500:
         if thinking_level == "low":
             thinking_level = "medium"
-        elif thinking_level == "medium" and model == "gemini-3-flash":
+        elif thinking_level == "medium" and model == GEMINI_MODEL_FAST:
             thinking_level = "high"
         reason += f" + 长文本({content_len}字)"
 
@@ -1255,14 +1257,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
                 complexity = {
-                    "model": "gemini-3-flash-preview",
+                    "model": GEMINI_MODEL_FAST,
                     "thinking_level": "low",
                     "need_search": False,
                     "temperature": "balanced",
                     "reason": "路由异常，使用默认",
                     "thinking_text": "思考中..."
                 }
-            target_model = complexity.get("model", "gemini-3-flash-preview")
+            target_model = complexity.get("model", GEMINI_MODEL_FAST)
             thinking_level = complexity.get("thinking_level", "low")
             need_search = complexity.get("need_search", False)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))

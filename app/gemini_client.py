@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from google import genai
 from google.genai import types
 from app.ai.sampling_clamp import clamp_top_p
-from app.config import GEMINI_API_KEY, DEFAULT_MODEL, ENABLE_THINKING, SOCKS_PROXY, ENABLE_SEARCH
+from app.config import GEMINI_API_KEY, DEFAULT_MODEL, GEMINI_MODEL_LITE, GEMINI_MODEL_FAST, ENABLE_THINKING, SOCKS_PROXY, ENABLE_SEARCH
 
 # 配置代理 (仅 Gemini API 使用代理，通过 httpx_client 单独配置)
 # 将 socks5h:// 转换为 socks5:// (httpx 格式)
@@ -37,7 +37,7 @@ else:
     )
 
 
-async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = "gemini-3.1-flash-lite", soul_text: str = "") -> dict:
+async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = None, soul_text: str = "") -> dict:
     """
     使用 Gemini 模型快速分析问题复杂度
     返回推荐的模型、thinking level 和是否需要联网搜索
@@ -60,6 +60,9 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     import re
     import traceback
 
+    if analysis_model is None:
+        analysis_model = GEMINI_MODEL_LITE
+
     print(f"🔍 [预分析] 函数被调用，内容: {content[:50]}...")
     print(f"🔍 [预分析] has_images={has_images}")
 
@@ -75,8 +78,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 
 选择规则:
 1. model:
-   - "gemini-3-flash-preview": 日常问答、代码、一般分析 (默认)
-   - "gemini-3.1-pro-preview": 仅用于复杂数学证明、学术研究、系统架构设计
+   - "{GEMINI_MODEL_FAST}": 日常问答、代码、一般分析 (默认)
+   - "{DEFAULT_MODEL}": 仅用于复杂数学证明、学术研究、系统架构设计
 
 2. thinking_level:
    - "minimal": 简单问候如"你好"、"谢谢"
@@ -116,7 +119,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+{{"model":"{GEMINI_MODEL_FAST}","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
@@ -143,8 +146,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         if json_match:
             result = json.loads(json_match.group())
             # 验证和修正字段
-            if result.get("model") not in ["gemini-3-flash-preview", "gemini-3.1-pro-preview"]:
-                result["model"] = "gemini-3-flash-preview"
+            if result.get("model") not in [GEMINI_MODEL_FAST, DEFAULT_MODEL]:
+                result["model"] = GEMINI_MODEL_FAST
             if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
                 result["thinking_level"] = "low"
             if "need_search" not in result:
@@ -165,7 +168,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     # 降级：返回保守的默认值
     print("⚠️ 使用降级默认配置")
     return {
-        "model": "gemini-3-flash-preview",
+        "model": GEMINI_MODEL_FAST,
         "thinking_level": "low",
         "need_search": False,
         "reason": "预分析失败，使用默认配置",
@@ -444,7 +447,7 @@ async def google_search(query: str) -> Optional[str]:
 
     def _search():
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+            model=GEMINI_MODEL_LITE,
             contents=f"请搜索以下问题并给出简洁的事实性回答，包含关键信息来源：\n\n{query}",
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],

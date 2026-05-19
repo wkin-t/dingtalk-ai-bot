@@ -207,6 +207,11 @@ GOOGLE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/
 # 可选: gemini-2.0-flash, gemini-2.0-flash-thinking-exp, gemini-3.1-pro-preview
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
+# Gemini 三档模型（对应 lite/fast/pro 路由结果）
+GEMINI_MODEL_LITE = os.getenv("GEMINI_MODEL_LITE", "gemini-3.1-flash-lite")   # 路由分析、soul 进化、搜索
+GEMINI_MODEL_FAST = os.getenv("GEMINI_MODEL_FAST", "gemini-3-flash-preview")  # fast 档日常回复
+# pro 档沿用 DEFAULT_MODEL (GEMINI_MODEL)
+
 # 是否启用 thinking 模式 (显示模型的思考过程)
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 
@@ -251,6 +256,7 @@ DINGTALK_IMAGE_MSG_PARAM_TEMPLATE = os.getenv(
 
 # ===== 生图配置 =====
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "imagen-4.0-generate-001")
+GEMINI_IMAGE_EDIT_MODEL = os.environ.get("GEMINI_IMAGE_EDIT_MODEL", "gemini-2.0-flash-exp")
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_IMAGE_ASPECT_RATIO = os.environ.get("DEFAULT_IMAGE_ASPECT_RATIO", "1:1")
 DEFAULT_IMAGE_COUNT = max(1, min(4, _get_int("DEFAULT_IMAGE_COUNT", 1)))
@@ -286,10 +292,10 @@ GEMINI_PRICING = {
     "default": {"input": 0.50, "output": 3.00}
 }
 
-# 可用模型列表
+# 可用模型列表（flash/pro 跟随环境变量配置）
 AVAILABLE_MODELS = {
-    "flash": "gemini-3-flash",
-    "pro": "gemini-3.1-pro-preview",
+    "flash": GEMINI_MODEL_FAST,
+    "pro": DEFAULT_MODEL,
     "2.5-flash": "gemini-2.5-flash",
     "2.5-pro": "gemini-2.5-pro",
     "2.0-flash": "gemini-2.0-flash",
@@ -304,6 +310,7 @@ def get_model_pricing(model_name: str) -> dict:
     return GEMINI_PRICING["default"]
 
 # ===== LiteLLM 后端 =====
+LITELLM_MODEL_LITE = os.getenv("OPENAI_MODEL_LITE", "")  # 留空时自动降级到 FLASH
 LITELLM_MODEL_FLASH = os.getenv("OPENAI_MODEL_FLASH", "deepseek/deepseek-chat")
 LITELLM_MODEL_PRO = os.getenv("OPENAI_MODEL_PRO", "deepseek/deepseek-reasoner")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")
@@ -320,6 +327,14 @@ LITELLM_MAX_RETRIES = _get_int("LITELLM_MAX_RETRIES", 2)
 
 # 模型映射（带 capability 声明）
 LITELLM_MODEL_CONFIG = {
+    "lite": {
+        "model": LITELLM_MODEL_LITE or LITELLM_MODEL_FLASH,  # 未配置时降级到 flash
+        "region": os.getenv("VERTEX_REGION_FAST", "europe-west1"),
+        "supports_reasoning": _get_bool("OPENAI_LITE_SUPPORTS_REASONING", False),
+        "supports_search": _get_bool("OPENAI_LITE_SUPPORTS_SEARCH", False),
+        "supports_vision": _get_bool("OPENAI_LITE_SUPPORTS_VISION", True),
+        "reasoning_param": os.getenv("VERTEX_REASONING_PARAM_FAST", "openai_effort"),
+    },
     "fast": {
         "model": LITELLM_MODEL_FLASH,
         "region": os.getenv("VERTEX_REGION_FAST", "europe-west1"),
@@ -344,7 +359,11 @@ ROUTE_KEY_MAP = {
     "lite": "lite",
     "fast": "fast",
     "pro": "pro",
-    # 旧 Gemini 名兼容（Gemini 后端路由 prompt 和关键词降级路径继续使用）
+    # 当前环境变量配置的模型名（动态，随 GEMINI_MODEL_* 变化）
+    GEMINI_MODEL_LITE: "lite",
+    GEMINI_MODEL_FAST: "fast",
+    DEFAULT_MODEL: "pro",
+    # 历史 Gemini 模型名兼容
     "gemini-3-flash-lite": "lite",
     "gemini-3-flash-lite-preview": "lite",
     "gemini-3-flash-preview": "fast",
