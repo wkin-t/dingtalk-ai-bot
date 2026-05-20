@@ -273,69 +273,61 @@ class TestVertexProviderBranch:
         assert reasoning == "原始推理"
 
 
-class TestInjectCacheControl:
-    """_inject_cache_control 单元测试"""
+class TestFlattenCacheBlocks:
+    """_flatten_cache_blocks 单元测试（替代原 _inject_cache_control）"""
 
-    def test_anthropic_model_converts_system_to_array(self):
-        from app.litellm_client import _inject_cache_control
-        messages = [{"role": "system", "content": "你是一个助手"}]
-        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
-        content = result[0]["content"]
-        assert isinstance(content, list)
-        assert content[0]["type"] == "text"
-        assert content[0]["text"] == "你是一个助手"
-        assert content[0]["cache_control"] == {"type": "ephemeral"}
-
-    def test_non_anthropic_model_unchanged(self):
-        from app.litellm_client import _inject_cache_control
-        messages = [{"role": "system", "content": "你是一个助手"}]
-        result = _inject_cache_control(messages, "openai/gpt-4o")
+    def test_list_content_flattened_to_string(self):
+        from app.litellm_client import _flatten_cache_blocks
+        messages = [{"role": "system", "content": [{"type": "text", "text": "你是一个助手", "cache_control": {"type": "ephemeral"}}]}]
+        result = _flatten_cache_blocks(messages)
         assert result[0]["content"] == "你是一个助手"
 
-    def test_gemini_model_unchanged(self):
-        from app.litellm_client import _inject_cache_control
+    def test_string_content_unchanged(self):
+        from app.litellm_client import _flatten_cache_blocks
         messages = [{"role": "system", "content": "你是一个助手"}]
-        result = _inject_cache_control(messages, "gemini/gemini-3-flash")
+        result = _flatten_cache_blocks(messages)
         assert result[0]["content"] == "你是一个助手"
 
-    def test_non_system_message_unchanged(self):
-        from app.litellm_client import _inject_cache_control
+    def test_multi_block_joined_with_newline(self):
+        from app.litellm_client import _flatten_cache_blocks
+        messages = [{"role": "system", "content": [
+            {"type": "text", "text": "段落一", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "段落二"},
+        ]}]
+        result = _flatten_cache_blocks(messages)
+        assert result[0]["content"] == "段落一\n段落二"
+
+    def test_user_message_string_unchanged(self):
+        from app.litellm_client import _flatten_cache_blocks
         messages = [{"role": "user", "content": "你好"}]
-        result = _inject_cache_control(messages, "anthropic/claude-sonnet-4-5")
+        result = _flatten_cache_blocks(messages)
         assert result[0]["content"] == "你好"
 
-    def test_empty_system_content_not_converted(self):
-        from app.litellm_client import _inject_cache_control
+    def test_empty_string_unchanged(self):
+        from app.litellm_client import _flatten_cache_blocks
         messages = [{"role": "system", "content": ""}]
-        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        result = _flatten_cache_blocks(messages)
         assert result[0]["content"] == ""
 
-    def test_already_array_content_unchanged(self):
-        from app.litellm_client import _inject_cache_control
-        original_content = [{"type": "text", "text": "已经是数组"}]
-        messages = [{"role": "system", "content": original_content}]
-        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
-        assert result[0]["content"] is original_content
-
-    def test_mixed_messages_only_system_converted(self):
-        from app.litellm_client import _inject_cache_control
+    def test_mixed_messages_all_processed(self):
+        from app.litellm_client import _flatten_cache_blocks
         messages = [
-            {"role": "system", "content": "系统提示"},
+            {"role": "system", "content": [{"type": "text", "text": "系统提示", "cache_control": {"type": "ephemeral"}}]},
             {"role": "user", "content": "用户消息"},
             {"role": "assistant", "content": "助手回复"},
         ]
-        result = _inject_cache_control(messages, "anthropic/claude-opus-4-5")
-        assert isinstance(result[0]["content"], list)
+        result = _flatten_cache_blocks(messages)
+        assert result[0]["content"] == "系统提示"
         assert result[1]["content"] == "用户消息"
         assert result[2]["content"] == "助手回复"
 
     def test_message_list_length_preserved(self):
-        from app.litellm_client import _inject_cache_control
+        from app.litellm_client import _flatten_cache_blocks
         messages = [
-            {"role": "system", "content": "提示"},
+            {"role": "system", "content": [{"type": "text", "text": "提示"}]},
             {"role": "user", "content": "问题"},
         ]
-        result = _inject_cache_control(messages, "anthropic/claude-haiku-4-5")
+        result = _flatten_cache_blocks(messages)
         assert len(result) == 2
 
 

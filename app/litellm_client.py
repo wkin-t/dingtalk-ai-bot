@@ -41,22 +41,20 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def _inject_cache_control(messages: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
-    """为 Anthropic 模型的 system 消息注入 cache_control breakpoint。
+def _flatten_cache_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """将 list-of-blocks 格式的 content 还原为纯字符串。
 
-    兼容两种 system content 形态：
-      - str: 整体作为单个 ephemeral block（向下兼容）
-      - list of blocks: 原样透传（调用方已自行设好 cache_control）
+    Stage B 的 system_prompt.py 和旧 _inject_cache_control 会生成
+    [{"type":"text","text":"...","cache_control":{...}}] 格式。
+    OpenRouter 路由到 Anthropic Responses API 时，该 API 要求 content 为字符串，
+    不接受 Chat Completions 的 cache_control 数组格式，会报 "expected string, received array"。
     """
-    if not (model.startswith("anthropic/") or "claude" in model.lower()):
-        return messages
     result = []
     for msg in messages:
-        if msg.get("role") == "system":
-            content = msg.get("content", "")
-            if isinstance(content, str) and content:
-                msg = {**msg, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
-            # list 形态原样透传（保留调用方的 per-block cache_control 设置）
+        content = msg.get("content")
+        if isinstance(content, list):
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            msg = {**msg, "content": "\n".join(text_parts)}
         result.append(msg)
     return result
 
@@ -237,7 +235,8 @@ async def call_litellm_stream(
             kwargs["messages"] = _strip_images(messages)
 
         if OPENROUTER_API_KEY:
-            kwargs["messages"] = _inject_cache_control(kwargs["messages"], model)
+            # OpenRouter 对新 Claude 模型自动路由到 Responses API，该 API 不支持 cache_control 数组格式
+            kwargs["messages"] = _flatten_cache_blocks(kwargs["messages"])
 
         response = await litellm.acompletion(**kwargs)
 
