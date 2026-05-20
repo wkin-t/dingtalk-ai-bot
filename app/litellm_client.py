@@ -196,6 +196,8 @@ async def call_litellm_stream(
             kwargs["api_base"] = OPENROUTER_BASE_URL
             kwargs["api_key"] = OPENROUTER_API_KEY
             kwargs["custom_llm_provider"] = "openai"
+            kwargs["use_responses_api"] = False  # Claude 模型走 /v1/chat/completions，sub2api 的 /v1/responses 仅限 OpenAI 模型
+            kwargs["drop_params"] = True          # 中转站不支持的参数静默丢弃
             effort = EFFORT_MAPPING.get(thinking_level)
             if config.get("supports_reasoning") and effort and effort != "none":
                 extra_body["reasoning"] = {"effort": effort}
