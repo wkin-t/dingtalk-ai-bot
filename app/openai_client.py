@@ -93,57 +93,85 @@ async def call_openai_stream(
     start_time = time.time()
 
     try:
-        client = _build_client()
-
-        create_kwargs: Dict[str, Any] = {
+        # sub2api /v1/responses 使用 messages 字段（非标准 OpenAI Responses API 的 input）
+        request_body: Dict[str, Any] = {
             "model": model_name,
-            "input": messages if config["supports_vision"] else _strip_images(messages),
+            "messages": messages if config["supports_vision"] else _strip_images(messages),
             "stream": True,
         }
 
-        # temperature（reasoning / o-series 模型不支持，跳过）
         _model_base = model_name.split("/")[-1]
         if not (config["supports_reasoning"] or any(
             _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
         )):
-            create_kwargs["temperature"] = temperature
+            request_body["temperature"] = temperature
         if top_p is not None:
-            create_kwargs["top_p"] = top_p
+            request_body["top_p"] = top_p
 
-        # Responses API 用 reasoning dict，而非 reasoning_effort 字符串
         effort = EFFORT_MAPPING.get(thinking_level)
         if config["supports_reasoning"] and effort and effort != "none":
-            create_kwargs["reasoning"] = {"effort": effort}
+            request_body["reasoning"] = {"effort": effort}
 
-        stream = await client.responses.create(**create_kwargs)
+        base_url = OPENAI_API_BASE.rstrip("/")
+        req_headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY_CUSTOM or 'dummy'}",
+            "Content-Type": "application/json",
+        }
+        proxy_kwargs: Dict[str, Any] = {"proxy": HTTPX_PROXY} if HTTPX_PROXY else {}
 
         thinking_sent = False
         input_tokens = 0
         output_tokens = 0
         actual_model = model_name
 
-        async for event in stream:
-            etype = getattr(event, "type", "")
+        async with httpx.AsyncClient(timeout=120.0, **proxy_kwargs) as http:
+            async with http.stream(
+                "POST", f"{base_url}/responses",
+                headers=req_headers, json=request_body,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise Exception(f"HTTP {resp.status_code}: {body.decode()}")
 
-            if etype == "response.output_text.delta":
-                if thinking_sent:
-                    yield {"thinking_end": True}
-                    thinking_sent = False
-                yield {"content": event.delta}
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
-            elif etype == "response.reasoning_summary_text.delta":
-                if not thinking_sent:
-                    yield {"thinking_start": True}
-                    thinking_sent = True
-                yield {"thinking": event.delta}
+                    etype = event.get("type", "")
 
-            elif etype == "response.completed":
-                resp = event.response
-                if getattr(resp, "model", None):
-                    actual_model = resp.model
-                if getattr(resp, "usage", None):
-                    input_tokens = getattr(resp.usage, "input_tokens", 0) or 0
-                    output_tokens = getattr(resp.usage, "output_tokens", 0) or 0
+                    # 兼容 response.output_text.delta 和 response.text.delta 两种命名
+                    if etype in ("response.output_text.delta", "response.text.delta"):
+                        delta = event.get("delta", "")
+                        if isinstance(delta, dict):
+                            delta = delta.get("text", "")
+                        if delta:
+                            if thinking_sent:
+                                yield {"thinking_end": True}
+                                thinking_sent = False
+                            yield {"content": delta}
+
+                    elif etype == "response.reasoning_summary_text.delta":
+                        delta = event.get("delta", "")
+                        if delta:
+                            if not thinking_sent:
+                                yield {"thinking_start": True}
+                                thinking_sent = True
+                            yield {"thinking": delta}
+
+                    elif etype in ("response.completed", "response.done"):
+                        resp_data = event.get("response", {})
+                        if resp_data.get("model"):
+                            actual_model = resp_data["model"]
+                        usage = resp_data.get("usage", {})
+                        input_tokens = usage.get("input_tokens", 0) or 0
+                        output_tokens = usage.get("output_tokens", 0) or 0
 
         if thinking_sent:
             yield {"thinking_end": True}
@@ -175,13 +203,13 @@ async def call_openai_simple(prompt: str, max_tokens: int = 500) -> str:
     """用于 Soul 进化等后台轻量文本生成任务（非流式）。"""
     try:
         client = _build_client()
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=MODEL_ROUTER,
-            input=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_output_tokens=max_tokens,
+            max_tokens=max_tokens,
         )
-        return response.output_text or ""
+        return response.choices[0].message.content or ""
     except Exception as e:
         print(f"⚠️ [OpenAI简单调用] 失败: {e}")
         return ""
@@ -240,13 +268,13 @@ async def analyze_complexity_with_openai(
 
     try:
         client = _build_client()
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=MODEL_ROUTER,
-            input=[{"role": "user", "content": analysis_prompt}],
+            messages=[{"role": "user", "content": analysis_prompt}],
             temperature=0.1,
-            max_output_tokens=300,
+            max_tokens=300,
         )
-        result_text = response.output_text or ""
+        result_text = response.choices[0].message.content or ""
         print(f"📝 [OpenAI路由] 原始返回: {result_text[:200]}")
 
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
