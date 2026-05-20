@@ -188,7 +188,6 @@ async def call_litellm_stream(
             kwargs["api_base"] = OPENROUTER_BASE_URL
             kwargs["api_key"] = OPENROUTER_API_KEY
             kwargs["custom_llm_provider"] = "openai"
-            kwargs["use_responses_api"] = False  # 强制走 /v1/chat/completions，兼容 sub2api 等中转
             effort = EFFORT_MAPPING.get(thinking_level)
             if config.get("supports_reasoning") and effort and effort != "none":
                 extra_body["reasoning"] = {"effort": effort}
