@@ -53,6 +53,17 @@ def _build_client() -> AsyncOpenAI:
     )
 
 
+def _is_complete_reasoning(rd: list) -> bool:
+    """确保 reasoning_details 有效，防止残体写入导致多轮 thinking 死锁。"""
+    if not isinstance(rd, list) or not rd:
+        return False
+    return all(
+        item.get("signature") or item.get("data")
+        for item in rd
+        if item.get("type") in ("thinking", "reasoning")
+    )
+
+
 async def call_openai_stream(
     messages: List[Dict[str, Any]],
     target_model: str,
@@ -63,8 +74,8 @@ async def call_openai_stream(
     conversation_id: str = "",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    通过官方 openai.AsyncOpenAI 调用 OPENAI_API_BASE 中转站（流式）。
-    正确捕获 delta.model_extra["reasoning_details"]（含 signature）用于多轮 thinking。
+    通过 openai.AsyncOpenAI Chat Completions 调用 OPENAI_API_BASE 中转站（流式）。
+    支持 Claude/Gemini/GPT 全量 upstream，兼容 reasoning_content/thinking delta 字段。
 
     Yields:
         {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
@@ -93,85 +104,68 @@ async def call_openai_stream(
     start_time = time.time()
 
     try:
-        # sub2api /v1/responses 使用 messages 字段（非标准 OpenAI Responses API 的 input）
-        request_body: Dict[str, Any] = {
-            "model": model_name,
-            "messages": messages if config["supports_vision"] else _strip_images(messages),
-            "stream": True,
-        }
+        client = _build_client()
 
+        extra_params: Dict[str, Any] = {}
         _model_base = model_name.split("/")[-1]
         if not (config["supports_reasoning"] or any(
             _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
         )):
-            request_body["temperature"] = temperature
+            extra_params["temperature"] = temperature
         if top_p is not None:
-            request_body["top_p"] = top_p
+            extra_params["top_p"] = top_p
 
         effort = EFFORT_MAPPING.get(thinking_level)
         if config["supports_reasoning"] and effort and effort != "none":
-            request_body["reasoning"] = {"effort": effort}
+            extra_params["extra_body"] = {"reasoning": {"effort": effort}}
 
-        base_url = OPENAI_API_BASE.rstrip("/")
-        req_headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY_CUSTOM or 'dummy'}",
-            "Content-Type": "application/json",
-        }
-        proxy_kwargs: Dict[str, Any] = {"proxy": HTTPX_PROXY} if HTTPX_PROXY else {}
+        processed_messages: Any = messages if config["supports_vision"] else _strip_images(messages)
+
+        stream = await client.chat.completions.create(
+            model=model_name,
+            messages=processed_messages,
+            stream=True,
+            stream_options={"include_usage": True},
+            **extra_params,
+        )
 
         thinking_sent = False
         input_tokens = 0
         output_tokens = 0
         actual_model = model_name
 
-        async with httpx.AsyncClient(timeout=120.0, **proxy_kwargs) as http:
-            async with http.stream(
-                "POST", f"{base_url}/responses",
-                headers=req_headers, json=request_body,
-            ) as resp:
-                if resp.status_code >= 400:
-                    body = await resp.aread()
-                    raise Exception(f"HTTP {resp.status_code}: {body.decode()}")
+        async for chunk in stream:
+            if not chunk.choices:
+                if hasattr(chunk, "usage") and chunk.usage:
+                    input_tokens = chunk.usage.prompt_tokens or 0
+                    output_tokens = chunk.usage.completion_tokens or 0
+                continue
 
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+            if chunk.model:
+                actual_model = chunk.model
 
-                    etype = event.get("type", "")
+            delta = chunk.choices[0].delta
 
-                    # 兼容 response.output_text.delta 和 response.text.delta 两种命名
-                    if etype in ("response.output_text.delta", "response.text.delta"):
-                        delta = event.get("delta", "")
-                        if isinstance(delta, dict):
-                            delta = delta.get("text", "")
-                        if delta:
-                            if thinking_sent:
-                                yield {"thinking_end": True}
-                                thinking_sent = False
-                            yield {"content": delta}
+            thinking = (
+                getattr(delta, "reasoning_content", None)
+                or getattr(delta, "thinking", None)
+                or (delta.model_extra or {}).get("reasoning_content")
+            )
+            if thinking:
+                if not thinking_sent:
+                    yield {"thinking_start": True}
+                    thinking_sent = True
+                yield {"thinking": thinking}
 
-                    elif etype == "response.reasoning_summary_text.delta":
-                        delta = event.get("delta", "")
-                        if delta:
-                            if not thinking_sent:
-                                yield {"thinking_start": True}
-                                thinking_sent = True
-                            yield {"thinking": delta}
+            if delta.content:
+                if thinking_sent:
+                    yield {"thinking_end": True}
+                    thinking_sent = False
+                yield {"content": delta.content}
 
-                    elif etype in ("response.completed", "response.done"):
-                        resp_data = event.get("response", {})
-                        if resp_data.get("model"):
-                            actual_model = resp_data["model"]
-                        usage = resp_data.get("usage", {})
-                        input_tokens = usage.get("input_tokens", 0) or 0
-                        output_tokens = usage.get("output_tokens", 0) or 0
+            rd = (delta.model_extra or {}).get("reasoning_details")
+            if rd and _is_complete_reasoning(rd):
+                yield {"reasoning_details": rd}
 
         if thinking_sent:
             yield {"thinking_end": True}
