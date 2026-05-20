@@ -1232,7 +1232,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         elif AI_BACKEND == "openrouter":
             print(f"🔄 [路由] OpenRouter 模式，使用 Haiku 预分析...")
             try:
-                from app.litellm_client import analyze_complexity_with_openrouter
+                from app.openrouter_client import analyze_complexity_with_openrouter
                 complexity = await analyze_complexity_with_openrouter(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:

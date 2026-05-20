@@ -11,7 +11,6 @@ from app.config import (
     get_route_key, get_litellm_model_config,
     LITELLM_PROXY, LITELLM_READ_TIMEOUT,
     LITELLM_MAX_RETRIES, OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM,
-    VERTEX_PROJECT,
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL_CONFIG, OPENROUTER_ROUTER_MODEL,
 )
 
@@ -202,17 +201,6 @@ async def call_litellm_stream(
                 extra_body["reasoning"] = {"effort": effort}
             if extra_body:
                 kwargs["extra_body"] = extra_body
-        elif config["model"].startswith("vertex_ai/"):
-            # Vertex AI 路径 — 互斥，不走 OpenAI 兼容逻辑
-            kwargs["vertex_ai_project"] = VERTEX_PROJECT
-            kwargs["vertex_ai_location"] = config.get("region", "us-east5")
-            # thinking 参数适配
-            reasoning_param = config.get("reasoning_param", "openai_effort")
-            if reasoning_param == "anthropic_thinking":
-                effort = EFFORT_MAPPING.get(thinking_level)
-                if effort and effort != "none":
-                    budget = {"low": 2048, "medium": 8192, "high": 32768}.get(effort, 8192)
-                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         elif OPENAI_API_BASE:
             kwargs["api_base"] = OPENAI_API_BASE
             kwargs["custom_llm_provider"] = "openai"

@@ -458,5 +458,8 @@ OPENROUTER_MODEL_CONFIG = {
     },
 }
 
+# 回退开关: true=走旧 LiteLLM 路径（应急），false=走新 openrouter 官方 SDK（默认）
+USE_LEGACY_LITELLM = _get_bool("USE_LEGACY_LITELLM", False)
+
 # 注意: 代理配置在 gemini_client.py 中设置
 # 使用 NO_PROXY 排除钉钉域名，确保钉钉 SDK 不走代理

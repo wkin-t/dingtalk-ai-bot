@@ -347,7 +347,7 @@ class AIHandler:
             return ("openclaw", "default", False)
         elif AI_BACKEND == "openrouter":
             # OpenRouter 模式: 用 Haiku 替代 Gemini flash-lite 做路由判断
-            from app.litellm_client import analyze_complexity_with_openrouter
+            from app.openrouter_client import analyze_complexity_with_openrouter
             try:
                 complexity = await analyze_complexity_with_openrouter(content, has_images)
             except Exception as e:

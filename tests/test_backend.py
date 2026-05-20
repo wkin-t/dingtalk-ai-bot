@@ -169,14 +169,47 @@ class TestBackendSelection:
             cfg.AI_BACKEND = original
 
     @pytest.mark.asyncio
-    async def test_openrouter_backend_dispatches_to_litellm(self):
-        """openrouter 后端应复用 call_litellm_stream"""
+    async def test_openrouter_backend_dispatches_to_openrouter_client(self):
+        """openrouter 后端（默认）应调用 call_openrouter_stream"""
         import app.config as cfg
         from unittest.mock import patch
 
-        original = cfg.AI_BACKEND
+        original_backend = cfg.AI_BACKEND
+        original_legacy = cfg.USE_LEGACY_LITELLM
         try:
             cfg.AI_BACKEND = "openrouter"
+            cfg.USE_LEGACY_LITELLM = False
+            from app.ai.backend import create_backend_stream
+
+            async def fake_stream(*args, **kwargs):
+                yield {"content": "openrouter response"}
+
+            with patch("app.openrouter_client.call_openrouter_stream", side_effect=fake_stream):
+                chunks = []
+                async for chunk in create_backend_stream(
+                    [{"role": "user", "content": "hi"}],
+                    target_model="gemini-3-flash-preview",
+                    thinking_level="low",
+                    enable_search=False,
+                ):
+                    chunks.append(chunk)
+                assert len(chunks) == 1
+                assert chunks[0]["content"] == "openrouter response"
+        finally:
+            cfg.AI_BACKEND = original_backend
+            cfg.USE_LEGACY_LITELLM = original_legacy
+
+    @pytest.mark.asyncio
+    async def test_openrouter_backend_legacy_dispatches_to_litellm(self):
+        """openrouter 后端（USE_LEGACY_LITELLM=True）应调用 call_litellm_stream"""
+        import app.config as cfg
+        from unittest.mock import patch
+
+        original_backend = cfg.AI_BACKEND
+        original_legacy = cfg.USE_LEGACY_LITELLM
+        try:
+            cfg.AI_BACKEND = "openrouter"
+            cfg.USE_LEGACY_LITELLM = True
             from app.ai.backend import create_backend_stream
 
             async def fake_stream(*args, **kwargs):
@@ -194,23 +227,26 @@ class TestBackendSelection:
                 assert len(chunks) == 1
                 assert chunks[0]["content"] == "openrouter response"
         finally:
-            cfg.AI_BACKEND = original
+            cfg.AI_BACKEND = original_backend
+            cfg.USE_LEGACY_LITELLM = original_legacy
 
     @pytest.mark.asyncio
-    async def test_openrouter_passes_conversation_id_to_litellm(self):
-        """openrouter 后端应将 conversation_id 透传给 call_litellm_stream"""
+    async def test_openrouter_passes_conversation_id_to_openrouter_client(self):
+        """openrouter 后端应将 conversation_id 透传给 call_openrouter_stream"""
         import app.config as cfg
         from unittest.mock import patch
 
-        original = cfg.AI_BACKEND
+        original_backend = cfg.AI_BACKEND
+        original_legacy = cfg.USE_LEGACY_LITELLM
         try:
             cfg.AI_BACKEND = "openrouter"
+            cfg.USE_LEGACY_LITELLM = False
             from app.ai.backend import create_backend_stream
 
             async def fake_stream(*args, **kwargs):
                 yield {"content": "ok"}
 
-            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream) as mock:
+            with patch("app.openrouter_client.call_openrouter_stream", side_effect=fake_stream) as mock:
                 async for _ in create_backend_stream(
                     [{"role": "user", "content": "hi"}],
                     target_model="gemini-3-flash-preview",
@@ -220,4 +256,5 @@ class TestBackendSelection:
                 mock.assert_called_once()
                 assert mock.call_args[1]["conversation_id"] == "test-conv-openrouter"
         finally:
-            cfg.AI_BACKEND = original
+            cfg.AI_BACKEND = original_backend
+            cfg.USE_LEGACY_LITELLM = original_legacy
