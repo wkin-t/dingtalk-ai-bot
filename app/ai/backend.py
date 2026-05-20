@@ -29,7 +29,7 @@ async def create_backend_stream(
         **kwargs: 后端特定参数（openclaw 需要 conversation_id, sender_id, sender_nick, image_data_list）
 
     Yields:
-        {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
+        {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
     """
     backend = cfg.AI_BACKEND
 
@@ -44,9 +44,22 @@ async def create_backend_stream(
             image_data_list=kwargs.get("image_data_list"),
             top_p=top_p,
         )
-    elif backend in ("openai", "openrouter"):
+    elif backend == "openrouter":
+        # OpenRouter 路径保留 LiteLLM（provider_order/reasoning/extra_body 参数未经 SDK 验证）
         from app.litellm_client import call_litellm_stream
         stream = call_litellm_stream(
+            messages,
+            target_model=target_model,
+            thinking_level=thinking_level,
+            enable_search=enable_search,
+            temperature=temperature,
+            top_p=top_p,
+            conversation_id=kwargs.get("conversation_id", ""),
+        )
+    elif backend == "openai":
+        # OPENAI_API_BASE 路径改用官方 SDK，正确捕获 reasoning_details（含 signature）
+        from app.openai_client import call_openai_stream
+        stream = call_openai_stream(
             messages,
             target_model=target_model,
             thinking_level=thinking_level,

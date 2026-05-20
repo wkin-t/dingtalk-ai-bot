@@ -32,7 +32,9 @@ pymysql
 websockets>=12.0
 # 企业微信消息加解密
 pycryptodome
-# LiteLLM 统一 LLM 客户端 (OpenAI 兼容后端)
+# OpenAI 官方 SDK (openai 后端直连，避免 LiteLLM 丢弃 reasoning_details signature)
+openai>=1.50.0
+# LiteLLM 统一 LLM 客户端 (OpenAI 兼容后端，仅 openrouter 路径仍使用)
 litellm==1.81.9
 # 腾讯云 COS SDK (生图存储)
 cos-python-sdk-v5

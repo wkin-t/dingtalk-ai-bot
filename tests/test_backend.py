@@ -71,8 +71,8 @@ class TestBackendSelection:
             cfg.AI_BACKEND = original
 
     @pytest.mark.asyncio
-    async def test_openai_backend_dispatches_to_litellm(self):
-        """openai 后端应调用 call_litellm_stream"""
+    async def test_openai_backend_dispatches_to_openai_client(self):
+        """openai 后端应调用 call_openai_stream"""
         import app.config as cfg
         from unittest.mock import AsyncMock, patch
 
@@ -82,9 +82,9 @@ class TestBackendSelection:
             from app.ai.backend import create_backend_stream
 
             async def fake_stream(*args, **kwargs):
-                yield {"content": "litellm response"}
+                yield {"content": "openai response"}
 
-            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream) as mock:
+            with patch("app.openai_client.call_openai_stream", side_effect=fake_stream) as mock:
                 chunks = []
                 async for chunk in create_backend_stream(
                     [{"role": "user", "content": "hi"}],
@@ -94,7 +94,7 @@ class TestBackendSelection:
                 ):
                     chunks.append(chunk)
                 assert len(chunks) == 1
-                assert chunks[0]["content"] == "litellm response"
+                assert chunks[0]["content"] == "openai response"
         finally:
             cfg.AI_BACKEND = original
 
@@ -133,8 +133,8 @@ class TestBackendSelection:
             cfg.AI_BACKEND = original
 
     @pytest.mark.asyncio
-    async def test_openai_passes_conversation_id_to_litellm(self):
-        """openai 后端应将 conversation_id 透传给 call_litellm_stream"""
+    async def test_openai_passes_conversation_id_to_openai_client(self):
+        """openai 后端应将 conversation_id 透传给 call_openai_stream"""
         import app.config as cfg
         from unittest.mock import patch, call
 
@@ -146,7 +146,7 @@ class TestBackendSelection:
             async def fake_stream(*args, **kwargs):
                 yield {"content": "ok"}
 
-            with patch("app.litellm_client.call_litellm_stream", side_effect=fake_stream) as mock:
+            with patch("app.openai_client.call_openai_stream", side_effect=fake_stream) as mock:
                 async for _ in create_backend_stream(
                     [{"role": "user", "content": "hi"}],
                     target_model="gemini-3-flash-preview",

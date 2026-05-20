@@ -24,6 +24,9 @@ def format_history_with_meta(
     cutoff_at: "%Y-%m-%d %H:%M:%S" 字符串。若提供，过滤掉 timestamp <= cutoff 的消息
     （当前 agent /clear 后的"软清空"）。timestamp 缺失的消息保留（保守策略）。
     """
+    from app import config as cfg
+    backend_supports_thinking = cfg.AI_BACKEND in ("openrouter", "openai")
+
     formatted: List[Dict[str, Any]] = []
     for msg in history_messages:
         role = msg.get("role", "user")
@@ -57,6 +60,12 @@ def format_history_with_meta(
                 new_msg["content"] = content
         else:
             new_msg["content"] = content
+
+        # 仅当 backend 支持 thinking blocks 时才传递 reasoning_details
+        if backend_supports_thinking and role == "assistant":
+            rd = msg.get("reasoning_details")
+            if rd:
+                new_msg["reasoning_details"] = rd
 
         formatted.append(new_msg)
 

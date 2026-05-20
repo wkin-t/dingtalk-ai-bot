@@ -13,7 +13,6 @@ from app.config import (
     get_model_pricing
 )
 from app.memory import get_history, update_history
-from app.gemini_client import analyze_complexity_with_model
 from app.ai.router import analyze_complexity_unified
 from app.ai.sampling_clamp import clamp_temperature
 
@@ -96,7 +95,7 @@ class AIHandler:
                 text_content = f"{sender_nick}: [图片x{len(image_data_list)}] {content}".strip()
 
                 if OPENCLAW_GATEWAY_TRANSPORT != "ws":
-                    # HTTP(OpenAI-compatible) 路径默认按“无多模态”处理：先用 tools-invoke 产出文字描述，
+                    # HTTP(OpenAI-compatible) 路径默认按"无多模态"处理：先用 tools-invoke 产出文字描述，
                     # 再把纯文本送给 /v1/chat/completions，避免依赖 image_url 多模态能力。
                     from app.openclaw_tools_client import invoke_tool, build_vision_arguments
 
@@ -199,6 +198,7 @@ class AIHandler:
         # 调用 AI 流式接口
         full_response = ""
         full_thinking = ""
+        full_reasoning_details = None  # 收集 Anthropic thinking blocks（含 signature，用于多轮 thinking）
         usage_info = None
 
         # 解析手动采样覆盖（D.3）
@@ -231,6 +231,11 @@ class AIHandler:
                     print(f"❌ AI 请求失败: {error_msg}")
                     return f"❌ **API 请求失败**\n\n{error_msg}"
 
+                # 收集 reasoning_details（含 signature），不渲染到卡片
+                if "reasoning_details" in chunk:
+                    full_reasoning_details = chunk["reasoning_details"]
+                    continue
+
                 # 处理 thinking
                 thinking_delta = chunk.get("thinking", "")
                 if thinking_delta:
@@ -252,8 +257,9 @@ class AIHandler:
             # 清理回复
             full_response = full_response.replace("[AILoading]", "").strip()
 
-            # 记录历史
-            update_history(session_key, user_msg=None, assistant_msg=full_response)
+            # 记录历史（含 reasoning_details，支持多轮 thinking）
+            update_history(session_key, user_msg=None, assistant_msg=full_response,
+                           reasoning_details=full_reasoning_details)
 
             # 调用完成回调
             if complete_callback:
@@ -267,7 +273,6 @@ class AIHandler:
             import traceback
             traceback.print_exc()
             return f"💥 **系统异常**\n\n{error_msg}"
-
     def _build_system_prompt(self, group_info: Optional[Dict] = None, soul_content: Optional[str] = None):
         """构建 System Prompt。
 
@@ -356,6 +361,7 @@ class AIHandler:
         else:
             # Gemini / LiteLLM 模式: 用 Gemini flash-lite 做路由判断
             try:
+                from app.gemini_client import analyze_complexity_with_model  # 延迟导入，避免循环依赖
                 complexity = await analyze_complexity_with_model(content, has_images)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:

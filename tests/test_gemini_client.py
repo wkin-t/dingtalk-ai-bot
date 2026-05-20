@@ -15,6 +15,12 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 from app.config import get_model_pricing, GEMINI_PRICING
 
 
+async def _async_iter(items):
+    """将同步列表转为异步生成器，用于 mock google-genai aio 流式接口"""
+    for item in items:
+        yield item
+
+
 # ─── get_model_pricing 测试 ──────────────────────────────────────
 
 class TestGetModelPricing:
@@ -178,7 +184,7 @@ class TestAnalyzeComplexity:
         mock_response.text = '{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":false,"reason":"简单问答"}'
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("你好")
 
         assert result["model"] == "gemini-3-flash-preview"
@@ -194,7 +200,7 @@ class TestAnalyzeComplexity:
         mock_response.text = '{"model":"gemini-3.1-pro-preview","thinking_level":"high","need_search":false,"reason":"复杂数学"}'
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("证明黎曼猜想")
 
         assert result["model"] == "gemini-3.1-pro-preview"
@@ -209,7 +215,7 @@ class TestAnalyzeComplexity:
         mock_response.text = '{"model":"gemini-3-flash-preview","thinking_level":"low","need_search":true,"reason":"需要实时信息"}'
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("今天天气怎么样")
 
         assert result["need_search"] is True
@@ -220,7 +226,7 @@ class TestAnalyzeComplexity:
         from app.gemini_client import analyze_complexity_with_model
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.side_effect = Exception("API 不可用")
+            mock_client.aio.models.generate_content = AsyncMock(side_effect=Exception("API 不可用"))
             result = await analyze_complexity_with_model("测试")
 
         assert result["model"] == "gemini-3-flash-preview"
@@ -237,7 +243,7 @@ class TestAnalyzeComplexity:
         mock_response.text = "我不确定怎么回答这个问题"
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("测试")
 
         # 应返回降级默认值
@@ -252,7 +258,7 @@ class TestAnalyzeComplexity:
         mock_response.text = '{"model":"invalid-model","thinking_level":"low","need_search":false,"reason":"test"}'
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("测试")
 
         assert result["model"] == "gemini-3-flash-preview"
@@ -266,7 +272,7 @@ class TestAnalyzeComplexity:
         mock_response.text = '{"model":"gemini-3-flash-preview","thinking_level":"ultra","need_search":false,"reason":"test"}'
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content.return_value = mock_response
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             result = await analyze_complexity_with_model("测试")
 
         assert result["thinking_level"] == "low"
@@ -311,10 +317,8 @@ class TestCallGeminiStream:
         # 最后一个有 usage 但空文本
         chunks_data[2].candidates = []
 
-        mock_stream = iter(chunks_data)
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter(chunks_data))
 
             results = []
             async for chunk in call_gemini_stream(
@@ -338,10 +342,8 @@ class TestCallGeminiStream:
             self._make_chunk("答案是2", is_thought=False, usage={"input": 15, "output": 8}),
         ]
 
-        mock_stream = iter(chunks_data)
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter(chunks_data))
             with patch("app.gemini_client.ENABLE_THINKING", True):
                 results = []
                 async for chunk in call_gemini_stream(
@@ -376,10 +378,8 @@ class TestCallGeminiStream:
         chunk.candidates = [candidate]
         chunk.usage_metadata = None
 
-        mock_stream = iter([chunk])
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([chunk]))
 
             results = []
             async for r in call_gemini_stream(
@@ -398,7 +398,7 @@ class TestCallGeminiStream:
         from app.gemini_client import call_gemini_stream
 
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.side_effect = Exception("API quota exceeded")
+            mock_client.aio.models.generate_content_stream = AsyncMock(side_effect=Exception("API quota exceeded"))
 
             results = []
             async for r in call_gemini_stream(
@@ -417,10 +417,8 @@ class TestCallGeminiStream:
         from app.gemini_client import call_gemini_stream
 
         chunk_with_usage = self._make_chunk("Hi", usage={"input": 50, "output": 20})
-        mock_stream = iter([chunk_with_usage])
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([chunk_with_usage]))
 
             results = []
             async for r in call_gemini_stream(
@@ -446,10 +444,8 @@ class TestCallGeminiStream:
         empty_chunk.usage_metadata = None
 
         content_chunk = self._make_chunk("OK", usage={"input": 5, "output": 2})
-        mock_stream = iter([empty_chunk, content_chunk])
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([empty_chunk, content_chunk]))
 
             results = []
             async for r in call_gemini_stream(
@@ -471,10 +467,8 @@ class TestCallGeminiStream:
         empty_chunk = MagicMock()
         empty_chunk.candidates = []
         empty_chunk.usage_metadata = None
-        mock_stream = iter([empty_chunk])
-
         with patch("app.gemini_client.client") as mock_client:
-            mock_client.models.generate_content_stream.return_value = mock_stream
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([empty_chunk]))
 
             results = []
             async for r in call_gemini_stream(

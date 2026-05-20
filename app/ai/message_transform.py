@@ -9,7 +9,8 @@ def rewrite_roles_for_current_agent(
 ) -> List[Dict[str, Any]]:
     """把非当前 agent 的 assistant 消息重写为 user 角色。
 
-    输出严格清理为 OpenAI SDK 兼容的 role/content 字段。
+    输出严格清理为 OpenAI SDK 兼容的 role/content 字段；assistant 消息的
+    reasoning_details（thinking blocks）予以保留，user 消息不保留。
     """
     result: List[Dict[str, Any]] = []
     for msg in messages:
@@ -20,7 +21,13 @@ def rewrite_roles_for_current_agent(
         if role == "assistant" and bot_id is not None and bot_id != current_bot_id:
             role = "user"
 
-        result.append({"role": role, "content": content})
+        new_msg: Dict[str, Any] = {"role": role, "content": content}
+        # reasoning_details 仅对 assistant 消息有效（thinking blocks 不能放在 user 角色）
+        if role == "assistant":
+            rd = msg.get("reasoning_details")
+            if rd:
+                new_msg["reasoning_details"] = rd
+        result.append(new_msg)
     return result
 
 
@@ -30,11 +37,18 @@ def merge_consecutive_same_role(messages: List[Dict[str, Any]]) -> List[Dict[str
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        rd = msg.get("reasoning_details")
 
         if result and result[-1]["role"] == role and role in ("user", "assistant"):
             result[-1]["content"] = _merge_content(result[-1]["content"], content)
+            # 若后续消息携带 reasoning_details，覆盖（取最新的）
+            if rd:
+                result[-1]["reasoning_details"] = rd
         else:
-            result.append({"role": role, "content": content})
+            new_msg: Dict[str, Any] = {"role": role, "content": content}
+            if rd:
+                new_msg["reasoning_details"] = rd
+            result.append(new_msg)
     return result
 
 

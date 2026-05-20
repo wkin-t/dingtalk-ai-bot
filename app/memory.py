@@ -108,7 +108,8 @@ def update_history(
     session_key: str,
     user_msg: Optional[str],
     assistant_msg: Optional[str] = None,
-    sender_nick: Optional[str] = None
+    sender_nick: Optional[str] = None,
+    reasoning_details: Optional[list] = None
 ):
     """
     更新对话历史
@@ -118,6 +119,7 @@ def update_history(
         user_msg: 用户消息 (可选)
         assistant_msg: AI 回复 (可选)
         sender_nick: 发送者昵称 (可选)
+        reasoning_details: Anthropic thinking blocks (可选，用于多轮推理)
     """
     if USE_DATABASE:
         try:
@@ -126,7 +128,8 @@ def update_history(
                 # 用户消息也记录 bot_id，用于识别用户 @ 的是哪个机器人
                 history_storage.add_message(session_key, "user", user_msg, sender_nick, bot_id=BOT_ID)
             if assistant_msg:
-                history_storage.add_message(session_key, "assistant", assistant_msg, bot_id=BOT_ID)
+                history_storage.add_message(session_key, "assistant", assistant_msg, bot_id=BOT_ID,
+                                             thinking_blocks=reasoning_details)
             return
         except Exception as e:
             print(f"⚠️ 数据库写入失败，降级到文件: {e}")
@@ -163,13 +166,16 @@ def update_history(
 
         # 记录 AI 回复
         if assistant_msg:
-            history.append({
+            entry = {
                 "role": "assistant",
                 "content": assistant_msg,
                 "timestamp": timestamp,
                 "sender_nick": None,
                 "bot_id": BOT_ID
-            })
+            }
+            if reasoning_details:
+                entry["reasoning_details"] = reasoning_details
+            history.append(entry)
 
         # 保持存储长度限制
         if len(history) > MAX_STORAGE_LENGTH:

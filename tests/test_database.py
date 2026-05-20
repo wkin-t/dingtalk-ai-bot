@@ -62,7 +62,7 @@ class TestHistoryStorageAddMessage:
 
         assert insert_sql is not None
         assert "bot_id" in insert_sql
-        assert params == ("dingtalk_s1", "user", "你好", "张三", None)
+        assert params == ("dingtalk_s1", "user", "你好", "张三", None, None)
 
     def test_add_assistant_message_with_bot_id(self):
         """assistant 消息应传入 bot_id"""
@@ -80,7 +80,7 @@ class TestHistoryStorageAddMessage:
 
         mock_cursor.execute.assert_called_once()
         _, params = mock_cursor.execute.call_args[0]
-        assert params == ("dingtalk_s1", "assistant", "AI 回复", None, "gemini")
+        assert params == ("dingtalk_s1", "assistant", "AI 回复", None, "gemini", None)
 
     def test_add_assistant_message_openclaw_bot_id(self):
         """OpenClaw bot_id 应正确传入"""
@@ -97,7 +97,7 @@ class TestHistoryStorageAddMessage:
             self.storage.add_message("dingtalk_s1", "assistant", "Claw 回复", bot_id="openclaw")
 
         _, params = mock_cursor.execute.call_args[0]
-        assert params[-1] == "openclaw"
+        assert params[4] == "openclaw"  # bot_id 在第 5 列 (index 4)
 
     def test_add_message_updates_redis_cache_with_bot_id(self):
         """add_message 应更新 Redis 缓存，包含 bot_id"""

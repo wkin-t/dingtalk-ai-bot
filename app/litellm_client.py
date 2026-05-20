@@ -41,6 +41,17 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
+def _is_complete_reasoning(rd: list) -> bool:
+    """确保 reasoning_details 完整（含 signature），防残体写入死锁会话。"""
+    if not isinstance(rd, list) or not rd:
+        return False
+    return all(
+        item.get("signature") or item.get("data")
+        for item in rd
+        if item.get("type") in ("thinking", "reasoning")
+    )
+
+
 def _flatten_cache_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """将 list-of-blocks 格式的 content 还原为纯字符串。
 
@@ -79,7 +90,7 @@ async def call_litellm_stream(
         top_p: 核采样参数，None 表示使用 provider 默认值
 
     Yields:
-        {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
+        {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
     """
     import warnings
     litellm.suppress_debug_info = True
@@ -242,6 +253,7 @@ async def call_litellm_stream(
 
         thinking_sent = False
         actual_model = model  # 跟踪实际响应模型（fallback 时与请求模型不同）
+        last_rd = None  # 追踪最后一个 reasoning_details chunk（循环结束后校验完整性再 yield）
 
         async for chunk in response:
             # 从流式 chunk 读取真实模型名（fallback 后 OpenRouter 会更新此字段）
@@ -258,6 +270,12 @@ async def call_litellm_stream(
             delta = chunk.choices[0].delta
 
             model_extra = getattr(delta, "model_extra", None) or {}
+
+            # 追踪 reasoning_details（含 signature）；最后 chunk 才携带完整数组
+            rd = model_extra.get("reasoning_details")
+            if rd and isinstance(rd, list):
+                last_rd = rd
+
             reasoning = (
                 getattr(delta, "reasoning_content", None)
                 or getattr(delta, "thinking", None)
@@ -276,6 +294,11 @@ async def call_litellm_stream(
                     yield {"thinking_end": True}
                     thinking_sent = False
                 yield {"content": content}
+
+        # 循环结束后，一次性 yield 完整 reasoning_details（校验 signature 防残体）
+        if last_rd and _is_complete_reasoning(last_rd):
+            print(f"🧠 [LiteLLM] reasoning_details yielded ({len(last_rd)} blocks)")
+            yield {"reasoning_details": last_rd}
 
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ [LiteLLM] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 延迟: {latency_ms}ms")

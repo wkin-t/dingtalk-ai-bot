@@ -55,7 +55,6 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
             "reason": "分析原因"
         }
     """
-    import asyncio
     import json
     import re
     import traceback
@@ -123,22 +122,15 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
-        loop = asyncio.get_running_loop()
-
-        def _analyze():
-            print(f"🔍 [预分析] 进入线程执行器...")
-            response = client.models.generate_content(
-                model=analysis_model,
-                contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=300
-                )
+        response = await client.aio.models.generate_content(
+            model=analysis_model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=300
             )
-            print(f"🔍 [预分析] API 调用完成")
-            return response.text
-
-        result_text = await loop.run_in_executor(None, _analyze)
+        )
+        result_text = response.text
         print(f"📝 [预分析] 原始返回: {result_text[:200]}")
 
         # 解析 JSON（支持嵌套对象）
@@ -338,22 +330,18 @@ async def call_gemini_stream(
                 print("⚡ Thinking 模式 (level=minimal, 最快响应)")
                 print("⚡ Thinking 模式 (level=low, 快速响应)")
 
-        # 同步流式生成 (在线程池中运行)
-        def _stream_generate():
-            return client.models.generate_content_stream(
-                model=target_model,
-                contents=contents,
-                config=config
-            )
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, _stream_generate)
+        # 异步流式生成（原生 async，不阻塞 event loop）
+        response = await client.aio.models.generate_content_stream(
+            model=target_model,
+            contents=contents,
+            config=config
+        )
 
         # 标记是否已发送 thinking 内容
         thinking_sent = False
 
-        # 迭代流式响应
-        for chunk in response:
+        # 迭代异步流式响应
+        async for chunk in response:
             try:
                 # 提取 usage_metadata (token 统计)
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
@@ -443,10 +431,8 @@ async def google_search(query: str) -> Optional[str]:
     Returns:
         搜索结果文本，搜索失败时返回 None
     """
-    loop = asyncio.get_running_loop()
-
-    def _search():
-        response = client.models.generate_content(
+    try:
+        response = await client.aio.models.generate_content(
             model=GEMINI_MODEL_LITE,
             contents=f"请搜索以下问题并给出简洁的事实性回答，包含关键信息来源：\n\n{query}",
             config=types.GenerateContentConfig(
@@ -454,10 +440,6 @@ async def google_search(query: str) -> Optional[str]:
                 max_output_tokens=2048,
             ),
         )
-        return response
-
-    try:
-        response = await loop.run_in_executor(None, _search)
         if response.text:
             print(f"🔍 [Google Search] 搜索完成: {query[:50]}...")
             return response.text

@@ -7,7 +7,14 @@ from app.ai.message_transform import merge_consecutive_same_role, rewrite_roles_
 
 
 def _strip_model_unsafe_fields(messages_raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [{"role": msg.get("role", "user"), "content": msg.get("content", "")} for msg in messages_raw]
+    safe = []
+    for msg in messages_raw:
+        entry: Dict[str, Any] = {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+        rd = msg.get("reasoning_details")
+        if rd:
+            entry["reasoning_details"] = rd
+        safe.append(entry)
+    return safe
 
 
 def prepare_messages_for_backend(messages_raw: List[Dict[str, Any]], current_bot_id: str) -> List[Dict[str, Any]]:

@@ -407,7 +407,7 @@ class TestDatabasePathBotId:
 
         # 第二次调用: assistant 消息 (有 bot_id)
         assistant_call = self.mock_storage.add_message.call_args_list[1]
-        assert assistant_call == call("dingtalk_s1", "assistant", "回复", bot_id="gemini")
+        assert assistant_call == call("dingtalk_s1", "assistant", "回复", bot_id="gemini", thinking_blocks=None)
 
     def test_update_history_db_only_user(self):
         """数据库路径: 只有用户消息"""
@@ -423,7 +423,7 @@ class TestDatabasePathBotId:
 
         update_history("dingtalk_s3", user_msg=None, assistant_msg="AI 回复")
 
-        self.mock_storage.add_message.assert_called_once_with("dingtalk_s3", "assistant", "AI 回复", bot_id="gemini")
+        self.mock_storage.add_message.assert_called_once_with("dingtalk_s3", "assistant", "AI 回复", bot_id="gemini", thinking_blocks=None)
 
     def test_update_history_db_openclaw_bot_id(self):
         """数据库路径: OpenClaw 的 bot_id"""
@@ -437,7 +437,7 @@ class TestDatabasePathBotId:
 
         update_history("dingtalk_s4", user_msg=None, assistant_msg="Claw 回复")
 
-        self.mock_storage.add_message.assert_called_once_with("dingtalk_s4", "assistant", "Claw 回复", bot_id="openclaw")
+        self.mock_storage.add_message.assert_called_once_with("dingtalk_s4", "assistant", "Claw 回复", bot_id="openclaw", thinking_blocks=None)
 
     def test_get_history_db_path(self):
         """数据库路径: get_history 应调用 history_storage"""

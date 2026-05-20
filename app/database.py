@@ -140,6 +140,16 @@ class MySQLClient:
                     except Exception:
                         pass  # 列已存在，忽略
 
+                    # 兼容旧表：自动添加 thinking_blocks 列（如果不存在）
+                    try:
+                        cursor.execute("""
+                            ALTER TABLE `conversation_history`
+                            ADD COLUMN `thinking_blocks` MEDIUMTEXT NULL
+                        """)
+                        print("✅ 已为 conversation_history 表添加 thinking_blocks 列")
+                    except Exception:
+                        pass  # 列已存在，忽略
+
                     # 用户配置表
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS `user_config` (
@@ -309,7 +319,7 @@ class HistoryStorage:
             with MySQLClient.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT role, content, sender_nick, bot_id, created_at
+                        SELECT role, content, sender_nick, bot_id, created_at, thinking_blocks
                         FROM conversation_history
                         WHERE session_key = %s
                         ORDER BY created_at DESC
@@ -330,6 +340,12 @@ class HistoryStorage:
                     "sender_nick": row.get("sender_nick"),
                     "bot_id": row.get("bot_id")
                 }
+                tb = row.get("thinking_blocks")
+                if tb:
+                    try:
+                        msg["reasoning_details"] = json.loads(tb)
+                    except Exception:
+                        pass
                 messages.append(msg)
 
             # 3. 回填 Redis 缓存
@@ -351,7 +367,8 @@ class HistoryStorage:
         role: str,
         content: str,
         sender_nick: Optional[str] = None,
-        bot_id: Optional[str] = None
+        bot_id: Optional[str] = None,
+        thinking_blocks: Optional[list] = None
     ):
         """添加消息到历史"""
         cache_key = self._get_cache_key(session_key)
@@ -364,18 +381,19 @@ class HistoryStorage:
                 return  # 消息已存在，跳过保存
 
         # 2. 写入 MySQL
+        thinking_blocks_json = json.dumps(thinking_blocks, ensure_ascii=False) if thinking_blocks else None
         try:
             with MySQLClient.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO conversation_history (session_key, role, content, sender_nick, bot_id)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (session_key, role, content, sender_nick, bot_id))
+                        INSERT INTO conversation_history (session_key, role, content, sender_nick, bot_id, thinking_blocks)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (session_key, role, content, sender_nick, bot_id, thinking_blocks_json))
                 conn.commit()
         except Exception as e:
             print(f"⚠️ MySQL 写入失败: {e}")
 
-        # 2. 更新 Redis 缓存
+        # 3. 更新 Redis 缓存
         if self.redis:
             try:
                 # 先获取现有缓存
@@ -388,13 +406,17 @@ class HistoryStorage:
                 beijing_tz = timezone(timedelta(hours=8))
                 timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-                messages.append({
+                msg_entry = {
                     "role": role,
                     "content": content,
                     "timestamp": timestamp,
                     "sender_nick": sender_nick,
                     "bot_id": bot_id
-                })
+                }
+                if thinking_blocks:
+                    msg_entry["reasoning_details"] = thinking_blocks
+
+                messages.append(msg_entry)
 
                 # 限制缓存大小
                 if len(messages) > 200:
