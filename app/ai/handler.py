@@ -7,7 +7,7 @@ import time
 from typing import Optional, Dict, List, Callable
 from datetime import datetime, timezone, timedelta
 from app.config import (
-    MAX_HISTORY_LENGTH, DEFAULT_MODEL, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES,
+    MAX_HISTORY_LENGTH, DEFAULT_MODEL, GEMINI_MODEL_FAST, AI_BACKEND, BOT_ID, OPENCLAW_CONTEXT_MESSAGES,
     OPENCLAW_TOOLS_URL, OPENCLAW_TOOLS_TOKEN, OPENCLAW_VISION_TOOL_NAME,
     OPENCLAW_GATEWAY_TRANSPORT,
     get_model_pricing
@@ -361,7 +361,7 @@ class AIHandler:
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")
                 complexity = {
-                    "model": "gemini-3-flash-preview",
+                    "model": GEMINI_MODEL_FAST,
                     "thinking_level": "low",
                     "need_search": False,
                     "reason": "路由异常，使用默认"

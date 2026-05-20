@@ -203,9 +203,45 @@ HISTORY_TTL = 3600 * 24 * 7 # 本地存储保留 7 天
 # Google Endpoint
 GOOGLE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
-# 默认模型 (可通过环境变量配置)
-# 可选: gemini-2.0-flash, gemini-2.0-flash-thinking-exp, gemini-3.1-pro-preview
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
+# 统一三档模型变量 —— 所有后端共用，切换后端时改值即可
+# 默认值按 AI_BACKEND 自动选，可通过环境变量覆盖
+_BACKEND_MODEL_DEFAULTS = {
+    "gemini": {
+        "router": "gemini-3.1-flash-lite",   # 路由分析、soul 进化、搜索
+        "lite":   "gemini-3-flash-preview",  # 简单问候
+        "fast":   "gemini-3-flash-preview",  # 日常问答
+        "pro":    "gemini-3.1-pro-preview",  # 复杂推理
+    },
+    "openrouter": {
+        "router": "anthropic/claude-haiku-4-5",
+        "lite":   "anthropic/claude-haiku-4-5",
+        "fast":   "anthropic/claude-sonnet-4-5",
+        "pro":    "anthropic/claude-opus-4-5",
+    },
+    "openai": {
+        "router": "deepseek/deepseek-chat",
+        "lite":   "deepseek/deepseek-chat",
+        "fast":   "deepseek/deepseek-chat",
+        "pro":    "deepseek/deepseek-reasoner",
+    },
+    "openclaw": {
+        "router": "gemini-3.1-flash-lite",
+        "lite":   "default",
+        "fast":   "default",
+        "pro":    "default",
+    },
+}
+_md = _BACKEND_MODEL_DEFAULTS.get(AI_BACKEND, _BACKEND_MODEL_DEFAULTS["gemini"])
+
+MODEL_ROUTER = os.getenv("MODEL_ROUTER", _md["router"])  # 路由分析 / soul 进化 / 搜索
+MODEL_LITE   = os.getenv("MODEL_LITE",   _md["lite"])    # lite 档（简单问候）
+MODEL_FAST   = os.getenv("MODEL_FAST",   _md["fast"])    # fast 档（日常问答）
+MODEL_PRO    = os.getenv("MODEL_PRO",    _md["pro"])     # pro 档（复杂推理）
+
+# 兼容别名，避免破坏现有引用
+DEFAULT_MODEL     = MODEL_PRO
+GEMINI_MODEL_LITE = MODEL_ROUTER
+GEMINI_MODEL_FAST = MODEL_FAST
 
 # 是否启用 thinking 模式 (显示模型的思考过程)
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
@@ -251,6 +287,7 @@ DINGTALK_IMAGE_MSG_PARAM_TEMPLATE = os.getenv(
 
 # ===== 生图配置 =====
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "imagen-4.0-generate-001")
+GEMINI_IMAGE_EDIT_MODEL = os.environ.get("GEMINI_IMAGE_EDIT_MODEL", "gemini-2.0-flash-exp")
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_IMAGE_ASPECT_RATIO = os.environ.get("DEFAULT_IMAGE_ASPECT_RATIO", "1:1")
 DEFAULT_IMAGE_COUNT = max(1, min(4, _get_int("DEFAULT_IMAGE_COUNT", 1)))
@@ -286,10 +323,10 @@ GEMINI_PRICING = {
     "default": {"input": 0.50, "output": 3.00}
 }
 
-# 可用模型列表
+# 可用模型列表（flash/pro 跟随统一配置变量）
 AVAILABLE_MODELS = {
-    "flash": "gemini-3-flash",
-    "pro": "gemini-3.1-pro-preview",
+    "flash": MODEL_FAST,
+    "pro": MODEL_PRO,
     "2.5-flash": "gemini-2.5-flash",
     "2.5-pro": "gemini-2.5-pro",
     "2.0-flash": "gemini-2.0-flash",
@@ -304,8 +341,10 @@ def get_model_pricing(model_name: str) -> dict:
     return GEMINI_PRICING["default"]
 
 # ===== LiteLLM 后端 =====
-LITELLM_MODEL_FLASH = os.getenv("OPENAI_MODEL_FLASH", "deepseek/deepseek-chat")
-LITELLM_MODEL_PRO = os.getenv("OPENAI_MODEL_PRO", "deepseek/deepseek-reasoner")
+# 模型由统一变量 MODEL_LITE/FAST/PRO 控制，此处保留别名供旧配置兼容
+LITELLM_MODEL_LITE  = MODEL_LITE
+LITELLM_MODEL_FLASH = MODEL_FAST
+LITELLM_MODEL_PRO   = MODEL_PRO
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "")
 OPENAI_API_KEY_CUSTOM = os.getenv("OPENAI_API_KEY", "")
 
@@ -320,8 +359,16 @@ LITELLM_MAX_RETRIES = _get_int("LITELLM_MAX_RETRIES", 2)
 
 # 模型映射（带 capability 声明）
 LITELLM_MODEL_CONFIG = {
+    "lite": {
+        "model": MODEL_LITE,
+        "region": os.getenv("VERTEX_REGION_FAST", "europe-west1"),
+        "supports_reasoning": _get_bool("OPENAI_LITE_SUPPORTS_REASONING", False),
+        "supports_search": _get_bool("OPENAI_LITE_SUPPORTS_SEARCH", False),
+        "supports_vision": _get_bool("OPENAI_LITE_SUPPORTS_VISION", True),
+        "reasoning_param": os.getenv("VERTEX_REASONING_PARAM_FAST", "openai_effort"),
+    },
     "fast": {
-        "model": LITELLM_MODEL_FLASH,
+        "model": MODEL_FAST,
         "region": os.getenv("VERTEX_REGION_FAST", "europe-west1"),
         "supports_reasoning": _get_bool("OPENAI_FLASH_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENAI_FLASH_SUPPORTS_SEARCH", False),
@@ -329,7 +376,7 @@ LITELLM_MODEL_CONFIG = {
         "reasoning_param": os.getenv("VERTEX_REASONING_PARAM_FAST", "openai_effort"),
     },
     "pro": {
-        "model": LITELLM_MODEL_PRO,
+        "model": MODEL_PRO,
         "region": os.getenv("VERTEX_REGION_PRO", "us-east5"),
         "supports_reasoning": _get_bool("OPENAI_PRO_SUPPORTS_REASONING", True),
         "supports_search": _get_bool("OPENAI_PRO_SUPPORTS_SEARCH", False),
@@ -340,11 +387,16 @@ LITELLM_MODEL_CONFIG = {
 
 # 路由名归一化：把路由输出的各种模型名统一到 lite/fast/pro
 ROUTE_KEY_MAP = {
-    # 抽象 tier 名直通（OpenRouter/OpenAI 路由 prompt 输出这些）
+    # 抽象 tier 名直通（各后端路由 prompt 输出这些）
     "lite": "lite",
     "fast": "fast",
     "pro": "pro",
-    # 旧 Gemini 名兼容（Gemini 后端路由 prompt 和关键词降级路径继续使用）
+    # 当前配置的模型名（动态注入）
+    MODEL_ROUTER: "lite",
+    MODEL_LITE:   "lite",
+    MODEL_FAST:   "fast",
+    MODEL_PRO:    "pro",
+    # 历史 Gemini 模型名兼容
     "gemini-3-flash-lite": "lite",
     "gemini-3-flash-lite-preview": "lite",
     "gemini-3-flash-preview": "fast",
@@ -366,16 +418,16 @@ def get_litellm_model_config(route_key: str) -> dict:
 # ===== OpenRouter 后端 =====
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# 路由大脑：用于分析复杂度的轻量模型（替代 Gemini flash-lite）
-OPENROUTER_ROUTER_MODEL = os.getenv("OPENROUTER_ROUTER_MODEL", "anthropic/claude-haiku-4-5")
+# 路由大脑别名，由统一变量 MODEL_ROUTER 控制
+OPENROUTER_ROUTER_MODEL = MODEL_ROUTER
 
 def _parse_fallbacks(env_val: str) -> list:
     return [m.strip() for m in env_val.split(",") if m.strip()]
 
 OPENROUTER_MODEL_CONFIG = {
-    # lite: 简单问候、闲聊 (Haiku，仅执行不路由)
+    # lite: 简单问候、闲聊
     "lite": {
-        "model": os.getenv("OPENROUTER_MODEL_LITE", "anthropic/claude-haiku-4-5"),
+        "model": MODEL_LITE,
         "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_LITE", "")),
         "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
@@ -383,9 +435,9 @@ OPENROUTER_MODEL_CONFIG = {
         "supports_search": _get_bool("OPENROUTER_LITE_SUPPORTS_SEARCH", True),
         "supports_vision": _get_bool("OPENROUTER_LITE_SUPPORTS_VISION", True),
     },
-    # fast: 普通工作 (Sonnet)
+    # fast: 普通工作
     "fast": {
-        "model": os.getenv("OPENROUTER_MODEL_FAST", "anthropic/claude-sonnet-4-5"),
+        "model": MODEL_FAST,
         "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_FAST", "")),
         "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),
@@ -393,9 +445,9 @@ OPENROUTER_MODEL_CONFIG = {
         "supports_search": _get_bool("OPENROUTER_FAST_SUPPORTS_SEARCH", True),
         "supports_vision": _get_bool("OPENROUTER_FAST_SUPPORTS_VISION", True),
     },
-    # pro: 高阶推理 (Opus)
+    # pro: 高阶推理
     "pro": {
-        "model": os.getenv("OPENROUTER_MODEL_PRO", "anthropic/claude-opus-4-5"),
+        "model": MODEL_PRO,
         "fallbacks": _parse_fallbacks(os.getenv("OPENROUTER_FALLBACK_PRO", "")),
         "provider_order": [p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ORDER", "Anthropic").split(",") if p.strip()],
         "provider_sort": os.getenv("OPENROUTER_PROVIDER_SORT", ""),

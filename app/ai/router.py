@@ -2,6 +2,7 @@
 """
 智能路由模块 - 从 dingtalk_bot.py 抽取
 """
+from app.config import GEMINI_MODEL_FAST, DEFAULT_MODEL
 
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
@@ -52,7 +53,7 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
 
     Returns:
         {
-            "model": "gemini-3-flash" or "gemini-3.1-pro-preview",
+            "model": GEMINI_MODEL_FAST or DEFAULT_MODEL,
             "thinking_level": "minimal" | "low" | "medium" | "high",
             "reason": "分析原因"
         }
@@ -61,7 +62,7 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     content_len = len(content)
 
     # 默认值
-    model = "gemini-3-flash"
+    model = GEMINI_MODEL_FAST
     thinking_level = "low"
     reason = "普通问题"
 
@@ -70,7 +71,7 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
         for kw in SIMPLE_KEYWORDS:
             if kw in content_lower:
                 return {
-                    "model": "gemini-3-flash",
+                    "model": GEMINI_MODEL_FAST,
                     "thinking_level": "minimal",
                     "reason": "简单问候"
                 }
@@ -86,31 +87,31 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
 
     # 超复杂问题 → Pro + high
     if pro_count >= 2 or (pro_count >= 1 and complex_count >= 3):
-        model = "gemini-3.1-pro-preview"
+        model = DEFAULT_MODEL
         thinking_level = "high"
         reason = f"深度推理 (Pro关键词={pro_count}, 复杂={complex_count})"
 
     # 复杂问题 + 长文本 → Pro + high
     elif complex_count >= 4 and content_len > 300:
-        model = "gemini-3.1-pro-preview"
+        model = DEFAULT_MODEL
         thinking_level = "high"
         reason = f"复杂长文 (关键词={complex_count}, 长度={content_len})"
 
     # 复杂代码问题 → Flash + high (Flash 代码能力也很强)
     elif has_code and complex_count >= 2:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "high"
         reason = f"代码问题 (关键词={complex_count})"
 
     # 复杂问题 → Flash + high
     elif complex_count >= 3:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "high"
         reason = f"复杂问题 (关键词={complex_count})"
 
     # 中等复杂 → Flash + medium
     elif complex_count >= 1 or has_code:
-        model = "gemini-3-flash"
+        model = GEMINI_MODEL_FAST
         thinking_level = "medium"
         reason = f"中等复杂 (关键词={complex_count})"
 
@@ -118,7 +119,7 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     if content_len > 500:
         if thinking_level == "low":
             thinking_level = "medium"
-        elif thinking_level == "medium" and model == "gemini-3-flash":
+        elif thinking_level == "medium" and model == GEMINI_MODEL_FAST:
             thinking_level = "high"
         reason += f" + 长文本({content_len}字)"
 

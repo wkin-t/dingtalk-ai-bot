@@ -10,6 +10,7 @@ from typing import List
 
 from app.config import (
     GEMINI_IMAGE_MODEL,
+    GEMINI_IMAGE_EDIT_MODEL,
     OPENAI_IMAGE_MODEL,
     SOCKS_PROXY,
     OPENAI_API_BASE,
@@ -160,7 +161,7 @@ async def _edit_with_gemini(
 
     def _call():
         response = genai_client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model=GEMINI_IMAGE_EDIT_MODEL,
             contents=[
                 types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=image_bytes)),
                 types.Part(text=prompt),
