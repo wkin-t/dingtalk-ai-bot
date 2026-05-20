@@ -35,7 +35,7 @@ pycryptodome
 # OpenAI 官方 SDK (openai 后端直连，避免 LiteLLM 丢弃 reasoning_details signature)
 openai>=1.50.0
 # LiteLLM 统一 LLM 客户端 (OpenAI 兼容后端，USE_LEGACY_LITELLM=true 时回退用)
-litellm==1.81.9
+litellm==1.83.7
 # OpenRouter 官方 SDK (阶段 3 迁移，替代 litellm OpenRouter 路径)
 openrouter>=0.9.1
 # 腾讯云 COS SDK (生图存储)
