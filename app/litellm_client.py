@@ -209,6 +209,7 @@ async def call_litellm_stream(
             kwargs["api_base"] = OPENAI_API_BASE
             kwargs["custom_llm_provider"] = "openai"
             kwargs["use_responses_api"] = False  # 强制走 /v1/chat/completions，兼容 sub2api 等中转
+            kwargs["drop_params"] = True  # 中转站不支持的参数（reasoning_effort 等）静默丢弃
             if OPENAI_API_KEY_CUSTOM:
                 kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
             effort = EFFORT_MAPPING.get(thinking_level)
