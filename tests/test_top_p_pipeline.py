@@ -19,7 +19,7 @@ def test_openai_stream_clamps_top_p_when_provided(mock_openai_cls, mock_clamp_to
     mock_clamp_top_p.return_value = 0.9
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create = AsyncMock(return_value=MagicMock(__aiter__=lambda s: iter([])))
+    mock_client.responses.create = AsyncMock(return_value=MagicMock(__aiter__=lambda s: iter([])))
 
     stream = call_openai_stream(
         [{"role": "user", "content": "hi"}],

@@ -40,16 +40,6 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def _is_complete_reasoning(rd: list) -> bool:
-    """确保 reasoning_details 完整（含 signature），防残体写入死锁会话。"""
-    if not isinstance(rd, list) or not rd:
-        return False
-    return all(
-        item.get("signature") or item.get("data")
-        for item in rd
-        if item.get("type") in ("thinking", "reasoning")
-    )
-
 
 def _build_client() -> AsyncOpenAI:
     """构建 AsyncOpenAI 客户端，注入代理与自定义 base_url。"""
@@ -107,75 +97,56 @@ async def call_openai_stream(
 
         create_kwargs: Dict[str, Any] = {
             "model": model_name,
-            "messages": messages if config["supports_vision"] else _strip_images(messages),
+            "input": messages if config["supports_vision"] else _strip_images(messages),
             "stream": True,
-            "stream_options": {"include_usage": True},
-            "temperature": temperature,
         }
+
+        # temperature（reasoning / o-series 模型不支持，跳过）
+        _model_base = model_name.split("/")[-1]
+        if not (config["supports_reasoning"] or any(
+            _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+        )):
+            create_kwargs["temperature"] = temperature
         if top_p is not None:
             create_kwargs["top_p"] = top_p
 
-        # reasoning_effort 给 Claude / o1 等支持推理的模型
+        # Responses API 用 reasoning dict，而非 reasoning_effort 字符串
         effort = EFFORT_MAPPING.get(thinking_level)
-        if config["supports_reasoning"] and effort is not None:
-            create_kwargs["reasoning_effort"] = effort
+        if config["supports_reasoning"] and effort and effort != "none":
+            create_kwargs["reasoning"] = {"effort": effort}
 
-        # GPT-5/o1/o3/o4 系列只接受 temperature=1；中转站用 drop_params 静默丢弃不支持的参数
-        _model_base = model_name.split("/")[-1]
-        if config["supports_reasoning"] or any(
-            _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
-        ):
-            create_kwargs.pop("temperature", None)
-
-        stream = await client.chat.completions.create(**create_kwargs)
+        stream = await client.responses.create(**create_kwargs)
 
         thinking_sent = False
-        last_rd = None  # 追踪最后一个 reasoning_details chunk（循环后校验完整性再 yield）
         input_tokens = 0
         output_tokens = 0
         actual_model = model_name
 
-        async for chunk in stream:
-            if hasattr(chunk, "model") and chunk.model:
-                actual_model = chunk.model
+        async for event in stream:
+            etype = getattr(event, "type", "")
 
-            if not chunk.choices:
-                # 最终 chunk 携带 usage
-                if hasattr(chunk, "usage") and chunk.usage:
-                    input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
-                    output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
-                continue
-
-            delta = chunk.choices[0].delta
-            model_extra = getattr(delta, "model_extra", None) or {}
-
-            # 追踪 reasoning_details（含 signature）；完整数组在最后 chunk 才出现
-            rd = model_extra.get("reasoning_details")
-            if rd and isinstance(rd, list):
-                last_rd = rd
-
-            thinking = (
-                getattr(delta, "reasoning_content", None)
-                or getattr(delta, "thinking", None)
-                or model_extra.get("reasoning_content")
-                or model_extra.get("thinking")
-            )
-            if thinking:
-                if not thinking_sent:
-                    yield {"thinking_start": True}
-                    thinking_sent = True
-                yield {"thinking": thinking}
-
-            if delta.content:
+            if etype == "response.output_text.delta":
                 if thinking_sent:
                     yield {"thinking_end": True}
                     thinking_sent = False
-                yield {"content": delta.content}
+                yield {"content": event.delta}
 
-        # 循环结束后，一次性 yield 完整 reasoning_details（校验 signature 防残体）
-        if last_rd and _is_complete_reasoning(last_rd):
-            print(f"🧠 [OpenAI] reasoning_details yielded ({len(last_rd)} blocks)")
-            yield {"reasoning_details": last_rd}
+            elif etype == "response.reasoning_summary_text.delta":
+                if not thinking_sent:
+                    yield {"thinking_start": True}
+                    thinking_sent = True
+                yield {"thinking": event.delta}
+
+            elif etype == "response.completed":
+                resp = event.response
+                if getattr(resp, "model", None):
+                    actual_model = resp.model
+                if getattr(resp, "usage", None):
+                    input_tokens = getattr(resp.usage, "input_tokens", 0) or 0
+                    output_tokens = getattr(resp.usage, "output_tokens", 0) or 0
+
+        if thinking_sent:
+            yield {"thinking_end": True}
 
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ [OpenAI] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 延迟: {latency_ms}ms")
@@ -204,13 +175,13 @@ async def call_openai_simple(prompt: str, max_tokens: int = 500) -> str:
     """用于 Soul 进化等后台轻量文本生成任务（非流式）。"""
     try:
         client = _build_client()
-        response = await client.chat.completions.create(
+        response = await client.responses.create(
             model=MODEL_ROUTER,
-            messages=[{"role": "user", "content": prompt}],
+            input=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=max_tokens,
+            max_output_tokens=max_tokens,
         )
-        return response.choices[0].message.content or ""
+        return response.output_text or ""
     except Exception as e:
         print(f"⚠️ [OpenAI简单调用] 失败: {e}")
         return ""
@@ -269,13 +240,13 @@ async def analyze_complexity_with_openai(
 
     try:
         client = _build_client()
-        response = await client.chat.completions.create(
+        response = await client.responses.create(
             model=MODEL_ROUTER,
-            messages=[{"role": "user", "content": analysis_prompt}],
+            input=[{"role": "user", "content": analysis_prompt}],
             temperature=0.1,
-            max_tokens=300,
+            max_output_tokens=300,
         )
-        result_text = response.choices[0].message.content or ""
+        result_text = response.output_text or ""
         print(f"📝 [OpenAI路由] 原始返回: {result_text[:200]}")
 
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
