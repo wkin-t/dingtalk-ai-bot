@@ -48,11 +48,18 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── reference.py         # 历史引用（智能触发）
 │   ├── memory.py            # 对话历史 (Redis+MySQL → 文件降级)
 │   ├── database.py          # 数据层 (Redis 缓存 + MySQL 持久化)
+│   ├── sample_override.py   # Stage D: /temp /top_p /sample 手动覆盖 (sticky 24h, Redis+文件)
 │   ├── ai/
 │   │   ├── handler.py       # AIHandler - 统一 AI 处理层，抽象平台差异
 │   │   ├── backend.py       # 后端分派 (gemini/openclaw/openai → 各客户端)
 │   │   ├── router.py        # 智能路由 (关键词匹配 → 模型/thinking level)
-│   │   └── buffer.py        # 消息缓冲器 (2秒窗口合并连续消息)
+│   │   ├── buffer.py        # 消息缓冲器 (2秒窗口合并连续消息)
+│   │   ├── system_prompt.py      # Stage B: system prompt 分块 cache (稳定/半稳/变动三段)
+│   │   ├── message_transform.py  # Stage A: 消息角色重塑 (他bot assistant→user, 合并连续同role)
+│   │   ├── sampling_clamp.py     # Stage C: 温度/top_p provider-aware clamp (Claude≤1.0)
+│   │   ├── sampling_pipeline.py  # Stage C: top_p/temperature pipeline (router→最终下发)
+│   │   ├── messages_pipeline.py  # 消息预处理 pipeline 入口
+│   │   └── history_format.py     # 历史记录格式化工具
 │   └── wecom/
 │       ├── crypto.py        # 企业微信消息加解密 (WXBizMsgCrypt)
 │       ├── callback.py      # Webhook 回调路由 (Flask Blueprint)
@@ -67,9 +74,12 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **Monkey Patch**: `main.py` 顶部对 `aiohttp` 和 `requests` 打补丁，统一注入代理和重试逻辑。必须在所有其他导入之前执行。
 - **四后端切换**: `AI_BACKEND` 环境变量选择 `gemini`、`openclaw`、`openai`（LiteLLM/Vertex AI）或 `openrouter`（OpenRouter 统一入口，默认 Claude Sonnet/Haiku/Opus 三档）。切换点是 `app/ai/backend.py` 的 `create_backend_stream()`，handler/bot 层不感知具体后端。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
-- **三档智能路由**: 路由分析在**卡片创建前**完成（让卡片初始就显示正确思考文字）。Gemini 后端用 `gemini-flash-lite`，OpenAI 用 `LITELLM_MODEL_FLASH`，OpenRouter 用 Haiku。路由输出：lite/fast/pro 三档模型 + thinking level + need_search + temperature（precise/balanced/creative → 0.1/0.7/0.9）+ need_image_gen/need_image_edit。
-- **生图+改图流水线**: 路由检测 `need_image_gen` → `image_gen.generate_image()`（Gemini Imagen 或 OpenAI gpt-image-2）；检测 `need_image_edit`（用户发图+修改指令）→ `image_gen.edit_image()`（Gemini Flash exp 或 OpenAI images.edit，OpenRouter/OpenClaw 不支持）。图片经 `image_store.py` 上传 COS → 预签名 URL 展示。
-- **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。后台调用轻量模型：openrouter 用 Haiku，openai 用 flash，其余用 Gemini flash-lite。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制（空=允许所有）。
+- **三档智能路由**: 路由分析在**卡片创建前**完成（让卡片初始就显示正确思考文字）。所有后端均使用 `MODEL_ROUTER`（默认值按后端自动选，如 Haiku/gemini-flash-lite）。路由输出：lite/fast/pro 三档 + thinking level + need_search + temperature（precise/balanced/creative → 0.1/0.7/0.9）+ need_image_gen/need_image_edit。
+- **生图+改图流水线**: 路由检测 `need_image_gen` → `image_gen.generate_image()`（Gemini `GEMINI_IMAGE_MODEL` 或 OpenAI `gpt-image-2`）；检测 `need_image_edit`（用户发图+修改指令）→ `image_gen.edit_image()`（Gemini `GEMINI_IMAGE_EDIT_MODEL` 或 OpenAI images.edit，OpenRouter/OpenClaw 不支持）。图片经 `image_store.py` 上传 COS → 预签名 URL 展示。
+- **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。后台调用 `MODEL_ROUTER` 轻量模型。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制（空=允许所有）。
+- **System Prompt Cache（Stage B）**: `app/ai/system_prompt.py` 将 system prompt 拆成稳定段/半稳定段/变动段三块，分别打 `cache_control`。LiteLLM/OpenRouter 后端传 list-of-blocks；Gemini 后端合并回字符串。**OpenRouter 必须设 `OPENROUTER_PROVIDER_ORDER=Anthropic`**，否则 Bedrock 静默忽略 `cache_control`。
+- **消息角色重塑（Stage A）**: `app/ai/message_transform.py` 在发给 AI 前把非本 bot 发出的 assistant 消息转为 user 角色，并合并连续同 role 消息，避免多 bot 群聊时上下文混乱。Soul/image_gen 调用直接用 raw messages 绕过重塑。
+- **采样可控化（Stage C/D）**: `/temp`、`/top_p`、`/sample` 命令写入 Redis（TTL 24h），`app/ai/sampling_pipeline.py` 在每次请求时读取并覆盖路由给出的默认值；`sampling_clamp.py` 按 provider 做边界 clamp（Claude 温度≤1.0）。卡片底部常显当前 top_p 值，手动设置时加 ⚙️ 标记。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。Soul 文件命名 `{BOT_ID}__{cid}.md`（双下划线），防止多容器共享 soul（群聊 cid 跨容器相同）。
 - **数据降级**: Redis+MySQL 优先，不可用时自动降级到本地文件 (`data/history/`)。
@@ -85,7 +95,22 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 
 核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
 
-OpenRouter 专属变量: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL_LITE/FAST/PRO`（三档模型），`OPENROUTER_ROUTER_MODEL`（路由用 Haiku，默认 `anthropic/claude-haiku-4-5`），`OPENROUTER_PROVIDER_ORDER`（默认 `Anthropic`，必须走 Anthropic 官方 provider 才能命中 prompt cache；Bedrock 忽略 `cache_control`），`OPENROUTER_PROVIDER_SORT`（`price` 按价格排序）。Fallback 默认禁用，按需设 `OPENROUTER_FALLBACK_LITE/FAST/PRO`。
+**统一模型变量**（2026-05-20 起，所有后端共用，旧变量 `GEMINI_MODEL`/`OPENAI_MODEL_FLASH`/`OPENROUTER_MODEL_*` 不再读取）:
+- `MODEL_ROUTER` — 路由分析 / Soul 进化 / 搜索（轻量模型）
+- `MODEL_LITE` — lite 档（简单问候）
+- `MODEL_FAST` — fast 档（日常问答）
+- `MODEL_PRO` — pro 档（复杂推理）
+- 默认值按 `AI_BACKEND` 自动选（gemini=3.5-flash，openai=gpt-5.5，openrouter=haiku/sonnet/opus）
+
+OpenRouter 专属变量: `OPENROUTER_API_KEY`，`OPENROUTER_PROVIDER_ORDER=Anthropic`（**必填**，否则 cache blocks 被 Bedrock 静默忽略），`OPENROUTER_PROVIDER_SORT=price`，`OPENROUTER_FALLBACK_LITE/FAST/PRO`（按需设，fallback 路径不走 cache）。
+
+图片模型: `GEMINI_IMAGE_MODEL`（生图，默认 `imagen-4.0-generate-001`），`GEMINI_IMAGE_EDIT_MODEL`（改图，默认 `gemini-2.0-flash-exp`），`OPENAI_IMAGE_MODEL`（默认 `gpt-image-2`）。
+
+Feature flags（默认全 `true`，独立可回滚）:
+- `ENABLE_CACHE_BLOCKS` — Stage B system prompt 分块 cache
+- `ENABLE_TOP_P_PIPELINE` — Stage C top_p 贯穿各 backend
+- `ENABLE_ROLE_REWRITE` — Stage A 消息角色重塑
+- `ENABLE_SAMPLE_OVERRIDE` — Stage D /temp /top_p 手动覆盖
 
 所有配置集中在 `app/config.py`，含环境变量读取辅助函数 (`_get_int`, `_get_bool`, `_get_float`)。
 
