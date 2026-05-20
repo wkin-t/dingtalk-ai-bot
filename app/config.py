@@ -417,7 +417,7 @@ def get_litellm_model_config(route_key: str) -> dict:
 
 # ===== OpenRouter 后端 =====
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 # 路由大脑别名，由统一变量 MODEL_ROUTER 控制
 OPENROUTER_ROUTER_MODEL = MODEL_ROUTER
 
