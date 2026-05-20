@@ -291,13 +291,18 @@ async def analyze_complexity_with_openrouter(
 
     try:
         client = _build_client()
-        result_obj = await client.chat.send_async(
+        # SDK 的 send_async 始终返回 EventStreamAsync，stream=False 无效；改为流式收集
+        raw_parts: List[str] = []
+        async with await client.chat.send_async(
             messages=[{"role": "user", "content": prompt}],
             model=OPENROUTER_ROUTER_MODEL,
-            stream=False,
+            stream=True,
             max_tokens=200,
-        )
-        raw = result_obj.choices[0].message.content or ""
+        ) as stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    raw_parts.append(chunk.choices[0].delta.content)
+        raw = "".join(raw_parts)
         json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())

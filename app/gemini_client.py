@@ -122,15 +122,22 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
-        response = await client.aio.models.generate_content(
+        # generate_content（非流式）在 Python 3.14 下通过同步 httpx.Client 会触发 Network unreachable
+        # 改用 generate_content_stream，与主调用路径一致，代理配置有效
+        raw_parts = []
+        async for chunk in await client.aio.models.generate_content_stream(
             model=analysis_model,
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
             config=types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=300
             )
-        )
-        result_text = response.text
+        ):
+            if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                for part in chunk.candidates[0].content.parts:
+                    if not getattr(part, 'thought', False) and part.text:
+                        raw_parts.append(part.text)
+        result_text = "".join(raw_parts)
         print(f"📝 [预分析] 原始返回: {result_text[:200]}")
 
         # 解析 JSON（支持嵌套对象）
