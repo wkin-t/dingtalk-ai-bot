@@ -6,7 +6,6 @@ import time
 import traceback
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-import httpx
 from openrouter import OpenRouter
 from openrouter.components import (
     ProviderPreferences,
@@ -17,7 +16,6 @@ from openrouter.components import (
 
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
 from app.config import (
-    HTTPX_PROXY,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
     OPENROUTER_MODEL_CONFIG,
@@ -35,14 +33,10 @@ EFFORT_MAPPING = {
 
 
 def _build_client() -> OpenRouter:
-    """构建 OpenRouter 客户端，注入代理（如配置）。"""
-    async_client = None
-    if HTTPX_PROXY:
-        async_client = httpx.AsyncClient(proxy=HTTPX_PROXY)
+    """构建 OpenRouter 客户端。中转站路径直连，无需本地代理。"""
     return OpenRouter(
         api_key=OPENROUTER_API_KEY,
         server_url=OPENROUTER_BASE_URL,
-        async_client=async_client,
     )
 
 
