@@ -17,6 +17,7 @@ from app.config import (
     get_model_pricing,
     AVAILABLE_MODELS,
     AI_BACKEND,
+    IMAGE_BACKEND,
     BOT_ID,
     OPENCLAW_CONTEXT_MESSAGES,
     OPENCLAW_TOOLS_URL,
@@ -1307,7 +1308,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             image_prompt = await _enrich_image_prompt(
                 raw_prompt, content, messages_raw, soul_text
             )
-            print(f"🎨 [生图] prompt={image_prompt[:80]}, ratio={aspect_ratio}, n={num_images}, backend={AI_BACKEND}")
+            print(f"🎨 [生图] prompt={image_prompt[:80]}, ratio={aspect_ratio}, n={num_images}, backend={IMAGE_BACKEND}")
 
             try:
                 await self.card_helper.stream_update(
@@ -1320,7 +1321,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                 images = await generate_image(
                     image_prompt,
-                    backend=AI_BACKEND,
+                    backend=IMAGE_BACKEND,
                     aspect_ratio=aspect_ratio,
                     number_of_images=num_images,
                 )
@@ -1379,7 +1380,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         if need_image_edit and image_data_list:
             edit_prompt = complexity.get("image_gen_params", {}).get("prompt", content) or content
             aspect_ratio = complexity.get("image_gen_params", {}).get("aspect_ratio", "1:1")
-            print(f"✏️ [改图] prompt={edit_prompt[:80]}, ratio={aspect_ratio}, backend={AI_BACKEND}")
+            print(f"✏️ [改图] prompt={edit_prompt[:80]}, ratio={aspect_ratio}, backend={IMAGE_BACKEND}")
             try:
                 await self.card_helper.stream_update(
                     out_track_id,
@@ -1391,7 +1392,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 edited = await edit_image(
                     image_bytes=image_data_list[0],
                     prompt=edit_prompt,
-                    backend=AI_BACKEND,
+                    backend=IMAGE_BACKEND,
                     aspect_ratio=aspect_ratio,
                 )
                 if not edited:

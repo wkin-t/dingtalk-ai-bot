@@ -191,6 +191,7 @@ def get_agent_for_conversation(conversation_id: str) -> str | None:
 
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
+IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", AI_BACKEND)
 
 # Bot 实例标识 (多 bot 共存时区分消息来源)
 BOT_ID = os.getenv("BOT_ID", AI_BACKEND)
