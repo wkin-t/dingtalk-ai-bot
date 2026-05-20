@@ -1,4 +1,4 @@
-"""litellm_client 单元测试"""
+"""模型配置与工具函数测试（原 litellm_client 测试，保留 config 相关用例）"""
 import os
 import pytest
 
@@ -84,7 +84,7 @@ class TestStripImages:
     """图片消息清理测试"""
 
     def test_strip_images_from_multimodal_message(self):
-        from app.litellm_client import _strip_images
+        from app.openai_client import _strip_images
         messages = [
             {
                 "role": "user",
@@ -98,13 +98,13 @@ class TestStripImages:
         assert cleaned[0]["content"] == "描述这张图"
 
     def test_text_only_message_unchanged(self):
-        from app.litellm_client import _strip_images
+        from app.openai_client import _strip_images
         messages = [{"role": "user", "content": "你好"}]
         cleaned = _strip_images(messages)
         assert cleaned[0]["content"] == "你好"
 
     def test_image_only_message_gets_placeholder(self):
-        from app.litellm_client import _strip_images
+        from app.openai_client import _strip_images
         messages = [
             {
                 "role": "user",
@@ -117,7 +117,7 @@ class TestStripImages:
         assert cleaned[0]["content"] == "[图片已移除]"
 
     def test_multiple_messages_stripped(self):
-        from app.litellm_client import _strip_images
+        from app.openai_client import _strip_images
         messages = [
             {"role": "user", "content": "第一句话"},
             {
@@ -226,8 +226,7 @@ class TestOpenRouterConfig:
 
     def test_analyze_complexity_with_openrouter_importable(self):
         """analyze_complexity_with_openrouter 可导入"""
-        from app.litellm_client import analyze_complexity_with_openrouter
-        import asyncio
+        from app.openrouter_client import analyze_complexity_with_openrouter
         assert callable(analyze_complexity_with_openrouter)
 
 
@@ -271,64 +270,6 @@ class TestVertexProviderBranch:
         delta = MockDelta()
         reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "thinking", None)
         assert reasoning == "原始推理"
-
-
-class TestFlattenCacheBlocks:
-    """_flatten_cache_blocks 单元测试（替代原 _inject_cache_control）"""
-
-    def test_list_content_flattened_to_string(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [{"role": "system", "content": [{"type": "text", "text": "你是一个助手", "cache_control": {"type": "ephemeral"}}]}]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == "你是一个助手"
-
-    def test_string_content_unchanged(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [{"role": "system", "content": "你是一个助手"}]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == "你是一个助手"
-
-    def test_multi_block_joined_with_newline(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [{"role": "system", "content": [
-            {"type": "text", "text": "段落一", "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": "段落二"},
-        ]}]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == "段落一\n段落二"
-
-    def test_user_message_string_unchanged(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [{"role": "user", "content": "你好"}]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == "你好"
-
-    def test_empty_string_unchanged(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [{"role": "system", "content": ""}]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == ""
-
-    def test_mixed_messages_all_processed(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [
-            {"role": "system", "content": [{"type": "text", "text": "系统提示", "cache_control": {"type": "ephemeral"}}]},
-            {"role": "user", "content": "用户消息"},
-            {"role": "assistant", "content": "助手回复"},
-        ]
-        result = _flatten_cache_blocks(messages)
-        assert result[0]["content"] == "系统提示"
-        assert result[1]["content"] == "用户消息"
-        assert result[2]["content"] == "助手回复"
-
-    def test_message_list_length_preserved(self):
-        from app.litellm_client import _flatten_cache_blocks
-        messages = [
-            {"role": "system", "content": [{"type": "text", "text": "提示"}]},
-            {"role": "user", "content": "问题"},
-        ]
-        result = _flatten_cache_blocks(messages)
-        assert len(result) == 2
 
 
 class TestSessionIdHashing:

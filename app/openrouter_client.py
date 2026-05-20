@@ -236,6 +236,26 @@ async def call_openrouter_stream(
         yield {"error": f"OpenRouter API Error: {error_msg}"}
 
 
+async def call_openrouter_simple(prompt: str, max_tokens: int = 500) -> str:
+    """用于 Soul 进化等后台轻量文本生成任务。"""
+    try:
+        client = _build_client()
+        raw_parts: List[str] = []
+        async with await client.chat.send_async(
+            messages=[{"role": "user", "content": prompt}],
+            model=OPENROUTER_ROUTER_MODEL,
+            stream=True,
+            max_tokens=max_tokens,
+        ) as stream:
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    raw_parts.append(chunk.choices[0].delta.content)
+        return "".join(raw_parts)
+    except Exception as e:
+        print(f"⚠️ [OpenRouter简单调用] 失败: {e}")
+        return ""
+
+
 async def analyze_complexity_with_openrouter(
     content: str,
     has_images: bool = False,

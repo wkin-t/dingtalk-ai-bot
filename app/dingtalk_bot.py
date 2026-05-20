@@ -306,34 +306,12 @@ def _trim_changelog(filepath: str, max_bytes: int = _CHANGELOG_MAX_BYTES):
 async def _ask_lightweight_model(prompt: str) -> str:
     """调用轻量模型（复用预分析模型），用于 Soul 进化等后台任务"""
     try:
-        if AI_BACKEND in ("openai", "openrouter"):
-            import litellm
-            import warnings
-            litellm.suppress_debug_info = True
-            warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
-            if AI_BACKEND == "openrouter":
-                from app.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_ROUTER_MODEL
-                response = await litellm.acompletion(
-                    model=OPENROUTER_ROUTER_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_base=OPENROUTER_BASE_URL,
-                    api_key=OPENROUTER_API_KEY,
-                    custom_llm_provider="openai",
-                    temperature=0.7,
-                    max_tokens=500,
-                    timeout=15,
-                )
-            else:
-                from app.config import LITELLM_MODEL_FLASH as _flash_model
-                response = await litellm.acompletion(
-                    model=_flash_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=500,
-                    drop_params=True,
-                    reasoning_effort="none",
-                )
-            return response.choices[0].message.content or ""
+        if AI_BACKEND == "openrouter":
+            from app.openrouter_client import call_openrouter_simple
+            return await call_openrouter_simple(prompt)
+        elif AI_BACKEND == "openai":
+            from app.openai_client import call_openai_simple
+            return await call_openai_simple(prompt)
         else:
             from app.gemini_client import client as _gemini_client
             from google.genai import types
@@ -698,126 +676,10 @@ def analyze_complexity(content: str, has_images: bool = False) -> dict:
         "reason": reason
     }
 
-async def _analyze_with_litellm(content: str, has_images: bool = False, soul_text: str = "") -> dict:
-    """
-    使用 LiteLLM (gpt-5.4-mini) 快速分析问题复杂度
-    用于 OpenAI 后端，替代 Gemini Flash Lite 预分析
-    """
-    import json
-    import re
-    from app.config import OPENAI_API_BASE, OPENAI_API_KEY_CUSTOM, LITELLM_MODEL_FLASH
-    import litellm
-    import warnings
-    litellm.suppress_debug_info = True
-    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
-
-    soul_instruction = ""
-    if soul_text:
-        soul_instruction = f"你的性格设定: {soul_text[:100]}\n   请让思考短语符合这个性格。\n   "
-
-    analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
-
-问题: {content[:300]}
-有图片: {"是" if has_images else "否"}
-
-选择规则:
-1. model（三个选项）:
-   - "lite": 简单问候、闲聊、一句话基础问答（有图片时禁用此选项）
-   - "fast": 日常问答、代码、一般分析、图片分析（默认；有图片时最低选此）
-   - "pro": 仅用于复杂数学证明、学术研究、系统架构设计
-
-2. thinking_level:
-   - "minimal": 简单问候如"你好"、"谢谢"
-   - "low": 普通问答、事实查询
-   - "medium": 需要一定推理、代码问题
-   - "high": 复杂分析、算法设计
-
-3. need_search:
-   - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
-   - false: 不需要联网（默认）
-
-4. thinking_text:
-   - 一句简短的思考状态（10字以内，不用emoji），要和问题内容相关，风格符合你的性格
-   - {soul_instruction}例如: 代码问题→"正在编译思路中", 数学问题→"开始推演计算", 闲聊→"让我想想"
-   - 要有个性、不重复
-
-5. need_image_gen:
-   - true: 用户明确要求生成图片、画画、插图、绘制、画一张、生成图片
-   - false: 不需要生图（默认）
-
-6. image_gen_params (仅当 need_image_gen=true 时):
-   - prompt: 提取用户描述的图片内容，转为英文描述（生图模型只支持英文）
-   - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
-   - number_of_images: 解析数量 → 1-4，默认 1
-
-7. need_image_edit:
-   - true: 有图片(has_images=是) 且用户文字中明确包含修改指令（"帮我改"、"修改"、"换颜色"、"去掉背景"、"再生成类似的"等）
-   - false: 默认 — 以下情况均为 false：无图片；只发图片没有文字；文字是提问/分析（"这是什么"、"帮我看看"）；没有明确修改词
-
-8. temperature:
-   - "precise": 代码、数学、翻译、事实查询（需要准确性）
-   - "balanced": 普通问答（默认）
-   - "creative": 写作、诗歌、头脑风暴、创意任务
-
-重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
-
-只返回JSON:
-{{"model":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
-
-    try:
-        kwargs = {
-            "model": LITELLM_MODEL_FLASH,
-            "messages": [{"role": "user", "content": analysis_prompt}],
-            "temperature": 0.1,
-            "max_tokens": 300,
-            "timeout": 15,
-            "drop_params": True,
-            "reasoning_effort": "none",
-        }
-        if OPENAI_API_BASE:
-            kwargs["api_base"] = OPENAI_API_BASE
-            kwargs["custom_llm_provider"] = "openai"
-        if OPENAI_API_KEY_CUSTOM:
-            kwargs["api_key"] = OPENAI_API_KEY_CUSTOM
-
-        response = await litellm.acompletion(**kwargs)
-        result_text = response.choices[0].message.content or ""
-        print(f"📝 [LiteLLM预分析] 原始返回: {result_text[:200]}")
-
-        # 解析 JSON（支持嵌套对象）
-        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-        if json_match:
-            result = json.loads(json_match.group())
-            if result.get("model") not in ["lite", "fast", "pro"]:
-                result["model"] = "fast"
-            if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
-                result["thinking_level"] = "low"
-            if "need_search" not in result:
-                result["need_search"] = False
-            if "need_image_gen" not in result:
-                result["need_image_gen"] = False
-            if "need_image_edit" not in result:
-                result["need_image_edit"] = False
-            if "temperature" not in result:
-                result["temperature"] = "balanced"
-            print(f"🤖 [LiteLLM预分析] 结果: {result}")
-            return result
-        else:
-            print(f"⚠️ [LiteLLM预分析] 无法提取 JSON: {result_text}")
-
-    except Exception as e:
-        print(f"⚠️ [LiteLLM预分析] 失败: {e}")
-
-    return {
-        "model": "fast",
-        "thinking_level": "low",
-        "need_search": False,
-        "need_image_gen": False,
-        "need_image_edit": False,
-        "temperature": "balanced",
-        "reason": "LiteLLM预分析失败，使用默认",
-        "thinking_text": "正在思考 💭"
-    }
+async def _analyze_with_openai(content: str, has_images: bool = False, soul_text: str = "") -> dict:
+    """用 OpenAI 官方 SDK 快速分析问题复杂度，用于 OpenAI 后端路由。"""
+    from app.openai_client import analyze_complexity_with_openai
+    return await analyze_complexity_with_openai(content, has_images, soul_text)
 
 
 async def _enrich_image_prompt(
@@ -1212,7 +1074,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         elif AI_BACKEND == "openai":
             print(f"🔄 [路由] OpenAI 模式，使用 GPT 预分析...")
             try:
-                complexity = await _analyze_with_litellm(content, has_images, soul_text=soul_text)
+                complexity = await _analyze_with_openai(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except Exception as e:
                 print(f"❌ [路由] 预分析异常: {e}")

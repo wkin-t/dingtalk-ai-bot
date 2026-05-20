@@ -352,12 +352,6 @@ OPENAI_API_KEY_CUSTOM = os.getenv("OPENAI_API_KEY", "")
 # Vertex AI 配置（LiteLLM vertex_ai/ 路由使用）
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT", "")
 
-# 网络控制
-LITELLM_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
-LITELLM_CONNECT_TIMEOUT = _get_int("LITELLM_CONNECT_TIMEOUT", 30)
-LITELLM_READ_TIMEOUT = _get_int("LITELLM_READ_TIMEOUT", 120)
-LITELLM_MAX_RETRIES = _get_int("LITELLM_MAX_RETRIES", 2)
-
 # 模型映射（带 capability 声明）
 LITELLM_MODEL_CONFIG = {
     "lite": {
@@ -457,9 +451,6 @@ OPENROUTER_MODEL_CONFIG = {
         "supports_vision": _get_bool("OPENROUTER_PRO_SUPPORTS_VISION", True),
     },
 }
-
-# 回退开关: true=走旧 LiteLLM 路径（应急），false=走新 openrouter 官方 SDK（默认）
-USE_LEGACY_LITELLM = _get_bool("USE_LEGACY_LITELLM", False)
 
 # 注意: 代理配置在 gemini_client.py 中设置
 # 使用 NO_PROXY 排除钉钉域名，确保钉钉 SDK 不走代理
