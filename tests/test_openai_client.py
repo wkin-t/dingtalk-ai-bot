@@ -82,11 +82,34 @@ def test_split_strips_images_yields_placeholder_when_only_images():
     assert input_items[0]["content"] == "[图片已移除]"
 
 
-def test_split_preserves_list_content_when_vision():
-    """视觉模型应原样保留 list content（含图片块）"""
+def test_split_converts_list_content_blocks_to_responses_vocab():
+    """视觉模型 list content 必须按 Responses API 词汇转换：
+       user 的 text → input_text，image_url → input_image（带图片报错的回归测试）"""
     content_list = [
         {"type": "text", "text": "看图"},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xxx"}},
+    ]
+    messages = [{"role": "user", "content": content_list}]
+    _, input_items = _split_messages_for_responses(messages, supports_vision=True)
+    converted = input_items[0]["content"]
+    assert converted[0] == {"type": "input_text", "text": "看图"}
+    assert converted[1] == {"type": "input_image", "image_url": "data:image/jpeg;base64,xxx"}
+
+
+def test_split_converts_assistant_text_to_output_text():
+    """assistant 的 list content 中 text 块应转为 output_text"""
+    messages = [
+        {"role": "assistant", "content": [{"type": "text", "text": "之前的回答"}]},
+    ]
+    _, input_items = _split_messages_for_responses(messages, supports_vision=True)
+    assert input_items[0]["content"] == [{"type": "output_text", "text": "之前的回答"}]
+
+
+def test_split_passes_through_already_responses_vocab():
+    """已经是 Responses 词汇的 block 不应再次转换"""
+    content_list = [
+        {"type": "input_text", "text": "已转换"},
+        {"type": "input_image", "image_url": "http://x"},
     ]
     messages = [{"role": "user", "content": content_list}]
     _, input_items = _split_messages_for_responses(messages, supports_vision=True)

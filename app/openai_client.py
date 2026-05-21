@@ -64,6 +64,32 @@ def _is_complete_reasoning(rd: list) -> bool:
     )
 
 
+def _convert_block_to_responses_format(block: Dict[str, Any], role: Optional[str]) -> Dict[str, Any]:
+    """把 Chat Completions 的 content block 转成 Responses API 词汇表。
+
+    Chat Completions → Responses 映射：
+      - user 的 {"type": "text", ...}       → {"type": "input_text", ...}
+      - assistant 的 {"type": "text", ...}  → {"type": "output_text", ...}
+      - {"type": "image_url", "image_url": {"url": "..."}} → {"type": "input_image", "image_url": "..."}
+      - 已经是 Responses 词汇（input_text / input_image / output_text）→ 原样保留
+    """
+    if not isinstance(block, dict):
+        return block
+    btype = block.get("type")
+    if btype == "text":
+        new_type = "output_text" if role == "assistant" else "input_text"
+        out = {"type": new_type, "text": block.get("text", "")}
+        # cache_control 保留——上游 Anthropic 路径仍可能识别
+        if "cache_control" in block:
+            out["cache_control"] = block["cache_control"]
+        return out
+    if btype == "image_url":
+        img = block.get("image_url")
+        url = img.get("url") if isinstance(img, dict) else img
+        return {"type": "input_image", "image_url": url}
+    return block
+
+
 def _split_messages_for_responses(
     messages: List[Dict[str, Any]],
     supports_vision: bool,
@@ -72,7 +98,8 @@ def _split_messages_for_responses(
 
     - system 角色 → 拼接到 instructions 字符串（注意：Stage B 的 cache_control 会丢失，
       因为 instructions 是 string 字段，无法挂 ephemeral 标签）
-    - 其他角色 → 原样放进 input 数组（content 可以是 string 或 list）
+    - 其他角色 → 放进 input 数组；string content 透传；list content 按 Responses
+      词汇表逐块转换（text→input_text/output_text，image_url→input_image）
     - 视觉模型保留图片块；非视觉模型剥掉图片
     """
     instructions_parts: List[str] = []
@@ -88,9 +115,12 @@ def _split_messages_for_responses(
                     if isinstance(blk, dict) and blk.get("type") == "text":
                         instructions_parts.append(blk.get("text", ""))
             continue
-        if not supports_vision and isinstance(content, list):
-            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-            content = "\n".join(text_parts) if text_parts else "[图片已移除]"
+        if isinstance(content, list):
+            if not supports_vision:
+                text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                content = "\n".join(text_parts) if text_parts else "[图片已移除]"
+            else:
+                content = [_convert_block_to_responses_format(blk, role) for blk in content]
         input_items.append({"role": role, "content": content})
     return "\n\n".join(p for p in instructions_parts if p), input_items
 
