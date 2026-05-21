@@ -74,7 +74,8 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 
 - **Monkey Patch**: `main.py` 顶部对 `aiohttp` 和 `requests` 打补丁，统一注入代理和重试逻辑。必须在所有其他导入之前执行。
 - **四后端切换**: `AI_BACKEND` 环境变量选择 `gemini`、`openclaw`、`openai`（含 sub2api 中转站路径）或 `openrouter`（原生 OpenRouter）。切换点是 `app/ai/backend.py` 的 `create_backend_stream()`，handler/bot 层不感知具体后端。
-- **openai_client 双协议分支**: `app/openai_client.py::call_openai_stream` 按 model_name 自动选 API——Gemini 上游走 Chat Completions（sub2api Gemini 适配不支持 Responses），其他（Claude/GPT）走 Responses API（绕开 sub2api chat completions 在多轮对话下的 400 bug）。Stage B system cache_control 在 Responses 路径丢失（`instructions` 是 string 字段无法挂 ephemeral）。
+- **openai_client 双协议分支**: `app/openai_client.py::call_openai_stream` 按 model_name 自动选 API——Gemini 上游走 Chat Completions（sub2api Gemini 适配不支持 Responses），其他（Claude/GPT）走 Responses API（绕开 sub2api chat completions 在多轮对话下的 400 bug）。Stage B system cache_control 在 Responses 路径丢失（`instructions` 是 string 字段无法挂 ephemeral）。带图请求会按 Responses API 词汇表转换 content block（`text → input_text/output_text`，`image_url → input_image`）。
+- **路由/Soul 调用不限 max_tokens**: `analyze_complexity_with_*` 和 `call_*_simple` 不下发 `max_tokens`，让上游用默认值（通常 4096+）。原因：Gemini-3.5-flash / Claude reasoning / GPT-5 等思考模型的 `max_tokens` 控制的是 **thinking + output 总额**，设小（如 300）会让思考吃光预算、输出为空，bot 拿到空 content 后 JSON 解析失败降级到默认（thinking_text 缺失等）。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
 - **三档智能路由**: 路由分析在**卡片创建前**完成（让卡片初始就显示正确思考文字）。所有后端均使用 `MODEL_ROUTER`（默认值按后端自动选，如 Haiku/gemini-flash-lite）。路由输出：lite/fast/pro 三档 + thinking level + need_search + temperature（precise/balanced/creative → 0.1/0.7/0.9）+ need_image_gen/need_image_edit。
 - **生图+改图流水线**: 路由检测 `need_image_gen` → `image_gen.generate_image()`（Gemini `GEMINI_IMAGE_MODEL` 或 OpenAI `gpt-image-2`）；检测 `need_image_edit`（用户发图+修改指令）→ `image_gen.edit_image()`（Gemini `GEMINI_IMAGE_EDIT_MODEL` 或 OpenAI images.edit，OpenRouter/OpenClaw 不支持）。图片经 `image_store.py` 上传 COS → 预签名 URL 展示。
@@ -96,7 +97,9 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `.env.openclaw` → OpenClaw 后端
 - `.env.wecom` → 企业微信+钉钉双平台
 
-核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
+核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `BOT_ID`（**多容器场景必须显式设独立值**，否则默认派生自 AI_BACKEND，多容器共用 AI_BACKEND 时会撞键导致 Stage A 角色重塑失效）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
+
+**改 .env 注意**：`docker restart` **不重读** env_file，必须 `docker compose -f xxx.yml up -d` 才会 recreate 容器并应用新 env。recreate 会丢失之前 `docker cp` 热推到运行容器内的代码，需要重推。
 
 **统一模型变量**（2026-05-20 起，所有后端共用，旧变量 `GEMINI_MODEL`/`OPENAI_MODEL_FLASH`/`OPENROUTER_MODEL_*` 不再读取）:
 - `MODEL_ROUTER` — 路由分析 / Soul 进化 / 搜索（轻量模型）
