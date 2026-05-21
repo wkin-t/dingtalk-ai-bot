@@ -236,17 +236,22 @@ async def call_openrouter_stream(
         yield {"error": f"OpenRouter API Error: {error_msg}"}
 
 
-async def call_openrouter_simple(prompt: str, max_tokens: int = 500) -> str:
-    """用于 Soul 进化等后台轻量文本生成任务。"""
+async def call_openrouter_simple(prompt: str, max_tokens: Optional[int] = None) -> str:
+    """用于 Soul 进化等后台轻量文本生成任务。
+
+    max_tokens 默认 None（不下发），原 500 在 thinking 模型上会被思考吃光。
+    """
     try:
         client = _build_client()
         raw_parts: List[str] = []
-        async with await client.chat.send_async(
-            messages=[{"role": "user", "content": prompt}],
-            model=OPENROUTER_ROUTER_MODEL,
-            stream=True,
-            max_tokens=max_tokens,
-        ) as stream:
+        send_kwargs: Dict[str, Any] = {
+            "messages": [{"role": "user", "content": prompt}],
+            "model": OPENROUTER_ROUTER_MODEL,
+            "stream": True,
+        }
+        if max_tokens is not None:
+            send_kwargs["max_tokens"] = max_tokens
+        async with await client.chat.send_async(**send_kwargs) as stream:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     raw_parts.append(chunk.choices[0].delta.content)
@@ -313,11 +318,12 @@ async def analyze_complexity_with_openrouter(
         client = _build_client()
         # SDK 的 send_async 始终返回 EventStreamAsync，stream=False 无效；改为流式收集
         raw_parts: List[str] = []
+        # 不设 max_tokens：原 200 在 thinking 模型上会被思考全部消耗，留给 JSON 输出 0 token。
+        # 让上游用默认值（通常 4096+），路由 JSON 仅 ~100 token 占用极少。
         async with await client.chat.send_async(
             messages=[{"role": "user", "content": prompt}],
             model=OPENROUTER_ROUTER_MODEL,
             stream=True,
-            max_tokens=200,
         ) as stream:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:

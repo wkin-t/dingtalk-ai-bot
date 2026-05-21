@@ -397,16 +397,22 @@ async def _stream_via_responses(
     }
 
 
-async def call_openai_simple(prompt: str, max_tokens: int = 500) -> str:
-    """用于 Soul 进化等后台轻量文本生成任务（非流式）。"""
+async def call_openai_simple(prompt: str, max_tokens: Optional[int] = None) -> str:
+    """用于 Soul 进化等后台轻量文本生成任务（非流式）。
+
+    max_tokens 默认 None（不下发），让上游用其默认 budget。原默认 500 在 thinking
+    模型（如 Gemini 3.5-flash）上会被思考全部消耗，留给输出 0 token。
+    """
     try:
         client = _build_client()
-        response = await client.chat.completions.create(
-            model=MODEL_ROUTER,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=max_tokens,
-        )
+        kwargs: Dict[str, Any] = {
+            "model": MODEL_ROUTER,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = await client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
     except Exception as e:
         print(f"⚠️ [OpenAI简单调用] 失败: {e}")
@@ -466,13 +472,20 @@ async def analyze_complexity_with_openai(
 
     try:
         client = _build_client()
+        # 不设 max_tokens：让上游用默认值（通常 4096+）。原本 300 太小会让 thinking 模型
+        # （如 Gemini 3.5-flash）把预算全用在思考上、留给输出 0 token，导致 finish_reason=
+        # length + 空 content。输出只是短 JSON（~100 token），用上游默认 budget 余量充足。
         response = await client.chat.completions.create(
             model=MODEL_ROUTER,
             messages=[{"role": "user", "content": analysis_prompt}],
             temperature=0.1,
-            max_tokens=300,
         )
         result_text = response.choices[0].message.content or ""
+        if not result_text:
+            finish_reason = getattr(response.choices[0], "finish_reason", "?")
+            usage = getattr(response, "usage", None)
+            ct = getattr(usage, "completion_tokens", "?") if usage else "?"
+            print(f"⚠️ [OpenAI路由] content 为空 (finish_reason={finish_reason}, completion_tokens={ct})——可能 thinking token 占满预算或被 safety filter 拦截")
         print(f"📝 [OpenAI路由] 原始返回: {result_text[:200]}")
 
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
