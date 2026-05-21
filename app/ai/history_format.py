@@ -54,10 +54,16 @@ def format_history_with_meta(
         elif role == "assistant" and bot_id is not None and bot_id != current_bot_id:
             bot_source = _BOT_SOURCE_NAMES.get(bot_id, bot_id)
             tag = f"[来自机器人 {bot_source}]"
-            if not str(content).startswith(tag):
-                new_msg["content"] = f"{tag} {content}"
+            # 1) 先确保 tag（旧数据/fixture 可能已带 tag，避免重复）
+            if str(content).startswith(tag):
+                body = content
             else:
-                new_msg["content"] = content
+                body = f"{tag} {content}"
+            # 2) 时间戳前缀，与 user 消息对称：[ts] [tag] content
+            if timestamp:
+                new_msg["content"] = f"[{timestamp}] {body}"
+            else:
+                new_msg["content"] = body
         else:
             new_msg["content"] = content
 
