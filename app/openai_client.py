@@ -64,6 +64,37 @@ def _is_complete_reasoning(rd: list) -> bool:
     )
 
 
+def _split_messages_for_responses(
+    messages: List[Dict[str, Any]],
+    supports_vision: bool,
+):
+    """把 chat completions messages 拆成 Responses API 需要的 (instructions, input)。
+
+    - system 角色 → 拼接到 instructions 字符串（注意：Stage B 的 cache_control 会丢失，
+      因为 instructions 是 string 字段，无法挂 ephemeral 标签）
+    - 其他角色 → 原样放进 input 数组（content 可以是 string 或 list）
+    - 视觉模型保留图片块；非视觉模型剥掉图片
+    """
+    instructions_parts: List[str] = []
+    input_items: List[Dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str):
+                instructions_parts.append(content)
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        instructions_parts.append(blk.get("text", ""))
+            continue
+        if not supports_vision and isinstance(content, list):
+            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            content = "\n".join(text_parts) if text_parts else "[图片已移除]"
+        input_items.append({"role": role, "content": content})
+    return "\n\n".join(p for p in instructions_parts if p), input_items
+
+
 async def call_openai_stream(
     messages: List[Dict[str, Any]],
     target_model: str,
@@ -74,17 +105,18 @@ async def call_openai_stream(
     conversation_id: str = "",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    通过 openai.AsyncOpenAI Chat Completions 调用 OPENAI_API_BASE 中转站（流式）。
-    支持 Claude/Gemini/GPT 全量 upstream，兼容 reasoning_content/thinking delta 字段。
+    流式调用 OPENAI_API_BASE 中转站。按 upstream 自动选择 API：
+      - gemini-* → Chat Completions（sub2api Gemini 适配层不支持 Responses）
+      - anthropic/* | openai/* | gpt-* | o1/o3/o4 → Responses API
+        （绕开 sub2api Chat Completions 在多轮对话下的 "Invalid Responses API request" bug）
 
     Yields:
-        {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
+        {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
     """
     route_key = get_route_key(target_model)
     config = get_litellm_model_config(route_key)
     model_name = config["model"]
 
-    # Temperature clamp（Claude 模型上限 1.0）
     is_claude = "claude" in model_name.lower() or model_name.startswith("anthropic/")
     clamp_provider = "openclaw" if is_claude else "openai"
     clamped_temp = clamp_temperature(temperature, clamp_provider)
@@ -98,7 +130,11 @@ async def call_openai_stream(
             print(f"⚠️ [OpenAI] top_p {top_p} → clamp 到 {clamped_top_p}")
         top_p = clamped_top_p
 
-    print(f"📡 [OpenAI] 请求模型: {model_name} (路由: {route_key}, thinking: {thinking_level})")
+    # 路由决策
+    is_gemini_upstream = "gemini" in model_name.lower()
+    api_kind = "chat" if is_gemini_upstream else "responses"
+
+    print(f"📡 [OpenAI/{api_kind}] 请求模型: {model_name} (路由: {route_key}, thinking: {thinking_level})")
     print(f"🌡️ [OpenAI] 实际下发 temperature={temperature}, top_p={top_p if top_p is not None else 'default(unset)'}")
 
     start_time = time.time()
@@ -106,93 +142,229 @@ async def call_openai_stream(
     try:
         client = _build_client()
 
-        extra_params: Dict[str, Any] = {}
-        _model_base = model_name.split("/")[-1]
-        if not (config["supports_reasoning"] or any(
-            _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
-        )):
-            extra_params["temperature"] = temperature
-        if top_p is not None:
-            extra_params["top_p"] = top_p
-
-        effort = EFFORT_MAPPING.get(thinking_level)
-        if config["supports_reasoning"] and effort and effort != "none":
-            extra_params["extra_body"] = {"reasoning": {"effort": effort}}
-
-        processed_messages: Any = messages if config["supports_vision"] else _strip_images(messages)
-
-        create_kwargs: Dict[str, Any] = {
-            "model": model_name,
-            "messages": processed_messages,
-            "stream": True,
-            **extra_params,
-        }
-        if any(_model_base.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "text-")):
-            create_kwargs["stream_options"] = {"include_usage": True}
-        stream = await client.chat.completions.create(**create_kwargs)
-
-        thinking_sent = False
-        input_tokens = 0
-        output_tokens = 0
-        actual_model = model_name
-
-        async for chunk in stream:
-            if not chunk.choices:
-                if hasattr(chunk, "usage") and chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens or 0
-                    output_tokens = chunk.usage.completion_tokens or 0
-                continue
-
-            if chunk.model:
-                actual_model = chunk.model
-
-            delta = chunk.choices[0].delta
-
-            thinking = (
-                getattr(delta, "reasoning_content", None)
-                or getattr(delta, "thinking", None)
-                or (delta.model_extra or {}).get("reasoning_content")
-            )
-            if thinking:
-                if not thinking_sent:
-                    yield {"thinking_start": True}
-                    thinking_sent = True
-                yield {"thinking": thinking}
-
-            if delta.content:
-                if thinking_sent:
-                    yield {"thinking_end": True}
-                    thinking_sent = False
-                yield {"content": delta.content}
-
-            rd = (delta.model_extra or {}).get("reasoning_details")
-            if rd and _is_complete_reasoning(rd):
-                yield {"reasoning_details": rd}
-
-        if thinking_sent:
-            yield {"thinking_end": True}
-
-        latency_ms = int((time.time() - start_time) * 1000)
-        print(f"✅ [OpenAI] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 延迟: {latency_ms}ms")
-
-        if output_tokens == 0:
-            yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
-            return
-
-        yield {
-            "usage": {
-                "model": actual_model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "latency_ms": latency_ms,
-            }
-        }
+        if is_gemini_upstream:
+            async for evt in _stream_via_chat_completions(
+                client, model_name, config, messages,
+                temperature, top_p, thinking_level, start_time,
+            ):
+                yield evt
+        else:
+            async for evt in _stream_via_responses(
+                client, model_name, config, messages,
+                temperature, top_p, thinking_level, start_time,
+            ):
+                yield evt
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ [OpenAI] 调用失败: {error_msg}")
+        print(f"❌ [OpenAI/{api_kind}] 调用失败: {error_msg}")
         traceback.print_exc()
         yield {"error": f"OpenAI API Error: {error_msg}"}
+
+
+async def _stream_via_chat_completions(
+    client,
+    model_name: str,
+    config: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    top_p: Optional[float],
+    thinking_level: str,
+    start_time: float,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Chat Completions 路径（Gemini 上游专用）。"""
+    extra_params: Dict[str, Any] = {}
+    _model_base = model_name.split("/")[-1]
+    if not (config["supports_reasoning"] or any(
+        _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+    )):
+        extra_params["temperature"] = temperature
+    if top_p is not None:
+        extra_params["top_p"] = top_p
+
+    effort = EFFORT_MAPPING.get(thinking_level)
+    if config["supports_reasoning"] and effort and effort != "none":
+        extra_params["extra_body"] = {"reasoning": {"effort": effort}}
+
+    processed_messages: Any = messages if config["supports_vision"] else _strip_images(messages)
+
+    create_kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "messages": processed_messages,
+        "stream": True,
+        **extra_params,
+    }
+    if any(_model_base.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "text-")):
+        create_kwargs["stream_options"] = {"include_usage": True}
+    stream = await client.chat.completions.create(**create_kwargs)
+
+    thinking_sent = False
+    input_tokens = 0
+    output_tokens = 0
+    content_chars = 0  # 实际流出的字符数（sub2api Gemini 不带 usage，这是真实证据）
+    actual_model = model_name
+
+    async for chunk in stream:
+        if not chunk.choices:
+            if hasattr(chunk, "usage") and chunk.usage:
+                input_tokens = chunk.usage.prompt_tokens or 0
+                output_tokens = chunk.usage.completion_tokens or 0
+            continue
+
+        if chunk.model:
+            actual_model = chunk.model
+
+        delta = chunk.choices[0].delta
+
+        thinking = (
+            getattr(delta, "reasoning_content", None)
+            or getattr(delta, "thinking", None)
+            or (delta.model_extra or {}).get("reasoning_content")
+        )
+        if thinking:
+            if not thinking_sent:
+                yield {"thinking_start": True}
+                thinking_sent = True
+            yield {"thinking": thinking}
+
+        if delta.content:
+            if thinking_sent:
+                yield {"thinking_end": True}
+                thinking_sent = False
+            content_chars += len(delta.content)
+            yield {"content": delta.content}
+
+        rd = (delta.model_extra or {}).get("reasoning_details")
+        if rd and _is_complete_reasoning(rd):
+            yield {"reasoning_details": rd}
+
+    if thinking_sent:
+        yield {"thinking_end": True}
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    print(f"✅ [OpenAI/chat] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 字符: {content_chars}, 延迟: {latency_ms}ms")
+
+    # 判断"无返回"以 content_chars 为准（sub2api Gemini 路径不带 usage，output_tokens 恒为 0）
+    if content_chars == 0 and output_tokens == 0:
+        yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
+        return
+
+    yield {
+        "usage": {
+            "model": actual_model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "latency_ms": latency_ms,
+        }
+    }
+
+
+async def _stream_via_responses(
+    client,
+    model_name: str,
+    config: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    top_p: Optional[float],
+    thinking_level: str,
+    start_time: float,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Responses API 路径（Claude/GPT 上游）。
+
+    Stage B 的 system cache_control 在此路径丢失（instructions 是 string 字段，
+    无法挂 ephemeral），上游可能仍做隐式 prompt cache。
+    多轮 thinking signature 暂不支持（Responses API 用 previous_response_id 而非
+    reasoning_details，需要后续接入）。
+    """
+    instructions, input_items = _split_messages_for_responses(messages, config["supports_vision"])
+
+    create_kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "input": input_items,
+        "stream": True,
+    }
+    if instructions:
+        create_kwargs["instructions"] = instructions
+
+    _model_base = model_name.split("/")[-1]
+    if not (config["supports_reasoning"] or any(
+        _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+    )):
+        create_kwargs["temperature"] = temperature
+    if top_p is not None:
+        create_kwargs["top_p"] = top_p
+
+    effort = EFFORT_MAPPING.get(thinking_level)
+    if config["supports_reasoning"] and effort and effort != "none":
+        create_kwargs["reasoning"] = {"effort": effort}
+
+    stream = await client.responses.create(**create_kwargs)
+
+    thinking_sent = False
+    input_tokens = 0
+    output_tokens = 0
+    content_chars = 0
+    actual_model = model_name
+
+    async for event in stream:
+        event_type = getattr(event, "type", None)
+        if not event_type:
+            continue
+
+        if event_type == "response.output_text.delta":
+            if thinking_sent:
+                yield {"thinking_end": True}
+                thinking_sent = False
+            delta = getattr(event, "delta", "")
+            if delta:
+                content_chars += len(delta)
+                yield {"content": delta}
+
+        elif event_type == "response.reasoning_text.delta":
+            if not thinking_sent:
+                yield {"thinking_start": True}
+                thinking_sent = True
+            delta = getattr(event, "delta", "")
+            if delta:
+                yield {"thinking": delta}
+
+        elif event_type in ("response.created", "response.completed"):
+            response = getattr(event, "response", None)
+            if response is None:
+                continue
+            mdl = getattr(response, "model", None)
+            if mdl:
+                actual_model = mdl
+            usage = getattr(response, "usage", None)
+            if usage:
+                input_tokens = getattr(usage, "input_tokens", 0) or 0
+                output_tokens = getattr(usage, "output_tokens", 0) or 0
+
+        elif event_type == "response.failed":
+            response = getattr(event, "response", None)
+            err = getattr(response, "error", None) if response else None
+            err_msg = getattr(err, "message", None) or str(err) if err else "Unknown failure"
+            yield {"error": f"OpenAI Responses Error: {err_msg}"}
+            return
+
+    if thinking_sent:
+        yield {"thinking_end": True}
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    print(f"✅ [OpenAI/responses] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 字符: {content_chars}, 延迟: {latency_ms}ms")
+
+    if content_chars == 0 and output_tokens == 0:
+        yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
+        return
+
+    yield {
+        "usage": {
+            "model": actual_model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "latency_ms": latency_ms,
+        }
+    }
 
 
 async def call_openai_simple(prompt: str, max_tokens: int = 500) -> str:

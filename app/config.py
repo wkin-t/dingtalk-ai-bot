@@ -268,8 +268,11 @@ DINGTALK_PUSH_IP_ALLOWLIST_RAW = os.getenv("DINGTALK_PUSH_IP_ALLOWLIST", "").str
 DINGTALK_TYPING_ENABLED = _get_bool("DINGTALK_TYPING_ENABLED", False)
 DINGTALK_TYPING_INTERVAL_MS = max(200, _get_int("DINGTALK_TYPING_INTERVAL_MS", 650))
 
-# 卡片流式更新节流间隔（秒），减少钉钉 API 调用频率
-STREAM_UPDATE_THROTTLE = max(1.0, _get_float("STREAM_UPDATE_THROTTLE", 3.0))
+# 卡片流式更新节流间隔（秒）
+# 取舍：太快（<1s）会让 thinkingText 副标题被首次 msgContent 更新瞬间盖掉，
+# 用户看不到 10 字思考短语；太慢（≥3s）则失去流式体验。1.5s 是兼顾两者的折中。
+# dingtalk_card.stream_update 自身另有 150ms 安全网防 burst。
+STREAM_UPDATE_THROTTLE = max(0.5, _get_float("STREAM_UPDATE_THROTTLE", 1.5))
 DINGTALK_TYPING_FRAMES_RAW = os.getenv(
     "DINGTALK_TYPING_FRAMES",
     "⌨️ 正在敲键盘.|⌨️ 正在敲键盘..|⌨️ 正在敲键盘...",
