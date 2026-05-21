@@ -121,13 +121,15 @@ async def call_openai_stream(
 
         processed_messages: Any = messages if config["supports_vision"] else _strip_images(messages)
 
-        stream = await client.chat.completions.create(
-            model=model_name,
-            messages=processed_messages,
-            stream=True,
-            stream_options={"include_usage": True},
+        create_kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "messages": processed_messages,
+            "stream": True,
             **extra_params,
-        )
+        }
+        if any(_model_base.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "text-")):
+            create_kwargs["stream_options"] = {"include_usage": True}
+        stream = await client.chat.completions.create(**create_kwargs)
 
         thinking_sent = False
         input_tokens = 0
