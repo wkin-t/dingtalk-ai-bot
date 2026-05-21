@@ -313,3 +313,176 @@ async def test_chat_completions_empty_stream_yields_error(mock_openai_cls, mock_
     errors = [c for c in yielded if "error" in c]
     assert len(errors) == 1
     assert "未返回" in errors[0]["error"]
+
+
+
+# ── TD2: Responses API previous_response_id 多轮 thinking ──
+
+def _make_response_created_event(response_id="resp_test_001"):
+    """构造 response.created 事件，response 上带 id"""
+    response = MagicMock()
+    response.id = response_id
+    response.model = "anthropic/claude-haiku-4.5"
+    response.usage = MagicMock(input_tokens=10, output_tokens=5)
+    response.error = None
+    evt = MagicMock()
+    evt.type = "response.created"
+    evt.response = response
+    return evt
+
+
+def _make_response_completed_event(response_id="resp_test_001"):
+    response = MagicMock()
+    response.id = response_id
+    response.model = "anthropic/claude-haiku-4.5"
+    response.usage = MagicMock(input_tokens=10, output_tokens=5)
+    response.error = None
+    evt = MagicMock()
+    evt.type = "response.completed"
+    evt.response = response
+    return evt
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_payload_includes_store_true(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """每次 Responses API 调用都必须带 store=True，否则后续无法用 previous_response_id 继续"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        conversation_id="conv-A",
+    ):
+        pass
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs.get("store") is True
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value="resp_prev_xyz")
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_with_prior_id_sends_only_last_user_and_previous_response_id(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """有 previous_response_id 时只发最后一条 user 消息，历史在服务端保留"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "首都？"},
+            {"role": "assistant", "content": "巴黎"},
+            {"role": "user", "content": "人口？"},
+        ],
+        target_model="fast",
+        conversation_id="conv-multi-turn",
+    ):
+        pass
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs.get("previous_response_id") == "resp_prev_xyz"
+    # 只发最后一条 user 消息
+    assert len(kwargs["input"]) == 1
+    assert kwargs["input"][0]["role"] == "user"
+    assert kwargs["input"][0]["content"] == "人口？"
+    # instructions 仍刷新（含 system prompt）
+    assert kwargs["instructions"] == "你是助手"
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_stores_response_id_after_stream(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """response.created/completed 事件携带的 response.id 应被存到 responses_state"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    text_delta = MagicMock()
+    text_delta.type = "response.output_text.delta"
+    text_delta.delta = "Paris"
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _make_response_created_event("resp_new_999"),
+        text_delta,
+        _make_response_completed_event("resp_new_999"),
+    ]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "首都？"}],
+        target_model="fast",
+        conversation_id="conv-store-test",
+    ):
+        pass
+
+    mock_set_rid.assert_called_with("conv-store-test", "resp_new_999")
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.clear_response_id")
+@patch("app.responses_state.get_response_id", return_value="resp_invalid_stale")
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_retries_full_history_when_prev_id_invalid(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, mock_clear_rid,
+):
+    """previous_response_id 失效时清状态并用全量历史重试"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+
+    # 第一次失败：模拟 "previous_response_id not found" 错误
+    # 第二次成功
+    text_delta = MagicMock()
+    text_delta.type = "response.output_text.delta"
+    text_delta.delta = "retry succeeded"
+    call_count = {"n": 0}
+
+    async def fake_create(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise Exception("Previous response with id 'resp_invalid_stale' not found")
+        return _make_async_stream([
+            _make_response_created_event("resp_retry_ok"),
+            text_delta,
+            _make_response_completed_event("resp_retry_ok"),
+        ])
+
+    mock_client.responses.create = fake_create
+
+    chunks = []
+    async for c in call_openai_stream(
+        [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+        ],
+        target_model="fast",
+        conversation_id="conv-stale",
+    ):
+        chunks.append(c)
+
+    # 应该清除了过期的 id
+    mock_clear_rid.assert_called_with("conv-stale")
+    # 重试后内容仍流出
+    assert any(c.get("content") == "retry succeeded" for c in chunks)
+    # 重试后存了新的 id
+    mock_set_rid.assert_called_with("conv-stale", "resp_retry_ok")

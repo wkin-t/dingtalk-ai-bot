@@ -1,31 +1,29 @@
 ## 最近完成
-- LiteLLM 完全移除（彻底清除 LiteLLM 依赖）
-  - 删除 app/litellm_client.py + requirements.txt 移除 litellm==1.81.9
-  - openai_client.py：内联 EFFORT_MAPPING/_strip_images，新增
-    analyze_complexity_with_openai + call_openai_simple
-  - openrouter_client.py：新增 call_openrouter_simple（Soul 进化任务）
-  - dingtalk_bot.py：_analyze_with_litellm → _analyze_with_openai（openai SDK）
-    _ask_lightweight_model 的 openai/openrouter 分支改用官方 SDK
-  - backend.py：移除 USE_LEGACY_LITELLM 分支
-  - config.py：删除 USE_LEGACY_LITELLM / LITELLM_* 网络变量
-  - 测试：346 passed（移除 13 个 litellm 专属用例）
-  - commit: f55baef
+- 多轮 thinking 两条路径全部接通
+  - TD1 (OpenRouter): _is_complete_reasoning 修复类型识别
+    旧 filter 只匹配 thinking/reasoning，实际 SDK 产出 reasoning.encrypted/text/summary，
+    导致 vacuous truth 残体可漏入下一轮。新增 7 个 normalized type 用例 + round-trip 集成测试
+  - TD2 (OpenAI Responses): 接入 previous_response_id
+    新增 app/responses_state.py（Redis + 文件降级，TTL 7 天）
+    _stream_via_responses 改造：有 prev_id 时仅发末位 user 消息 + previous_response_id；
+    无则发全量历史；store=True 始终开启；失效自动清状态回退重试一次
+    clear_cutoff.set_cutoff/reset_cutoff 同步清 response_id，避免 /clear /resume 状态不一致
+  - 测试: 394 passed (新增 TD1: 9 个；TD2: 6 + 2 + 4 个)
 
 ## 当前正在做
-- 等待用户提出新需求
+- 待部署验证
 
 ## 下一步应做
-- 验证三个容器功能正常（特别是路由分析 thinking_text）
-- （可选）阶段 4：Gemini/Vertex thinking blocks 多轮保留
+- 三容器重建 + 在线观察 thinking 跨轮保持
 
 ## 已知问题
 - 多个 pre-existing Pyright 类型告警（非本次引入）
 
 ## 环境状态
 - Git 分支: master
-- 当前 HEAD: f55baef (refactor: 完全移除 LiteLLM)
-- 服务状态: 三个容器均已重建（--no-cache），openrouter/openai 已验证启动正常
-- 测试状态: 346 passed, compile OK
+- 当前 HEAD: 4f991ff (fix: bot 显示名称按实际模型推断)
+- 服务状态: 三容器已重建并验证启动正常（2026-05-21）
+- 测试状态: 372 passed, compile OK
 
 === 最近 10 条 commit ===
 f55baef refactor: 完全移除 LiteLLM，迁移所有路径到官方 SDK

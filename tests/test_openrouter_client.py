@@ -55,6 +55,58 @@ class TestIsCompleteReasoning:
         ]
         assert not _is_complete_reasoning(rd)
 
+    # ── OpenRouter normalized types（SDK 实际产出的类型）──
+
+    def test_reasoning_encrypted_with_data_passes(self):
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.encrypted", "data": "base64-blob", "format": "anthropic-claude-v1"}]
+        assert _is_complete_reasoning(rd)
+
+    def test_reasoning_encrypted_missing_data_fails(self):
+        """Anthropic encrypted blob 缺 data 是残体，必须拒绝（防止写入死锁会话）"""
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.encrypted", "format": "anthropic-claude-v1"}]
+        assert not _is_complete_reasoning(rd)
+
+    def test_reasoning_text_with_signature_passes(self):
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.text", "text": "let me think", "signature": "sig"}]
+        assert _is_complete_reasoning(rd)
+
+    def test_reasoning_text_missing_signature_fails(self):
+        """Anthropic reasoning.text 必须带 signature，否则上游拒收"""
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.text", "text": "let me think"}]
+        assert not _is_complete_reasoning(rd)
+
+    def test_reasoning_summary_no_validation(self):
+        """reasoning.summary 无 signature/data 概念，存在即视为完整"""
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.summary", "summary": "thought about X"}]
+        assert _is_complete_reasoning(rd)
+
+    def test_mixed_normalized_types_complete(self):
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [
+            {"type": "reasoning.encrypted", "data": "blob"},
+            {"type": "reasoning.text", "text": "t", "signature": "s"},
+            {"type": "reasoning.summary", "summary": "s"},
+        ]
+        assert _is_complete_reasoning(rd)
+
+    def test_mixed_normalized_types_one_incomplete(self):
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [
+            {"type": "reasoning.encrypted", "data": "blob"},
+            {"type": "reasoning.text", "text": "t"},  # missing signature
+        ]
+        assert not _is_complete_reasoning(rd)
+
+    def test_non_dict_item_rejected(self):
+        from app.openrouter_client import _is_complete_reasoning
+        rd = [{"type": "reasoning.encrypted", "data": "blob"}, "not-a-dict"]
+        assert not _is_complete_reasoning(rd)
+
 
 class TestSerializeRd:
     """_serialize_rd 序列化"""
@@ -275,6 +327,85 @@ class TestOpenrouterClientStream:
 
         rd_chunks = [c for c in chunks if "reasoning_details" in c]
         assert len(rd_chunks) == 0, "残体 reasoning_details 不应被 yield"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_details_in_history_passed_to_sdk(self):
+        """多轮：history 中 assistant 消息带 reasoning_details，SDK 调用时应该把这个字段也传过去"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # 模拟一个空的最小响应流
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-sonnet-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(prompt_tokens=30, completion_tokens=5)
+        delta = MagicMock()
+        delta.reasoning = None
+        delta.reasoning_details = None
+        delta.content = "答"
+        content_chunk = MagicMock()
+        content_chunk.model = "anthropic/claude-sonnet-4-5"
+        content_chunk.choices = [MagicMock(delta=delta)]
+        content_chunk.usage = None
+
+        async def mock_aiter(self):
+            yield content_chunk
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        # 多轮 history：assistant 消息携带上一轮的 reasoning_details
+        prior_rd = [{
+            "type": "reasoning.encrypted",
+            "data": "encrypted-thinking-blob",
+            "format": "anthropic-claude-v1",
+        }]
+        history = [
+            {"role": "user", "content": "首都是哪里？"},
+            {"role": "assistant", "content": "巴黎", "reasoning_details": prior_rd},
+            {"role": "user", "content": "人口呢？"},
+        ]
+
+        with patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            async for _ in call_openrouter_stream(
+                history, target_model="pro", thinking_level="medium",
+            ):
+                pass
+
+            # 验证 SDK 收到的 messages 第二条仍含 reasoning_details
+            call_kwargs = mock_client.chat.send_async.call_args.kwargs
+            sent_messages = call_kwargs["messages"]
+            assistant_msg = next(m for m in sent_messages if m.get("role") == "assistant")
+            assert "reasoning_details" in assistant_msg, "assistant 消息必须带回上一轮的 reasoning_details"
+            assert assistant_msg["reasoning_details"] == prior_rd
+
+    @pytest.mark.asyncio
+    async def test_sdk_pydantic_serialization_preserves_reasoning_details(self):
+        """合同测试：openrouter SDK 的 ChatAssistantMessage Pydantic 模型必须把 reasoning_details
+        作为顶层字段保留在序列化输出里（OpenRouter API 接受 normalized 格式）。
+        """
+        from openrouter.components import ChatAssistantMessage
+
+        msg = ChatAssistantMessage(
+            role="assistant",
+            content="Paris",
+            reasoning_details=[{
+                "type": "reasoning.encrypted",
+                "data": "blob",
+                "format": "anthropic-claude-v1",
+            }],
+        )
+        dumped = msg.model_dump(mode="json", exclude_none=True, by_alias=True)
+        assert "reasoning_details" in dumped
+        assert dumped["reasoning_details"][0]["data"] == "blob"
+        assert dumped["reasoning_details"][0]["type"] == "reasoning.encrypted"
 
 
 class TestAnalyzeComplexityOpenrouter:

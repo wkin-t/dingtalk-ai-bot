@@ -182,6 +182,7 @@ async def call_openai_stream(
             async for evt in _stream_via_responses(
                 client, model_name, config, messages,
                 temperature, top_p, thinking_level, start_time,
+                conversation_id=conversation_id,
             ):
                 yield evt
 
@@ -298,43 +299,92 @@ async def _stream_via_responses(
     top_p: Optional[float],
     thinking_level: str,
     start_time: float,
+    conversation_id: str = "",
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Responses API 路径（Claude/GPT 上游）。
 
+    多轮 thinking 通过 previous_response_id 机制保留：
+    - 服务端用 store=True 持久化 response
+    - 下一轮把上一轮的 response.id 作为 previous_response_id 传回，仅发送新 user 消息
+    - 状态保存在 responses_state（Redis + 文件降级，TTL 7 天）
+    - previous_response_id 失效时清除状态、回退全量历史重试一次
+
     Stage B 的 system cache_control 在此路径丢失（instructions 是 string 字段，
     无法挂 ephemeral），上游可能仍做隐式 prompt cache。
-    多轮 thinking signature 暂不支持（Responses API 用 previous_response_id 而非
-    reasoning_details，需要后续接入）。
     """
-    instructions, input_items = _split_messages_for_responses(messages, config["supports_vision"])
+    from app import responses_state
 
-    create_kwargs: Dict[str, Any] = {
-        "model": model_name,
-        "input": input_items,
-        "stream": True,
-    }
-    if instructions:
-        create_kwargs["instructions"] = instructions
+    full_instructions, full_input_items = _split_messages_for_responses(messages, config["supports_vision"])
 
-    _model_base = model_name.split("/")[-1]
-    if not (config["supports_reasoning"] or any(
-        _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
-    )):
-        create_kwargs["temperature"] = temperature
-    if top_p is not None:
-        create_kwargs["top_p"] = top_p
+    # 尝试用 previous_response_id 缩短上下文 + 保留 thinking
+    prev_response_id = responses_state.get_response_id(conversation_id) if conversation_id else None
 
-    effort = EFFORT_MAPPING.get(thinking_level)
-    if config["supports_reasoning"] and effort and effort != "none":
-        create_kwargs["reasoning"] = {"effort": effort}
+    def _last_user_only(items: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        for item in reversed(items):
+            if item.get("role") == "user":
+                return [item]
+        return None
 
-    stream = await client.responses.create(**create_kwargs)
+    if prev_response_id:
+        slim = _last_user_only(full_input_items)
+        if slim:
+            input_items = slim
+        else:
+            prev_response_id = None
+            input_items = full_input_items
+    else:
+        input_items = full_input_items
+
+    def _build_kwargs(use_prev: bool, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        kw: Dict[str, Any] = {
+            "model": model_name,
+            "input": items,
+            "stream": True,
+            "store": True,
+        }
+        if full_instructions:
+            kw["instructions"] = full_instructions
+
+        _model_base = model_name.split("/")[-1]
+        if not (config["supports_reasoning"] or any(
+            _model_base.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")
+        )):
+            kw["temperature"] = temperature
+        if top_p is not None:
+            kw["top_p"] = top_p
+
+        effort = EFFORT_MAPPING.get(thinking_level)
+        if config["supports_reasoning"] and effort and effort != "none":
+            kw["reasoning"] = {"effort": effort}
+
+        if use_prev and prev_response_id:
+            kw["previous_response_id"] = prev_response_id
+        return kw
+
+    create_kwargs = _build_kwargs(use_prev=True, items=input_items)
+
+    try:
+        stream = await client.responses.create(**create_kwargs)
+    except Exception as e:
+        msg = str(e).lower()
+        is_prev_id_error = prev_response_id and (
+            "previous_response_id" in msg or "previous response" in msg or "not found" in msg
+        )
+        if is_prev_id_error:
+            print(f"⚠️ [OpenAI/responses] previous_response_id 失效，清状态回退全量历史重试")
+            if conversation_id:
+                responses_state.clear_response_id(conversation_id)
+            create_kwargs = _build_kwargs(use_prev=False, items=full_input_items)
+            stream = await client.responses.create(**create_kwargs)
+        else:
+            raise
 
     thinking_sent = False
     input_tokens = 0
     output_tokens = 0
     content_chars = 0
     actual_model = model_name
+    new_response_id: Optional[str] = None
 
     async for event in stream:
         event_type = getattr(event, "type", None)
@@ -362,6 +412,9 @@ async def _stream_via_responses(
             response = getattr(event, "response", None)
             if response is None:
                 continue
+            rid = getattr(response, "id", None)
+            if rid:
+                new_response_id = rid
             mdl = getattr(response, "model", None)
             if mdl:
                 actual_model = mdl
@@ -386,6 +439,10 @@ async def _stream_via_responses(
     if content_chars == 0 and output_tokens == 0:
         yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
         return
+
+    # 成功响应：存 response.id 给下一轮 previous_response_id 用
+    if new_response_id and conversation_id:
+        responses_state.set_response_id(conversation_id, new_response_id)
 
     yield {
         "usage": {

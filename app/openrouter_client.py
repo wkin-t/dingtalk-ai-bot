@@ -41,14 +41,31 @@ def _build_client() -> OpenRouter:
 
 
 def _is_complete_reasoning(rd: list) -> bool:
-    """确保 reasoning_details 完整（含 signature/data），防残体写入死锁会话。"""
+    """确保 reasoning_details 完整，防残体写入死锁会话。
+
+    分类型校验：
+    - reasoning.encrypted: 必须有 data（Anthropic 加密 blob）
+    - reasoning.text: 必须有 signature（Anthropic 防篡改校验）
+    - thinking / reasoning (legacy/Anthropic-native): signature 或 data 任一
+    - reasoning.summary / 其他类型: 无强制字段，仅类型存在即视为完整
+    残体送下一轮会被上游拒绝。
+    """
     if not isinstance(rd, list) or not rd:
         return False
-    return all(
-        item.get("signature") or item.get("data")
-        for item in rd
-        if item.get("type") in ("thinking", "reasoning")
-    )
+    for item in rd:
+        if not isinstance(item, dict):
+            return False
+        t = item.get("type", "")
+        if t == "reasoning.encrypted":
+            if not item.get("data"):
+                return False
+        elif t == "reasoning.text":
+            if not item.get("signature"):
+                return False
+        elif t in ("thinking", "reasoning"):
+            if not (item.get("signature") or item.get("data")):
+                return False
+    return True
 
 
 def _serialize_rd(rd_objects: list) -> List[Dict[str, Any]]:
