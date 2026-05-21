@@ -176,9 +176,7 @@ def _load_soul(conversation_id: str) -> str:
         return ""
 
 
-def _get_bot_name(backend: str) -> str:
-    """根据 AI 后端返回 bot 显示名称"""
-    return {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(backend, "Gem")
+
 
 
 def _shorten_model_name(model: str) -> str:
@@ -976,7 +974,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             else:
                 history_messages = full_history
 
-            bot_name = _get_bot_name(AI_BACKEND)
+            from app.config import get_bot_display_name
+            bot_name = get_bot_display_name()
             from datetime import datetime, timezone, timedelta
             from app.config import ENABLE_CACHE_BLOCKS
             from app.ai.system_prompt import build_system_prompt_blocks

@@ -5,33 +5,6 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
-class TestGetBotName:
-    """_get_bot_name 后端→显示名称映射测试"""
-
-    def test_gemini_returns_gem(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("gemini") == "Gem"
-
-    def test_openclaw_returns_claw(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("openclaw") == "Claw"
-
-    def test_openai_returns_xiaog(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("openai") == "小G"
-
-    def test_openrouter_returns_xiaoke(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("openrouter") == "小克"
-
-    def test_unknown_backend_falls_back_to_gem(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("unknown-backend") == "Gem"
-
-    def test_empty_string_falls_back_to_gem(self):
-        from app.dingtalk_bot import _get_bot_name
-        assert _get_bot_name("") == "Gem"
-
 
 class TestShortenModelName:
     """_shorten_model_name 模型名归一化测试"""

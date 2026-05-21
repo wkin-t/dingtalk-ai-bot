@@ -280,13 +280,13 @@ class AIHandler:
           - 如果 ENABLE_CACHE_BLOCKS=True 且后端支持: list of blocks
           - 否则: str（向下兼容）
         """
-        from app.config import ENABLE_CACHE_BLOCKS, AI_BACKEND
+        from app.config import ENABLE_CACHE_BLOCKS, AI_BACKEND, get_bot_display_name
         from app.ai.system_prompt import build_system_prompt_blocks
 
         beijing_tz = timezone(timedelta(hours=8))
         current_date = datetime.now(beijing_tz)
 
-        bot_name = {"gemini": "Gem", "openclaw": "Claw", "openai": "AI", "openrouter": "小克"}.get(AI_BACKEND, "Gem")
+        bot_name = get_bot_display_name()
 
         blocks = build_system_prompt_blocks(
             group_info=group_info,
@@ -308,32 +308,7 @@ class AIHandler:
 
         return format_history_with_meta(history_messages, current_bot_id, cutoff_at=cutoff_at)
 
-    def _format_history(self, history_messages: List[Dict]) -> List[Dict]:
-        """# DEPRECATED: 使用 _format_history_with_meta 后再经过 message_transform。"""
-        formatted_history = []
-        for msg in history_messages:
-            formatted_msg = {"role": msg["role"]}
-            msg_content = msg.get("content", "")
-            timestamp = msg.get("timestamp")
-
-            # 如果有时间戳，添加到内容前面
-            if timestamp and msg["role"] == "user":
-                formatted_msg["content"] = f"[{timestamp}] {msg_content}"
-            elif msg["role"] == "assistant" and msg.get("bot_id"):
-                # 历史消息标注 AI 来源（仅用于上下文区分，不作为输出格式）
-                msg_bot_id = msg["bot_id"]
-                bot_source = {"gemini": "Gem", "openclaw": "Claw", "openai": "小G", "openrouter": "小克"}.get(msg_bot_id, msg_bot_id)
-                tag = f"[来自{bot_source}]"
-                if not msg_content.startswith(tag):
-                    formatted_msg["content"] = f"{tag} {msg_content}"
-                else:
-                    formatted_msg["content"] = msg_content
-            else:
-                formatted_msg["content"] = msg_content
-
-            formatted_history.append(formatted_msg)
-
-        return formatted_history
+    
 
     async def _route_model(self, content: str, has_images: bool) -> tuple:
         """

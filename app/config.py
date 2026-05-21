@@ -195,6 +195,7 @@ IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", AI_BACKEND)
 
 # Bot 实例标识 (多 bot 共存时区分消息来源)
 BOT_ID = os.getenv("BOT_ID", AI_BACKEND)
+BOT_NAME = os.getenv("BOT_NAME", "")  # 显示名称，不设则按后端 + 实际模型自动推断
 
 # 上下文配置
 MAX_HISTORY_LENGTH = int(os.getenv("MAX_HISTORY_LENGTH", 50)) # 发送给 Gemini 的最大条数
@@ -243,6 +244,30 @@ MODEL_PRO    = os.getenv("MODEL_PRO",    _md["pro"])     # pro 档（复杂推�
 DEFAULT_MODEL     = MODEL_PRO
 GEMINI_MODEL_LITE = MODEL_ROUTER
 GEMINI_MODEL_FAST = MODEL_FAST
+
+
+def get_bot_display_name() -> str:
+    """当前 bot 的显示名称。
+    优先使用 BOT_NAME 环境变量；否则按 AI_BACKEND 推断，
+    openai 后端额外看 MODEL_PRO/MODEL_FAST 以区分 s2a 透传的不同 provider。
+    """
+    if BOT_NAME:
+        return BOT_NAME
+    if AI_BACKEND == "gemini":
+        return "Gem"
+    if AI_BACKEND == "openclaw":
+        return "Claw"
+    if AI_BACKEND == "openrouter":
+        return "小克"
+    if AI_BACKEND == "openai":
+        model = MODEL_PRO or MODEL_FAST or ""
+        if model.startswith("anthropic/"):
+            return "小克"
+        if "gemini" in model.lower() or model.startswith("google/"):
+            return "Gem"
+        return "小G"
+    return "Gem"
+
 
 # 是否启用 thinking 模式 (显示模型的思考过程)
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
