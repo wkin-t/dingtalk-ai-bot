@@ -191,7 +191,22 @@ def get_agent_for_conversation(conversation_id: str) -> str | None:
 
 # AI 后端选择: gemini | openclaw
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
-IMAGE_BACKEND = os.getenv("IMAGE_BACKEND", AI_BACKEND)
+
+def _auto_image_backend() -> str:
+    """按 OPENAI_IMAGE_MODEL 名称自动推断生图后端。
+    sub2api 的 Gemini 渠道不支持 /v1/images/generations（inline_data 无法转 OpenAI 格式），
+    因此 Gemini/Imagen 模型走 google-genai SDK 直连，GPT 模型走 sub2api images 端口。
+    可通过 IMAGE_BACKEND 环境变量显式覆盖。
+    """
+    explicit = os.getenv("IMAGE_BACKEND")
+    if explicit:
+        return explicit
+    img_model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+    if any(x in img_model.lower() for x in ("gemini", "imagen")):
+        return "gemini"
+    return "openai"
+
+IMAGE_BACKEND = _auto_image_backend()
 
 # Bot 实例标识 (多 bot 共存时区分消息来源)
 BOT_ID = os.getenv("BOT_ID", AI_BACKEND)

@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """OpenAI 官方 SDK 客户端 - 用于 OPENAI_API_BASE (sub2api 中转站) 路径"""
+import asyncio
 import json
 import re
 import time
 import traceback
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 import httpx
+import openai
 from openai import AsyncOpenAI
 
 from app.config import (
@@ -51,6 +53,28 @@ def _build_client() -> AsyncOpenAI:
         base_url=OPENAI_API_BASE,
         http_client=http_client,
     )
+
+
+async def _retry_create(create_fn: Callable, max_retries: int = 2) -> Any:
+    """上游临时故障（502/503/连接失败）自动重试，指数退避，最多 max_retries 次。
+    只在 stream.create() 建立前失败时重试——流式 yield 已开始后不适用。
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await create_fn()
+        except (openai.InternalServerError, openai.APIConnectionError) as e:
+            status = getattr(e, "status_code", None) or 0
+            retryable = (
+                status in (502, 503)
+                or "upstream" in str(e).lower()
+                or isinstance(e, openai.APIConnectionError)
+            )
+            if retryable and attempt < max_retries:
+                wait = 2 ** attempt  # 1s, 2s
+                print(f"⚠️ [重试 {attempt + 1}/{max_retries}] 上游临时错误 ({status or type(e).__name__})，{wait}s 后重试")
+                await asyncio.sleep(wait)
+                continue
+            raise
 
 
 def _is_complete_reasoning(rd: list) -> bool:
@@ -227,7 +251,7 @@ async def _stream_via_chat_completions(
     }
     if any(_model_base.startswith(p) for p in ("gpt-", "o1", "o3", "o4", "text-")):
         create_kwargs["stream_options"] = {"include_usage": True}
-    stream = await client.chat.completions.create(**create_kwargs)
+    stream = await _retry_create(lambda: client.chat.completions.create(**create_kwargs))
 
     thinking_sent = False
     input_tokens = 0
@@ -364,7 +388,7 @@ async def _stream_via_responses(
     create_kwargs = _build_kwargs(use_prev=True, items=input_items)
 
     try:
-        stream = await client.responses.create(**create_kwargs)
+        stream = await _retry_create(lambda: client.responses.create(**create_kwargs))
     except Exception as e:
         msg = str(e).lower()
         is_prev_id_error = prev_response_id and (
@@ -375,7 +399,7 @@ async def _stream_via_responses(
             if conversation_id:
                 responses_state.clear_response_id(conversation_id)
             create_kwargs = _build_kwargs(use_prev=False, items=full_input_items)
-            stream = await client.responses.create(**create_kwargs)
+            stream = await _retry_create(lambda: client.responses.create(**create_kwargs))
         else:
             raise
 
