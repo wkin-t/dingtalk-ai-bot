@@ -155,22 +155,28 @@ async def _edit_with_gemini(
     image_bytes: bytes,
     prompt: str,
 ) -> List[bytes]:
-    """Imagen edit_image API 图片编辑"""
+    """Gemini 2.0 Flash 图片编辑（generate_content 多模态输出）"""
     from google.genai import types
     loop = asyncio.get_running_loop()
 
     def _call():
-        raw_ref = types.RawReferenceImage(
-            reference_image=types.Image(image_bytes=image_bytes, mime_type="image/jpeg"),
-            reference_id=0,
-        )
-        response = genai_client.models.edit_image(
+        response = genai_client.models.generate_content(
             model=GEMINI_IMAGE_EDIT_MODEL,
-            prompt=prompt,
-            reference_images=[raw_ref],
-            config=types.EditImageConfig(number_of_images=1),
+            contents=[
+                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=image_bytes)),
+                types.Part(text=prompt),
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+            ),
         )
-        return [img.image.image_bytes for img in response.generated_images]
+        result = []
+        for candidate in response.candidates:
+            for part in candidate.content.parts:
+                if (hasattr(part, "inline_data") and part.inline_data
+                        and part.inline_data.mime_type.startswith("image/")):
+                    result.append(part.inline_data.data)
+        return result
 
     images = await loop.run_in_executor(None, _call)
     if not images:
