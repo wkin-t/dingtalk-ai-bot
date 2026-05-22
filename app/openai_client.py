@@ -340,8 +340,13 @@ async def _stream_via_responses(
 
     full_instructions, full_input_items = _split_messages_for_responses(messages, config["supports_vision"])
 
-    # 尝试用 previous_response_id 缩短上下文 + 保留 thinking
-    prev_response_id = responses_state.get_response_id(conversation_id) if conversation_id else None
+    # previous_response_id 仅对支持 store 的上游有效（OpenAI 原生），Anthropic 不支持
+    _supports_store = not model_name.startswith("anthropic/")
+    prev_response_id = (
+        responses_state.get_response_id(conversation_id)
+        if (conversation_id and _supports_store)
+        else None
+    )
 
     def _last_user_only(items: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
         for item in reversed(items):
@@ -360,11 +365,13 @@ async def _stream_via_responses(
         input_items = full_input_items
 
     def _build_kwargs(use_prev: bool, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Anthropic 没有 Responses API 服务端存储，sub2api 转发 store=True 会 502
+        _supports_store = not model_name.startswith("anthropic/")
         kw: Dict[str, Any] = {
             "model": model_name,
             "input": items,
             "stream": True,
-            "store": True,
+            "store": _supports_store,
         }
         if full_instructions:
             kw["instructions"] = full_instructions

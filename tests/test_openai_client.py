@@ -348,11 +348,36 @@ def _make_response_completed_event(response_id="resp_test_001"):
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
 @patch("app.openai_client.AsyncOpenAI")
-async def test_responses_payload_includes_store_true(
+async def test_responses_store_false_for_anthropic_model(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """每次 Responses API 调用都必须带 store=True，否则后续无法用 previous_response_id 继续"""
+    """Anthropic 模型不支持 store，必须传 store=False，否则 sub2api 转发会 502"""
     mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        conversation_id="conv-A",
+    ):
+        pass
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs.get("store") is False
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_store_true_for_openai_model(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """GPT 模型支持 store，必须传 store=True 才能使用 previous_response_id"""
+    mock_get_config.return_value = _model_config("gpt-5.5")
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
     mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
@@ -376,8 +401,8 @@ async def test_responses_payload_includes_store_true(
 async def test_responses_with_prior_id_sends_only_last_user_and_previous_response_id(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """有 previous_response_id 时只发最后一条 user 消息，历史在服务端保留"""
-    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    """有 previous_response_id 时只发最后一条 user 消息，历史在服务端保留（仅 GPT 支持）"""
+    mock_get_config.return_value = _model_config("gpt-5.5")
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
     mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
@@ -444,8 +469,8 @@ async def test_responses_stores_response_id_after_stream(
 async def test_responses_retries_full_history_when_prev_id_invalid(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, mock_clear_rid,
 ):
-    """previous_response_id 失效时清状态并用全量历史重试"""
-    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    """previous_response_id 失效时清状态并用全量历史重试（仅 GPT 支持 store）"""
+    mock_get_config.return_value = _model_config("gpt-5.5")
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
 
