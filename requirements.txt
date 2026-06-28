@@ -35,6 +35,6 @@ pycryptodome
 # OpenAI 官方 SDK (openai 后端)
 openai>=1.50.0
 # OpenRouter 官方 SDK (openrouter 后端)
-openrouter>=0.9.1
+openrouter>=0.10.8
 # 腾讯云 COS SDK (生图存储)
 cos-python-sdk-v5
