@@ -16,10 +16,12 @@ from app.config import (
     MODEL_ROUTER,
     OPENAI_API_BASE,
     OPENAI_API_KEY_CUSTOM,
+    SEARCH_FALLBACK_PROVIDER,
     get_litellm_model_config,
     get_route_key,
 )
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
+from app.gemini_client import google_search
 
 EFFORT_MAPPING = {
     "minimal": "none",
@@ -28,6 +30,48 @@ EFFORT_MAPPING = {
     "high": "high",
     "xhigh": "xhigh",
 }
+
+
+def _last_user_text(messages: List[Dict[str, Any]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            return "\n".join(part for part in parts if part)
+    return ""
+
+
+async def _build_search_fallback_summary(messages: List[Dict[str, Any]]) -> Optional[str]:
+    if SEARCH_FALLBACK_PROVIDER != "gemini":
+        return None
+    query = _last_user_text(messages)
+    if not query:
+        return None
+    return await google_search(query)
+
+
+def _inject_search_summary_message(
+    messages: List[Dict[str, Any]],
+    summary: str,
+) -> List[Dict[str, Any]]:
+    search_message = {
+        "role": "system",
+        "content": (
+            "## 联网搜索结果\n"
+            "以下内容来自实时搜索摘要。回答涉及当前信息时优先使用这些结果；"
+            "如果摘要不足以支持结论，请明确说明不确定。\n\n"
+            f"{summary}"
+        ),
+    }
+    return [search_message, *messages]
 
 
 def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -48,11 +92,13 @@ def _build_client() -> AsyncOpenAI:
     http_client = None
     if HTTPX_PROXY:
         http_client = httpx.AsyncClient(proxy=HTTPX_PROXY)
-    return AsyncOpenAI(
-        api_key=OPENAI_API_KEY_CUSTOM or "dummy",
-        base_url=OPENAI_API_BASE,
-        http_client=http_client,
-    )
+    kwargs: Dict[str, Any] = {
+        "api_key": OPENAI_API_KEY_CUSTOM or "dummy",
+        "http_client": http_client,
+    }
+    if OPENAI_API_BASE:
+        kwargs["base_url"] = OPENAI_API_BASE
+    return AsyncOpenAI(**kwargs)
 
 
 async def _retry_create(create_fn: Callable, max_retries: int = 2) -> Any:
@@ -195,18 +241,39 @@ async def call_openai_stream(
 
     try:
         client = _build_client()
+        native_search = enable_search and (not is_gemini_upstream) and bool(config.get("supports_search"))
+        fallback_summary = None
+        request_messages = messages
+        if enable_search and not native_search:
+            fallback_summary = await _build_search_fallback_summary(messages)
+            if fallback_summary:
+                request_messages = _inject_search_summary_message(messages, fallback_summary)
+                print("🔍 [OpenAI] 已注入 Gemini 搜索摘要")
+            else:
+                print("⚠️ [OpenAI] 搜索已请求，但没有可用 fallback 摘要")
+
+        if enable_search:
+            yield {
+                "search": {
+                    "requested": True,
+                    "native_enabled": bool(native_search),
+                    "fallback_injected": bool(fallback_summary),
+                    "reason": "native" if native_search else ("fallback_gemini" if fallback_summary else "unavailable"),
+                }
+            }
 
         if is_gemini_upstream:
             async for evt in _stream_via_chat_completions(
-                client, model_name, config, messages,
+                client, model_name, config, request_messages,
                 temperature, top_p, thinking_level, start_time,
             ):
                 yield evt
         else:
             async for evt in _stream_via_responses(
-                client, model_name, config, messages,
+                client, model_name, config, request_messages,
                 temperature, top_p, thinking_level, start_time,
                 conversation_id=conversation_id,
+                enable_search=enable_search,
             ):
                 yield evt
 
@@ -324,6 +391,7 @@ async def _stream_via_responses(
     thinking_level: str,
     start_time: float,
     conversation_id: str = "",
+    enable_search: bool = False,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Responses API 路径（Claude/GPT 上游）。
 
@@ -387,6 +455,9 @@ async def _stream_via_responses(
         effort = EFFORT_MAPPING.get(thinking_level)
         if config["supports_reasoning"] and effort and effort != "none":
             kw["reasoning"] = {"effort": effort}
+
+        if enable_search and config.get("supports_search"):
+            kw["tools"] = [{"type": "web_search_preview"}]
 
         if use_prev and prev_response_id:
             kw["previous_response_id"] = prev_response_id

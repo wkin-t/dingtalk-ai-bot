@@ -12,7 +12,8 @@ services:
     restart: always
     network_mode: "host"
     environment:
-      - AI_BACKEND=openai
+      - AI_BACKEND=openrouter
+      - BOT_ID=openrouter
       - FLASK_PORT=35002
     env_file:
       - .env.openrouter

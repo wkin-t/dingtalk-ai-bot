@@ -387,6 +387,88 @@ class TestOpenrouterClientStream:
             assert assistant_msg["reasoning_details"] == prior_rd
 
     @pytest.mark.asyncio
+    async def test_enable_search_adds_web_plugin_when_supported(self):
+        """OpenRouter 支持搜索且 enable_search=True 时，应下发 web plugin。"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-haiku-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(prompt_tokens=3, completion_tokens=2)
+
+        async def mock_aiter(self):
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        with patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            async for _ in call_openrouter_stream(
+                [{"role": "user", "content": "查一下今天新闻"}],
+                target_model="fast",
+                enable_search=True,
+            ):
+                pass
+
+            call_kwargs = mock_client.chat.send_async.call_args.kwargs
+            assert "plugins" in call_kwargs
+            assert call_kwargs["plugins"][0].id == "web"
+
+    @pytest.mark.asyncio
+    async def test_enable_search_omits_web_plugin_when_config_disabled(self):
+        """OpenRouter 模型配置不支持搜索时，即使 enable_search=True 也不应下发 plugin。"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-haiku-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(prompt_tokens=3, completion_tokens=2)
+
+        async def mock_aiter(self):
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        disabled_config = {
+            "fast": {
+                "model": "anthropic/claude-haiku-4-5",
+                "fallbacks": [],
+                "provider_order": ["Anthropic"],
+                "provider_sort": "",
+                "supports_reasoning": False,
+                "supports_search": False,
+                "supports_vision": True,
+            }
+        }
+
+        with patch("app.openrouter_client.OPENROUTER_MODEL_CONFIG", disabled_config), \
+             patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            async for _ in call_openrouter_stream(
+                [{"role": "user", "content": "查一下今天新闻"}],
+                target_model="fast",
+                enable_search=True,
+            ):
+                pass
+
+            call_kwargs = mock_client.chat.send_async.call_args.kwargs
+            assert "plugins" not in call_kwargs
+
+    @pytest.mark.asyncio
     async def test_sdk_pydantic_serialization_preserves_reasoning_details(self):
         """合同测试：openrouter SDK 的 ChatAssistantMessage Pydantic 模型必须把 reasoning_details
         作为顶层字段保留在序列化输出里（OpenRouter API 接受 normalized 格式）。

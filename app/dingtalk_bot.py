@@ -36,6 +36,7 @@ from app.config import (
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.ai.handler import TEMPERATURE_MAP
+from app.ai.router import should_force_search
 from app.ai.sampling_clamp import clamp_temperature
 from app.dingtalk_card import DingTalkCardHelper
 from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
@@ -1087,7 +1088,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
-            need_search = complexity.get("need_search", False)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         elif AI_BACKEND == "openrouter":
@@ -1108,7 +1109,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
-            need_search = complexity.get("need_search", False)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
@@ -1128,7 +1129,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", GEMINI_MODEL_FAST)
             thinking_level = complexity.get("thinking_level", "low")
-            need_search = complexity.get("need_search", False)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
@@ -1283,6 +1284,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         is_first_chunk = True
         is_thinking = False  # 是否正在输出 thinking
         usage_info = None  # 使用统计信息
+        search_info = None
 
         sender_name = incoming_message.sender_nick or "User"
         at_header = f"👋 @{sender_name} \n\n"
@@ -1344,6 +1346,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 # 处理使用统计
                 if "usage" in chunk:
                     usage_info = chunk["usage"]
+                    continue
+
+                if "search" in chunk:
+                    search_info = chunk["search"]
                     continue
 
                 if "error" in chunk:
@@ -1494,14 +1500,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # Gateway 返回的 model: Gemini 返回实际模型名，OpenClaw 固定返回 "openclaw"
             # OpenClaw 模式不显示模型名（因为返回的是 agent ID，不是实际模型）
             if AI_BACKEND == "openclaw":
-                search_icon = "🌐" if need_search else ""
+                search_icon = "🌐" if search_info and (search_info.get("native_enabled") or search_info.get("fallback_injected")) else ""
                 status_text += f"\n\n<font color='#808080' size='2'>🧠 {thinking_level} {search_icon}</font>"
             else:
                 if usage_info and usage_info.get("model"):
                     model_short = _shorten_model_name(usage_info["model"])
                 else:
                     model_short = _shorten_model_name(target_model)
-                search_icon = "🌐" if need_search else ""
+                search_icon = "🌐" if search_info and (search_info.get("native_enabled") or search_info.get("fallback_injected")) else ""
                 # 显示真实下发温度 + top_p，⚙️ 标记手动设置
                 _display_temp = final_temp if 'final_temp' in dir() else temperature
                 _temp_marker = "⚙️" if (override_rec and override_rec.get("temperature") is not None) else ""

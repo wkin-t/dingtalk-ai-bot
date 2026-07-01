@@ -39,6 +39,17 @@ SIMPLE_KEYWORDS = [
     "是什么", "什么是", "定义", "简单",
 ]
 
+FORCE_SEARCH_KEYWORDS = [
+    "联网", "搜索", "查一下", "查下", "查查", "搜一下", "搜下",
+    "最新", "今天", "现在", "当前", "实时", "新闻", "股价", "天气",
+]
+
+
+def should_force_search(content: str) -> bool:
+    """判断用户是否显式要求或明显需要实时搜索。"""
+    content_lower = (content or "").lower()
+    return any(keyword in content_lower for keyword in FORCE_SEARCH_KEYWORDS)
+
 
 def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     """
@@ -132,5 +143,6 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     return {
         "model": model,
         "thinking_level": thinking_level,
+        "need_search": should_force_search(content),
         "reason": reason
     }

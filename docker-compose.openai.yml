@@ -13,6 +13,7 @@ services:
     network_mode: "host"
     environment:
       - AI_BACKEND=openai
+      - BOT_ID=openai
       - FLASK_PORT=35001
       - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key.json
     env_file:

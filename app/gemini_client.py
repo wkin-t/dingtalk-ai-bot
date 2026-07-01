@@ -279,6 +279,15 @@ async def call_gemini_stream(
         if enable_search:
             tools.append(types.Tool(google_search=types.GoogleSearch()))
             print("🔍 已启用 Google Search (实时搜索)")
+        if enable_search:
+            yield {
+                "search": {
+                    "requested": True,
+                    "native_enabled": bool(tools),
+                    "fallback_injected": False,
+                    "reason": "native" if tools else "not_requested",
+                }
+            }
 
         # 配置生成参数
         config_kwargs = {

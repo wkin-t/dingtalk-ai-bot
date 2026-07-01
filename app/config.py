@@ -289,6 +289,7 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 
 # 是否启用 Google Search (让 AI 自动搜索实时信息)
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "true").lower() == "true"
+SEARCH_FALLBACK_PROVIDER = os.getenv("SEARCH_FALLBACK_PROVIDER", "gemini").strip().lower()
 
 # 多 agent 角色重塑 + cache + 采样改造 feature flags
 ENABLE_CACHE_BLOCKS    = _get_bool("ENABLE_CACHE_BLOCKS", True)       # B: system prompt 分块 cache

@@ -10,9 +10,12 @@ from openrouter import OpenRouter
 from openrouter.components import (
     ProviderPreferences,
     ProviderSortConfig,
-    Reasoning,
     WebSearchPlugin,
 )
+try:
+    from openrouter.components import Reasoning
+except ImportError:
+    from openrouter.components import ReasoningConfig as Reasoning
 
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
 from app.config import (
@@ -160,6 +163,15 @@ async def call_openrouter_stream(
         plugins_list = None
         if enable_search and config.get("supports_search"):
             plugins_list = [WebSearchPlugin(id="web")]
+        if enable_search:
+            yield {
+                "search": {
+                    "requested": True,
+                    "native_enabled": bool(plugins_list),
+                    "fallback_injected": False,
+                    "reason": "native" if plugins_list else "unsupported",
+                }
+            }
 
         # ── Session ID（OpenRouter 可观测性，哈希保护用户标识）──
         session_id_val = None

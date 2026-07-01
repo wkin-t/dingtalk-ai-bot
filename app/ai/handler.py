@@ -200,6 +200,7 @@ class AIHandler:
         full_thinking = ""
         full_reasoning_details = None  # 收集 Anthropic thinking blocks（含 signature，用于多轮 thinking）
         usage_info = None
+        search_info = None
 
         # 解析手动采样覆盖（D.3）
         from app.ai.sampling_pipeline import resolve_sampling
@@ -224,6 +225,11 @@ class AIHandler:
                 # 处理使用统计
                 if "usage" in chunk:
                     usage_info = chunk["usage"]
+                    continue
+
+                if "search" in chunk:
+                    search_info = chunk["search"]
+                    print(f"🔍 [AIHandler] 搜索状态: {search_info}")
                     continue
 
                 if "error" in chunk:
@@ -350,7 +356,8 @@ class AIHandler:
 
         target_model = complexity.get("model", "fast")
         thinking_level = complexity.get("thinking_level", "low")
-        need_search = complexity.get("need_search", False)
+        from app.ai.router import should_force_search
+        need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
         temp_label = complexity.get("temperature", "balanced")
         temperature = TEMPERATURE_MAP.get(str(temp_label), 0.7)
         temperature = clamp_temperature(temperature, AI_BACKEND)
