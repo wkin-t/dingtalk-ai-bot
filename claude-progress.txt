@@ -26,13 +26,23 @@
   实际把 web_search 翻译成 Anthropic 原生 web_search（模型自决、挂载不计费），而非 progress/CLAUDE.md
   记录的 "OpenRouter web plugin(Exa) 每请求付费"——该记录存疑，但红队未提供 sub2api 源码直证，待核实。
 
+- 🌐 图标"只在真搜了才亮"修复（commit cbf3df6，已部署三容器）：图标判定从 native_enabled
+  改为 app/ai/backend.py::should_show_search_icon()——只认真实搜索信号（Gemini grounding_metadata /
+  Responses web_search_call+url_citation / OpenRouter annotations）。客户端检测到即补发
+  {"search":{"executed":True}}，消费端（dingtalk_bot/handler）改合并而非覆盖。每处加 🌐[搜索执行]
+  日志探针。gemini 路径第 3 级实测确证：探针打印 + executed=True + 1246 字联网内容。
+  GPT 路径受 sub2api gpt-5.5 池当前 503 阻塞未能实测透传性——留探针待恢复后 grep 验证。
+
 ## 当前正在做 / 待决策
-- 🌐 图标语义漂移（medium，未修）：全自主后每条 fast/pro 回复都常显 🌐（挂了工具就显示，
-  不代表本次真搜了）。gemini 路径可改成检测 groundingMetadata 出现才置 icon；GPT 路径
-  sub2api 丢弃 web_search_call 无信号，只能改图标语义。等用户决定是否要修。
+- ⚠️ sub2api gpt-5.5 池当前返回 503（Service temporarily unavailable，2026-07-02 实测两次+重试均 503）
+  = 用户主力 openai 容器此刻发消息会失败。上游/账号池故障，非本次改动。需关注恢复情况。
+- GPT 路径图标透传性待验证：sub2api 恢复后，用 openai 容器发一条触发搜索的消息，
+  grep "🌐 [搜索执行] Responses" 确认 web_search_call/annotation 是否透传；若不透传则 GPT 路径
+  图标恒不亮（宁缺毋滥，可接受），必要时再议 GPT 路径图标语义。
 - 费用观察：全自主已开，用户可持续观察 Google 后台 grounding 用量；若超预算再加每日上限保护。
 
 ## 下一步应做
+- sub2api gpt-5.5 恢复后验证 GPT 路径图标透传性（见上）
 - 观察全自主搜索线上表现（模型是否更愿意联网）+ grounding 费用
 - 其余未处理 finding（见 memory/service-audit-findings.md）：#15 XFF 伪造、#9/#18 顶层 genai.Client
   import 崩溃、#11/#13/#21/#22 企微+openclaw/openai 路由解包错位
@@ -40,12 +50,14 @@
 ## 已知问题
 - 多个 pre-existing Pyright 类型告警（非本次引入）
 - openai/openrouter 容器 fallback 极端降级时仍会用私人 gemini 号（未设 GEMINI_API_BASE）
+- app/openai_client.py 行尾从"单文件混合 CRLF+LF"被统一为全 LF（cbf3df6，功能无损、更标准）；
+  该文件混合行尾是历史遗留，项目无 .gitattributes，各文件 CRLF/LF 混用
 
 ## 环境状态
-- Git 分支: master | 本地=GitHub=服务器=6c5527d（2026-07-02 部署后核实，三容器 RestartCount=0）
+- Git 分支: master | 本地=GitHub=服务器=cbf3df6（2026-07-02 部署后核实，三容器 RestartCount=0）
 - 服务器 git 已配 socks 代理: http.https://github.com/.proxy socks5h://127.0.0.1:1080
 - 三容器: gemini(35000)/openai(35001)/openrouter(35002) 均 RestartCount=0 稳定运行
-- 测试: 436 passed, compile OK
+- 测试: 444 passed, compile OK
 
 ## 关键坑（详见 memory/deploy-env-pitfalls.md）
 - env 重复键后者覆盖前者：改 env 后用 `docker-compose config | grep VAR` 看解析后最终值
@@ -53,7 +65,8 @@
 - 改 env 后必须 up -d（--build），docker restart/force-recreate 可能不生效或给时序假象
 
 === 最近 commit ===
+cbf3df6 fix: 🌐 搜索图标只在真实搜索时点亮，消除全自主后的常亮误导
+4a950c7 docs: 进度更新——全自主搜索上线 + finding #2 鉴权修复 + 审查结论
 6c5527d fix: /v1/chat/completions 补 Bearer 鉴权（finding #2 高危：零鉴权开放 API 代理）
 bd3fa37 feat: 全自主搜索——fast/pro 档强制挂原生搜索工具，模型自决（lite 豁免）
 38dde7d docs: 进度更新——核实部署状态 + 161c3f6 fallback 加固补部署记录
-161c3f6 feat: 多后端原生联网搜索 + Gemini 中转 + 搜索 fallback 加固
