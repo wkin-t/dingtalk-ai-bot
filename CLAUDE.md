@@ -97,7 +97,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `.env.openclaw` → OpenClaw 后端
 - `.env.wecom` → 企业微信+钉钉双平台
 
-核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `BOT_ID`（**多容器场景必须显式设独立值**，否则默认派生自 AI_BACKEND，多容器共用 AI_BACKEND 时会撞键导致 Stage A 角色重塑失效）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）。
+核心变量: `AI_BACKEND`（gemini/openclaw/openai/openrouter）, `BOT_ID`（**多容器场景必须显式设独立值**，否则默认派生自 AI_BACKEND，多容器共用 AI_BACKEND 时会撞键导致 Stage A 角色重塑失效）, `PLATFORM`（dingtalk/wecom/both）, `GEMINI_API_KEY`, `DINGTALK_CLIENT_ID/SECRET`, `SOCKS_PROXY`, `OPENCLAW_HTTP_URL`, `OPENCLAW_GATEWAY_TOKEN`, `FLASK_PORT`（默认 35000）, `CHAT_COMPLETIONS_BEARER_TOKEN`（`/v1/chat/completions` 鉴权，**fail-closed 必配**——该端点用服务端 GEMINI_API_KEY 代付转发，未配置时拒绝服务而非裸奔）。
 
 **改 .env 注意**：`docker restart` **不重读** env_file，必须 `docker compose -f xxx.yml up -d` 才会 recreate 容器并应用新 env。recreate 会丢失之前 `docker cp` 热推到运行容器内的代码，需要重推。
 

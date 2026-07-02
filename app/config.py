@@ -323,6 +323,10 @@ CARD_TEMPLATE_ID = os.getenv("CARD_TEMPLATE_ID", "ea2d035e-20fe-447d-9fbf-c04658
 DINGTALK_PUSH_BEARER_TOKEN = os.getenv("DINGTALK_PUSH_BEARER_TOKEN", "").strip()
 DINGTALK_PUSH_IP_ALLOWLIST_RAW = os.getenv("DINGTALK_PUSH_IP_ALLOWLIST", "").strip()
 
+# /v1/chat/completions 鉴权 token（fail-closed：未配置时端点拒绝服务）。
+# 该端点用服务端 GEMINI_API_KEY 代付转发，host 网络公网可达，无鉴权等于开放 API 代理
+CHAT_COMPLETIONS_BEARER_TOKEN = os.getenv("CHAT_COMPLETIONS_BEARER_TOKEN", "").strip()
+
 # 钉钉“敲键盘”状态
 # 钉钉侧对 streaming_update 的并发/频率比较敏感；该效果在部分客户端也不明显，默认关闭。
 DINGTALK_TYPING_ENABLED = _get_bool("DINGTALK_TYPING_ENABLED", False)

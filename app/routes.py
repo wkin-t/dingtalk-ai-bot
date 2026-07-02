@@ -9,6 +9,7 @@ from app.config import (
     GEMINI_API_KEY,
     GOOGLE_ENDPOINT,
     AIOHTTP_PROXY,
+    CHAT_COMPLETIONS_BEARER_TOKEN,
     DINGTALK_CLIENT_ID,
     DINGTALK_CLIENT_SECRET,
     DINGTALK_PUSH_BEARER_TOKEN,
@@ -62,6 +63,12 @@ async def async_chat_completions():
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
+    # 用服务端 GEMINI_API_KEY 代付转发且公网可达，必须鉴权（fail-closed，参照 dingtalk_push）
+    if not CHAT_COMPLETIONS_BEARER_TOKEN:
+        return jsonify({"error": "CHAT_COMPLETIONS_BEARER_TOKEN 未配置"}), 500
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth != f"Bearer {CHAT_COMPLETIONS_BEARER_TOKEN}":
+        return jsonify({"error": "unauthorized"}), 401
     return asyncio.run(async_chat_completions())
 
 
