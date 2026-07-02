@@ -1,38 +1,46 @@
-## 最近完成
-- 多轮 thinking 两条路径全部接通
-  - TD1 (OpenRouter): _is_complete_reasoning 修复类型识别
-    旧 filter 只匹配 thinking/reasoning，实际 SDK 产出 reasoning.encrypted/text/summary，
-    导致 vacuous truth 残体可漏入下一轮。新增 7 个 normalized type 用例 + round-trip 集成测试
-  - TD2 (OpenAI Responses): 接入 previous_response_id
-    新增 app/responses_state.py（Redis + 文件降级，TTL 7 天）
-    _stream_via_responses 改造：有 prev_id 时仅发末位 user 消息 + previous_response_id；
-    无则发全量历史；store=True 始终开启；失效自动清状态回退重试一次
-    clear_cutoff.set_cutoff/reset_cutoff 同步清 response_id，避免 /clear /resume 状态不一致
-  - 测试: 394 passed (新增 TD1: 9 个；TD2: 6 + 2 + 4 个)
+## 最近完成（2026-07-02）
+- 多后端原生联网搜索上线 + 部署补齐（本地=GitHub=服务器=161c3f6，2026-07-02 二次核实+补部署：
+  此前服务器曾停在 c8af69c 缺 fallback 加固，已 git pull + 三容器 up -d --build 补齐并进容器 grep 验证）
+  - 三容器全部走 sub2api 中转 + 原生搜索工具，取代旧的"自己 google 搜完拼进 prompt"
+    - gemini: GEMINI_API_BASE 指向 sub2api /v1beta，google_search 透传 groundingMetadata 回流；
+      拆 direct_client 让生图端点仍直连 Google（GEMINI_API_KEY 语义不变）
+    - openai(gpt-5.5): Responses API web_search（GA 名，非 web_search_preview）
+    - openrouter: AI_BACKEND=openai 走 sub2api，模型改 anthropic/claude-sonnet-5，
+      web_search 被翻译成 OpenRouter web plugin(Exa)
+    - 三容器 env 开 OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true；均端到端真实代码路径验证联网成功
+  - google_search fallback 加固（161c3f6，已部署）：独立 GEMINI_SEARCH_MODEL（非 MODEL_ROUTER，
+    避免 gpt/claude 名发给 Gemini 接口 404）+ 流式（规避 Py3.14 非流式代理报错）+ SEARCH_TIMEOUT_SECONDS 超时
+  - 测试: 413 passed（2026-07-02 新会话本地真实复跑确认）
+- 多 agent 设计审查：43 个确认 finding（详见 memory/service-audit-findings.md）
 
-## 当前正在做
-- 待部署验证
+## 当前正在做 / 待决策
+- 「全自主搜索」决策待用户拍板：原生模型始终挂搜索工具让模型自决 vs 现在的关键词门控。
+  用户反馈现状"经常说不能联网、不智能"（根因：路由判 need_search=false 时没给模型挂工具）。
+  卡在计费顾虑——sub2api 的 gemini 账号是用户私人付费号，grounding 每天 1500 次内免费、
+  超出 $35/1000。用户 2026-07-02 去 Google 后台核对费用后再定；可能做"自主+每日次数上限保护"。
 
 ## 下一步应做
-- 三容器重建 + 在线观察 thinking 跨轮保持
+- 等用户 Google 后台费用确认结果 → 定搜索策略（全自主 / 自主+上限 / 保持门控）
+  （核实注：SEARCH_AUTONOMOUS 从未进过代码，交接文档称"已加 config.py:294"为误）
+- 若开自主：改 openai_client/openrouter_client/gemini_client 三处工具挂载逻辑 + config flag
+- 高危未处理 finding（见 memory）：#2 /v1/chat/completions 零鉴权可盗刷私人号（优先）
 
 ## 已知问题
 - 多个 pre-existing Pyright 类型告警（非本次引入）
+- openai/openrouter 容器 fallback 极端降级时仍会用私人 gemini 号（未设 GEMINI_API_BASE）
 
 ## 环境状态
-- Git 分支: master
-- 当前 HEAD: 4f991ff (fix: bot 显示名称按实际模型推断)
-- 服务状态: 三容器已重建并验证启动正常（2026-05-21）
-- 测试状态: 372 passed, compile OK
+- Git 分支: master | 本地=GitHub=服务器=161c3f6（2026-07-02 部署后核实，三容器 RestartCount=0）
+- 服务器 git 已配 socks 代理: http.https://github.com/.proxy socks5h://127.0.0.1:1080
+- 三容器: gemini(35000)/openai(35001)/openrouter(35002) 均 RestartCount=0 稳定运行
+- 测试: 413 passed, compile OK
 
-=== 最近 10 条 commit ===
-f55baef refactor: 完全移除 LiteLLM，迁移所有路径到官方 SDK
-c9a0669 fix: 修复路由分析失败导致 thinking_text 丢失的两处根因
-277393d fix: litellm openrouter 路径加 use_responses_api=False + drop_params=True
-bbcfffa fix: openrouter_client 去掉 socks5 代理注入，中转站路径直连即可
-fba6dbf fix: 补充 openrouter>=0.9.1 依赖，修复阶段 3 Docker 构建缺包
-cb2129f feat: 阶段 3 — OpenRouter 官方 SDK 替代 LiteLLM + USE_LEGACY_LITELLM 回退开关
-fb33032 feat: LLM SDK 规范化 + Thinking Blocks 多轮保留（阶段 1+2）
-fc31640 fix: 将 OpenRouter 路径的 cache_control 注入改为 flatten，修复 Responses API 不兼容
-840b86d fix: 移除 OpenRouter 路径的 use_responses_api=False
-6aad3d5 fix: litellm openai_api_base 路径加 drop_params=True，静默丢弃中转站不支持的参数
+## 关键坑（详见 memory/deploy-env-pitfalls.md）
+- env 重复键后者覆盖前者：改 env 后用 `docker-compose config | grep VAR` 看解析后最终值
+- runtime ghost /app/.env 让 load_dotenv 偶发覆盖 docker env：用 up -d --build 清掉
+- 改 env 后必须 up -d（--build），docker restart/force-recreate 可能不生效或给时序假象
+
+=== 最近 commit ===
+161c3f6 feat: 多后端原生联网搜索 + Gemini 中转 + 搜索 fallback 加固
+b7ab56f feat: 启用多后端原生联网搜索
+cf99999 fix: Anthropic 模型强制 store=False + 跳过 previous_response_id
