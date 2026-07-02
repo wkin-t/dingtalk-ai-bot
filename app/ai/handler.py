@@ -228,7 +228,11 @@ class AIHandler:
                     continue
 
                 if "search" in chunk:
-                    search_info = chunk["search"]
+                    # 合并而非覆盖：executed 标志在流式中途补发，需累积到同一 dict
+                    if search_info is None:
+                        search_info = dict(chunk["search"])
+                    else:
+                        search_info.update(chunk["search"])
                     print(f"🔍 [AIHandler] 搜索状态: {search_info}")
                     continue
 

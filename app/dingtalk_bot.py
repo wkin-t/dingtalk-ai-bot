@@ -1349,7 +1349,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     continue
 
                 if "search" in chunk:
-                    search_info = chunk["search"]
+                    # 合并而非覆盖：请求前发 requested/native_enabled，流式中检测到
+                    # 真实搜索信号再补发 executed=True，两者需累积到同一 dict
+                    if search_info is None:
+                        search_info = dict(chunk["search"])
+                    else:
+                        search_info.update(chunk["search"])
                     continue
 
                 if "error" in chunk:
@@ -1499,15 +1504,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 显示模型、thinking level 和联网状态
             # Gateway 返回的 model: Gemini 返回实际模型名，OpenClaw 固定返回 "openclaw"
             # OpenClaw 模式不显示模型名（因为返回的是 agent ID，不是实际模型）
+            from app.ai.backend import should_show_search_icon
             if AI_BACKEND == "openclaw":
-                search_icon = "🌐" if search_info and (search_info.get("native_enabled") or search_info.get("fallback_injected")) else ""
+                search_icon = "🌐" if should_show_search_icon(search_info) else ""
                 status_text += f"\n\n<font color='#808080' size='2'>🧠 {thinking_level} {search_icon}</font>"
             else:
                 if usage_info and usage_info.get("model"):
                     model_short = _shorten_model_name(usage_info["model"])
                 else:
                     model_short = _shorten_model_name(target_model)
-                search_icon = "🌐" if search_info and (search_info.get("native_enabled") or search_info.get("fallback_injected")) else ""
+                search_icon = "🌐" if should_show_search_icon(search_info) else ""
                 # 显示真实下发温度 + top_p，⚙️ 标记手动设置
                 _display_temp = final_temp if 'final_temp' in dir() else temperature
                 _temp_marker = "⚙️" if (override_rec and override_rec.get("temperature") is not None) else ""

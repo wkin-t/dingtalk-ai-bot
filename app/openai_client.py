@@ -487,11 +487,31 @@ async def _stream_via_responses(
     content_chars = 0
     actual_model = model_name
     new_response_id: Optional[str] = None
+    # 真实搜索信号：web_search_call item 或 url_citation annotation。
+    # sub2api 可能丢弃这些事件——丢了就不上报（图标宁可漏报也不误报常亮）。
+    # 日志探针用于部署后 grep 确认 sub2api 到底透不透这些信号。
+    search_executed_sent = False
 
     async for event in stream:
         event_type = getattr(event, "type", None)
         if not event_type:
             continue
+
+        if not search_executed_sent:
+            executed_reason = None
+            if event_type == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if item and getattr(item, "type", None) == "web_search_call":
+                    executed_reason = "web_search_call"
+            elif event_type == "response.output_text.annotation.added":
+                ann = getattr(event, "annotation", None)
+                ann_type = getattr(ann, "type", None) if ann else None
+                if ann_type in ("url_citation", "url"):
+                    executed_reason = f"annotation:{ann_type}"
+            if executed_reason:
+                search_executed_sent = True
+                print(f"🌐 [搜索执行] Responses {executed_reason} detected，本次真实联网")
+                yield {"search": {"executed": True}}
 
         if event_type == "response.output_text.delta":
             if thinking_sent:

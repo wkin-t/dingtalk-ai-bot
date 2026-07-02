@@ -385,6 +385,8 @@ async def call_gemini_stream(
 
         # 标记是否已发送 thinking 内容
         thinking_sent = False
+        # 标记是否已上报"真实执行搜索"（grounding_metadata 出现即证明用了 Google Search）
+        search_executed_sent = False
 
         # 迭代异步流式响应
         async for chunk in response:
@@ -402,6 +404,12 @@ async def call_gemini_stream(
                     continue
 
                 candidate = chunk.candidates[0]
+
+                # 真实搜索信号：模型用了 Google Search 时 candidate 带 grounding_metadata
+                if not search_executed_sent and getattr(candidate, "grounding_metadata", None):
+                    search_executed_sent = True
+                    print("🌐 [搜索执行] Gemini grounding_metadata 回流，本次真实联网")
+                    yield {"search": {"executed": True}}
 
                 # 检查 finish_reason - 如果因安全原因被阻止，报告给用户
                 if hasattr(candidate, 'finish_reason') and candidate.finish_reason:

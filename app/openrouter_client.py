@@ -204,6 +204,8 @@ async def call_openrouter_stream(
         thinking_sent = False
         actual_model = model
         last_rd_dicts: Optional[List[Dict[str, Any]]] = None
+        # 真实搜索信号：OpenRouter web plugin 命中时 delta 带 annotations（url_citation）
+        search_executed_sent = False
 
         async with await client.chat.send_async(**call_kwargs) as stream:
             async for chunk in stream:
@@ -218,6 +220,12 @@ async def call_openrouter_stream(
                     continue
 
                 delta = chunk.choices[0].delta
+
+                # 真实搜索信号：delta.annotations 出现 url_citation 即证明命中了搜索结果
+                if not search_executed_sent and getattr(delta, "annotations", None):
+                    search_executed_sent = True
+                    print("🌐 [搜索执行] OpenRouter annotations 回流，本次真实联网")
+                    yield {"search": {"executed": True}}
 
                 # 追踪 reasoning_details（含 signature）；完整数组在最后 chunk 出现
                 if delta.reasoning_details:

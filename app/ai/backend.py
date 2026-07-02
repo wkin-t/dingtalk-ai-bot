@@ -41,6 +41,21 @@ def resolve_enable_search(backend: str, target_model: str, requested: bool) -> b
     return bool(config.get("supports_search"))
 
 
+def should_show_search_icon(search_info: Optional[Dict[str, Any]]) -> bool:
+    """是否点亮 🌐 图标：仅当本次真的执行了搜索。
+
+    - executed：原生路径回流了搜索信号（Gemini grounding_metadata / Responses
+      web_search_call 或 url_citation / OpenRouter annotations）
+    - fallback_injected：gemini fallback 确实执行了搜索并注入了摘要
+
+    挂了工具但模型没搜（native_enabled 单独为真）不点亮——否则全自主下每条
+    fast/pro 回复都常亮，图标失去"本次引用了网络"的信号价值。
+    """
+    if not search_info:
+        return False
+    return bool(search_info.get("executed") or search_info.get("fallback_injected"))
+
+
 async def create_backend_stream(
     messages: List[Dict[str, Any]],
     target_model: str,
