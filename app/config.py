@@ -311,6 +311,11 @@ ENABLE_TOP_P_PIPELINE  = _get_bool("ENABLE_TOP_P_PIPELINE", True)     # C: top_p
 ENABLE_ROLE_REWRITE    = _get_bool("ENABLE_ROLE_REWRITE", True)       # A: 其他 bot 的 assistant 消息转 user
 ENABLE_SAMPLE_OVERRIDE = _get_bool("ENABLE_SAMPLE_OVERRIDE", True)    # D: /temp /top_p 手动覆盖
 
+# 全自主搜索：fast/pro 档始终给原生支持搜索的路径挂搜索工具，由模型自决是否搜索
+# （挂工具本身不产生搜索费用，模型实际搜了才计费）。false 回到路由 need_search 关键词门控。
+# 策略实现见 app/ai/backend.py::resolve_enable_search，豁免 lite 档与无原生搜索的路径。
+SEARCH_AUTONOMOUS = _get_bool("SEARCH_AUTONOMOUS", True)
+
 # 钉钉 AI 卡片模板 ID
 CARD_TEMPLATE_ID = os.getenv("CARD_TEMPLATE_ID", "ea2d035e-20fe-447d-9fbf-c04658772b24.schema")
 

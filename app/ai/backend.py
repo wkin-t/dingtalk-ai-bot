@@ -8,6 +8,39 @@ def _get_backend_name() -> str:
     return cfg.AI_BACKEND
 
 
+def resolve_enable_search(backend: str, target_model: str, requested: bool) -> bool:
+    """全自主搜索策略（SEARCH_AUTONOMOUS）：路由显式要求搜索时原样放行；否则
+    fast/pro 档只要当前路径原生支持搜索工具就强制挂载，让模型自决是否搜索
+    （不搜不产生搜索费用）。
+
+    豁免场景（保持原路由门控，防止成本/行为回退）：
+    - lite 档：问候闲聊，不挂工具零成本
+    - openclaw：不支持搜索工具
+    - openai 后端的 gemini 上游或 supports_search=False 的模型：强制开会落入
+      fallback 注入路径——每条消息真实执行一次 google 搜索，烧 Gemini 配额
+    """
+    if requested:
+        return True
+    if not cfg.SEARCH_AUTONOMOUS:
+        return False
+    if backend == "openclaw":
+        return False
+    route_key = cfg.get_route_key(target_model)
+    if route_key == "lite":
+        return False
+    if backend == "gemini":
+        return True
+    if backend == "openrouter":
+        config = cfg.OPENROUTER_MODEL_CONFIG.get(route_key, cfg.OPENROUTER_MODEL_CONFIG["fast"])
+        return bool(config.get("supports_search"))
+    # openai 后端：gemini 上游走 Chat Completions，无原生搜索工具可挂
+    config = cfg.get_litellm_model_config(route_key)
+    model_name = str(config.get("model") or "")
+    if "gemini" in model_name.lower():
+        return False
+    return bool(config.get("supports_search"))
+
+
 async def create_backend_stream(
     messages: List[Dict[str, Any]],
     target_model: str,
@@ -24,7 +57,8 @@ async def create_backend_stream(
         messages: OpenAI 格式消息列表
         target_model: 智能路由输出的模型名
         thinking_level: minimal/low/medium/high
-        enable_search: 是否启用联网搜索
+        enable_search: 是否启用联网搜索（SEARCH_AUTONOMOUS 开启时，fast/pro 档
+            原生支持搜索的路径会被 resolve_enable_search 强制为 True）
         top_p: 核采样参数，None 表示后端默认
         **kwargs: 后端特定参数（openclaw 需要 conversation_id, sender_id, sender_nick, image_data_list）
 
@@ -32,6 +66,11 @@ async def create_backend_stream(
         {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
     """
     backend = cfg.AI_BACKEND
+
+    resolved_search = resolve_enable_search(backend, target_model, enable_search)
+    if resolved_search and not enable_search:
+        print(f"🔍 [全自主搜索] {target_model} 挂载原生搜索工具（模型自决是否搜索）")
+    enable_search = resolved_search
 
     if backend == "openclaw":
         from app.openclaw_client import call_openclaw_stream
