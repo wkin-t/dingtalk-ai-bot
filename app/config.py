@@ -267,6 +267,13 @@ DEFAULT_MODEL     = MODEL_PRO
 GEMINI_MODEL_LITE = MODEL_ROUTER
 GEMINI_MODEL_FAST = MODEL_FAST
 
+# 搜索 fallback（google_search）专用模型：必须是真实 Gemini 型号，与路由模型解耦。
+# 若借用 MODEL_ROUTER，openai/openrouter 后端下它是 gpt-*/claude-* 名，发给 Gemini
+# 搜索接口会 404（见 google_search）。默认取当前最新的 Gemini flash（与生产 MODEL_FAST 一致）。
+GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "gemini-3.5-flash")
+# 搜索 fallback 超时（秒）：代理半死/网络黑洞时避免挂死整个对话流
+SEARCH_TIMEOUT_SECONDS = _get_int("SEARCH_TIMEOUT_SECONDS", 15)
+
 
 def get_bot_display_name() -> str:
     """当前 bot 的显示名称。

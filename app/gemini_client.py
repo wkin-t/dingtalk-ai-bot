@@ -18,6 +18,8 @@ from app.config import (
     DEFAULT_MODEL,
     GEMINI_MODEL_LITE,
     GEMINI_MODEL_FAST,
+    GEMINI_SEARCH_MODEL,
+    SEARCH_TIMEOUT_SECONDS,
     ENABLE_THINKING,
     SOCKS_PROXY,
     ENABLE_SEARCH,
@@ -470,23 +472,41 @@ async def call_gemini_stream(
 async def google_search(query: str) -> Optional[str]:
     """
     用 Gemini Flash + Google Search grounding 做实时搜索。
-    返回搜索摘要文本，供其他后端（如 OpenAI/LiteLLM）注入 prompt。
+    返回搜索摘要文本，供其他后端注入 prompt（原生搜索不可用时的 fallback）。
+
+    要点：
+    - 用 GEMINI_SEARCH_MODEL（真实 Gemini 型号），不借用路由模型名——
+      openai/openrouter 后端的路由模型是 gpt-*/claude-* 名，发给 Gemini 搜索接口会 404。
+    - 用 generate_content_stream 而非非流式 generate_content：后者在 Python 3.14 +
+      同步 httpx 代理下会 Network unreachable（本仓库已发生过的事故）。
+    - 外层加超时，代理半死/网络黑洞时避免挂死整个对话流（卡片永远停在 Thinking）。
 
     Returns:
-        搜索结果文本，搜索失败时返回 None
+        搜索结果文本，搜索失败/超时时返回 None
     """
-    try:
-        response = await client.aio.models.generate_content(
-            model=GEMINI_MODEL_LITE,
+    async def _run() -> Optional[str]:
+        parts: List[str] = []
+        stream = await client.aio.models.generate_content_stream(
+            model=GEMINI_SEARCH_MODEL,
             contents=f"请搜索以下问题并给出简洁的事实性回答，包含关键信息来源：\n\n{query}",
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 max_output_tokens=2048,
             ),
         )
-        if response.text:
+        async for chunk in stream:
+            if chunk.text:
+                parts.append(chunk.text)
+        return "".join(parts) if parts else None
+
+    try:
+        text = await asyncio.wait_for(_run(), timeout=SEARCH_TIMEOUT_SECONDS)
+        if text:
             print(f"🔍 [Google Search] 搜索完成: {query[:50]}...")
-            return response.text
+            return text
+        return None
+    except asyncio.TimeoutError:
+        print(f"⚠️ [Google Search] 搜索超时（>{SEARCH_TIMEOUT_SECONDS}s）: {query[:50]}")
         return None
     except Exception as e:
         print(f"⚠️ [Google Search] 搜索失败: {e}")

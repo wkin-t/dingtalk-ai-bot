@@ -481,6 +481,64 @@ class TestCallGeminiStream:
         assert "没有返回" in errors[0]["error"]
 
 
+# ─── google_search fallback 测试 ──────────────────────────────────────
+
+class TestGoogleSearchFallback:
+    """google_search 用专用搜索模型、流式收集、超时防挂死"""
+
+    @pytest.mark.asyncio
+    async def test_uses_dedicated_search_model_not_router(self):
+        """搜索用 GEMINI_SEARCH_MODEL（真实 Gemini 名），不借用可能是 gpt/claude 的路由模型"""
+        from app import gemini_client
+
+        captured = {}
+
+        async def fake_stream(**kwargs):
+            captured["model"] = kwargs.get("model")
+            chunk = MagicMock()
+            chunk.text = "特斯拉今日收盘 425 美元"
+            yield chunk
+
+        with patch.object(gemini_client, "GEMINI_SEARCH_MODEL", "gemini-3.5-flash"), \
+             patch.object(gemini_client.client.aio.models, "generate_content_stream",
+                          side_effect=lambda **kw: fake_stream(**kw)):
+            result = await gemini_client.google_search("特斯拉股价")
+
+        assert result == "特斯拉今日收盘 425 美元"
+        assert captured["model"] == "gemini-3.5-flash"
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_none(self):
+        """搜索挂起超过 SEARCH_TIMEOUT_SECONDS 时返回 None 而非卡死"""
+        from app import gemini_client
+
+        async def hanging_stream(**kwargs):
+            await asyncio.sleep(10)
+            yield MagicMock(text="never")
+
+        with patch.object(gemini_client, "SEARCH_TIMEOUT_SECONDS", 0.05), \
+             patch.object(gemini_client.client.aio.models, "generate_content_stream",
+                          side_effect=lambda **kw: hanging_stream(**kw)):
+            result = await gemini_client.google_search("会挂起的查询")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_returns_none(self):
+        """流无文本时返回 None（供上层判定 fallback_injected=False）"""
+        from app import gemini_client
+
+        async def empty_stream(**kwargs):
+            if False:
+                yield  # 空异步生成器
+
+        with patch.object(gemini_client.client.aio.models, "generate_content_stream",
+                          side_effect=lambda **kw: empty_stream(**kw)):
+            result = await gemini_client.google_search("q")
+
+        assert result is None
+
+
 # ─── GEMINI_API_BASE 中转配置测试 ──────────────────────────────────────
 
 class TestGeminiApiBase:
