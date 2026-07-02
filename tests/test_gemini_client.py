@@ -481,5 +481,82 @@ class TestCallGeminiStream:
         assert "没有返回" in errors[0]["error"]
 
 
+# ─── GEMINI_API_BASE 中转配置测试 ──────────────────────────────────────
+
+class TestGeminiApiBase:
+    """GEMINI_API_BASE 设置时对话 client 走中转、direct_client 保持直连"""
+
+    def _reload_and_capture(self, env: dict) -> list:
+        """按给定环境变量重载 config + gemini_client，捕获 genai.Client 构造参数。
+
+        finally 中恢复环境并重载回真实模块，避免污染其他测试。
+        """
+        import os
+        import importlib
+        import app.config
+        import app.gemini_client
+
+        calls = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        old_env = {k: os.environ.get(k) for k in env}
+        try:
+            for k, v in env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(app.config)
+            with patch("google.genai.Client", _FakeClient):
+                importlib.reload(app.gemini_client)
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            importlib.reload(app.config)
+            importlib.reload(app.gemini_client)
+        return calls
+
+    def test_base_set_builds_proxy_and_direct_clients(self):
+        """设置 GEMINI_API_BASE 时构建两个 client：对话走中转（尾部斜杠被去除），直连仍在"""
+        calls = self._reload_and_capture({
+            "GEMINI_API_BASE": "http://127.0.0.1:38090/",
+            "GEMINI_API_BASE_KEY": "sk-sub2api-test",
+            "SOCKS_PROXY": "",
+        })
+        assert len(calls) == 2
+        # 第一个是中转 client
+        assert calls[0]["api_key"] == "sk-sub2api-test"
+        assert calls[0]["http_options"].base_url == "http://127.0.0.1:38090"
+        # 第二个是直连 client，不带 base_url
+        assert getattr(calls[1]["http_options"], "base_url", None) is None
+
+    def test_base_unset_single_client(self):
+        """未设置 GEMINI_API_BASE 时只构建一个直连 client"""
+        calls = self._reload_and_capture({
+            "GEMINI_API_BASE": None,
+            "GEMINI_API_BASE_KEY": None,
+            "SOCKS_PROXY": "",
+        })
+        assert len(calls) == 1
+        assert getattr(calls[0]["http_options"], "base_url", None) is None
+
+    def test_base_key_falls_back_to_gemini_api_key(self):
+        """GEMINI_API_BASE_KEY 未设时中转 client 复用 GEMINI_API_KEY"""
+        calls = self._reload_and_capture({
+            "GEMINI_API_BASE": "http://127.0.0.1:38090",
+            "GEMINI_API_BASE_KEY": None,
+            "GEMINI_API_KEY": "google-key-abc",
+            "SOCKS_PROXY": "",
+        })
+        assert len(calls) == 2
+        assert calls[0]["api_key"] == "google-key-abc"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

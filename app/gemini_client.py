@@ -11,30 +11,58 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from google import genai
 from google.genai import types
 from app.ai.sampling_clamp import clamp_top_p
-from app.config import GEMINI_API_KEY, DEFAULT_MODEL, GEMINI_MODEL_LITE, GEMINI_MODEL_FAST, ENABLE_THINKING, SOCKS_PROXY, ENABLE_SEARCH
+from app.config import (
+    GEMINI_API_KEY,
+    GEMINI_API_BASE,
+    GEMINI_API_BASE_KEY,
+    DEFAULT_MODEL,
+    GEMINI_MODEL_LITE,
+    GEMINI_MODEL_FAST,
+    ENABLE_THINKING,
+    SOCKS_PROXY,
+    ENABLE_SEARCH,
+)
 
 # 配置代理 (仅 Gemini API 使用代理，通过 httpx_client 单独配置)
 # 将 socks5h:// 转换为 socks5:// (httpx 格式)
 proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
 
-# 创建带代理的 httpx Client (仅用于 Gemini SDK)
-if proxy_url:
-    import httpx
-    print(f"🔗 Gemini SDK 使用代理: {proxy_url}")
-    _httpx_client = httpx.Client(proxy=proxy_url, timeout=60.0)
-    client = genai.Client(
-        api_key=GEMINI_API_KEY,
-        http_options=types.HttpOptions(
-            api_version='v1beta',
-            httpx_client=_httpx_client
+
+def _build_direct_client() -> genai.Client:
+    """直连 Google 官方 API 的 client（按需带代理）"""
+    if proxy_url:
+        import httpx
+        print(f"🔗 Gemini SDK 使用代理: {proxy_url}")
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(
+                api_version='v1beta',
+                httpx_client=httpx.Client(proxy=proxy_url, timeout=60.0),
+            )
         )
-    )
-else:
     print("🔗 Gemini SDK 直连 (无代理)")
-    client = genai.Client(
+    return genai.Client(
         api_key=GEMINI_API_KEY,
         http_options=types.HttpOptions(api_version='v1beta')
     )
+
+
+if GEMINI_API_BASE:
+    # 对话/搜索走中转站（如 sub2api 的 /v1beta 原生协议层）。
+    # 中转站在本机/内网，不注入代理；google_search 工具由中转透传（groundingMetadata 已实测可回流）。
+    print(f"🔗 Gemini SDK 对话走中转: {GEMINI_API_BASE}")
+    client = genai.Client(
+        api_key=GEMINI_API_BASE_KEY,
+        http_options=types.HttpOptions(
+            api_version='v1beta',
+            base_url=GEMINI_API_BASE,
+        )
+    )
+    # 生图 (generate_images/:predict) 等端点中转站不覆盖，保持直连（image_gen 使用）
+    direct_client = _build_direct_client()
+else:
+    client = _build_direct_client()
+    direct_client = client
 
 
 async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = None, soul_text: str = "") -> dict:

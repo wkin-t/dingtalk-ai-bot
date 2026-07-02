@@ -17,8 +17,10 @@ from app.config import (
     OPENAI_API_KEY_CUSTOM,
 )
 
-# 复用 gemini_client.py 的 genai.Client 实例（已配置代理）
-from app.gemini_client import client as genai_client
+# 复用 gemini_client.py 的直连 client（已配置代理）。
+# 不用对话 client：GEMINI_API_BASE 设置时对话走中转站，而生图的 generate_images(:predict)
+# 端点中转站不覆盖，必须始终直连 Google 官方 API。
+from app.gemini_client import direct_client as genai_client
 
 
 def _map_openai_size(aspect_ratio: str) -> str:

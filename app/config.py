@@ -38,6 +38,13 @@ def _get_bool(name: str, default: bool) -> bool:
 # Google Gemini API Key
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Gemini API 中转地址（如 sub2api 的 /v1beta 原生协议层）。
+# 非空时 gemini_client 的对话/搜索 client 打到该地址且不走 SOCKS_PROXY（中转站在本机/内网）；
+# 生图等中转站不覆盖的端点仍直连 Google（见 gemini_client.direct_client）。
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "").strip().rstrip("/")
+# 中转站的认证 key（作为 x-goog-api-key 下发）；不设则复用 GEMINI_API_KEY
+GEMINI_API_BASE_KEY = os.getenv("GEMINI_API_BASE_KEY", "").strip() or GEMINI_API_KEY
+
 # 钉钉配置
 DINGTALK_CLIENT_ID = os.getenv("DINGTALK_CLIENT_ID")
 DINGTALK_CLIENT_SECRET = os.getenv("DINGTALK_CLIENT_SECRET")

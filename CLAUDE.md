@@ -115,6 +115,12 @@ OpenRouter 专属变量: `OPENROUTER_API_KEY`，`OPENROUTER_PROVIDER_ORDER=Anthr
 
 图片模型: `GEMINI_IMAGE_MODEL`（生图，默认 `imagen-4.0-generate-001`），`GEMINI_IMAGE_EDIT_MODEL`（改图，默认 `gemini-2.0-flash-exp`），`OPENAI_IMAGE_MODEL`（默认 `gpt-image-2`）。
 
+**原生联网搜索**（2026-07-02 起三路径全部原生，sub2api 实测透传）:
+- Gemini 路径: `AI_BACKEND=gemini` + `GEMINI_API_BASE=http://127.0.0.1:38090`（sub2api 的 `/v1beta` Gemini 原生协议层）+ `GEMINI_API_BASE_KEY`（sub2api key）→ `google_search` 工具透传，`groundingMetadata` 回流。**`GEMINI_API_KEY` 保持为 Google 直连 key 不要动**——生图的 `generate_images(:predict)` 端点 sub2api 不覆盖，`image_gen` 走 `gemini_client.direct_client` 始终直连。
+- GPT 路径（openai 容器）: Responses API 下发 `tools=[{"type":"web_search"}]`，sub2api Codex 账号池真实执行（响应缺 `web_search_call` item 属正常，sub2api 翻译层丢弃）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。
+- Claude 路径（openrouter 容器）: 保持 `AI_BACKEND=openai` 走 sub2api，`web_search` 工具被翻译成 OpenRouter web plugin（Exa）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。**不要**切 `AI_BACKEND=openrouter`——服务器无 `OPENROUTER_API_KEY`，切了直接全挂。
+- 模型不支持原生搜索时降级：`SEARCH_FALLBACK_PROVIDER=gemini` 用 `gemini_client.google_search()` 搜索后注入 system 消息（旧方案，仅作兜底）。
+
 Feature flags（默认全 `true`，独立可回滚）:
 - `ENABLE_CACHE_BLOCKS` — Stage B system prompt 分块 cache
 - `ENABLE_TOP_P_PIPELINE` — Stage C top_p 贯穿各 backend
