@@ -265,7 +265,7 @@ async def test_responses_payload_uses_instructions_and_input(mock_openai_cls, mo
 async def test_responses_enable_search_adds_web_search_tool(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """OpenAI Responses 原生支持搜索时，enable_search 必须下发 web_search_preview tool。"""
+    """OpenAI Responses 原生支持搜索时，enable_search 必须下发 web_search tool。"""
     mock_get_config.return_value = _model_config("gpt-5.5", supports_search=True)
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
@@ -280,7 +280,7 @@ async def test_responses_enable_search_adds_web_search_tool(
         pass
 
     call_kwargs = mock_client.responses.create.call_args.kwargs
-    assert call_kwargs["tools"] == [{"type": "web_search_preview"}]
+    assert call_kwargs["tools"] == [{"type": "web_search"}]
 
 
 @pytest.mark.asyncio

@@ -457,7 +457,7 @@ async def _stream_via_responses(
             kw["reasoning"] = {"effort": effort}
 
         if enable_search and config.get("supports_search"):
-            kw["tools"] = [{"type": "web_search_preview"}]
+            kw["tools"] = [{"type": "web_search"}]
 
         if use_prev and prev_response_id:
             kw["previous_response_id"] = prev_response_id
