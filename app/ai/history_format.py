@@ -53,13 +53,18 @@ def format_history_with_meta(
                 new_msg["content"] = content
         elif role == "assistant" and bot_id is not None and bot_id != current_bot_id:
             bot_source = _BOT_SOURCE_NAMES.get(bot_id, bot_id)
-            tag = f"[来自机器人 {bot_source}]"
-            # 1) 先确保 tag（旧数据/fixture 可能已带 tag，避免重复）
-            if str(content).startswith(tag):
+            content_str = str(content)
+            old_tag = f"[来自机器人 {bot_source}]"
+            new_tag_prefix = f'<other_bot name="{bot_source}">'
+            # 幂等判断必须按"本 bot 专属前缀"匹配，不能用泛化的 "<other_bot" 前缀：
+            # system prompt 会教会所有模型这套语法，如果某条历史消息恰好是在讨论/
+            # 引用别的 bot 的标签写法，泛化前缀会误判成"已包裹"而漏加真正的归属
+            # 标签——这正是本次要修的"看不出这不是我说的"问题本身。
+            if content_str.startswith(new_tag_prefix) or content_str.startswith(old_tag):
                 body = content
             else:
-                body = f"{tag} {content}"
-            # 2) 时间戳前缀，与 user 消息对称：[ts] [tag] content
+                body = f'<other_bot name="{bot_source}">{content}</other_bot>'
+            # 时间戳留在标签外，与真人 user 消息 "[ts] 昵称: 内容" 对称
             if timestamp:
                 new_msg["content"] = f"[{timestamp}] {body}"
             else:
