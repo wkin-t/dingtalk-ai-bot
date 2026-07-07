@@ -299,6 +299,7 @@ async def call_gemini_stream(
     start_time = time.time()
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
 
     try:
         # 转换消息格式
@@ -398,6 +399,9 @@ async def call_gemini_stream(
                         input_tokens = usage.prompt_token_count or 0
                     if hasattr(usage, 'candidates_token_count'):
                         output_tokens = usage.candidates_token_count or 0
+                    if hasattr(usage, 'cached_content_token_count'):
+                        _c = usage.cached_content_token_count or 0
+                        cached_tokens = _c if isinstance(_c, int) else 0
 
                 # 检查是否有候选内容
                 if not chunk.candidates:
@@ -455,6 +459,8 @@ async def call_gemini_stream(
         # 计算延迟
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+        _cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
+        print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({_cache_pct}%)")
 
         # 检查是否返回了内容
         if output_tokens == 0:
@@ -467,6 +473,7 @@ async def call_gemini_stream(
                 "model": target_model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cached_tokens": cached_tokens,
                 "latency_ms": latency_ms
             }
         }

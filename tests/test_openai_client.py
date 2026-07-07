@@ -45,8 +45,10 @@ def test_split_extracts_system_string_to_instructions():
     assert input_items == [{"role": "user", "content": "hi"}]
 
 
-def test_split_extracts_system_list_blocks_to_instructions():
-    """Stage B 的三段 system blocks 应被拼成 instructions（cache_control 在此路径丢失是已知 tradeoff）"""
+def test_split_extracts_system_list_blocks_to_instructions_when_store_supported():
+    """supports_store=True（GPT，会用 previous_response_id 精简续接）时，Stage B 的三段
+    system blocks 仍拼成 instructions——因为 instructions 每轮都无条件重发，精简路径
+    不会丢内容；cache_control 在此路径确实丢失，但这是刻意选择（见 store=False 分支）"""
     messages = [
         {
             "role": "system",
@@ -58,10 +60,56 @@ def test_split_extracts_system_list_blocks_to_instructions():
         },
         {"role": "user", "content": "hi"},
     ]
-    instructions, input_items = _split_messages_for_responses(messages, supports_vision=True)
+    instructions, input_items = _split_messages_for_responses(
+        messages, supports_vision=True, supports_store=True
+    )
     assert "稳定段" in instructions and "半稳段" in instructions and "变动段" in instructions
     assert len(input_items) == 1
     assert input_items[0]["role"] == "user"
+
+
+def test_split_routes_system_list_blocks_to_system_input_when_store_not_supported():
+    """supports_store=False（Claude，每轮全量重发 input，没有服务端续接）时，Stage B 的
+    system blocks 应转换后作为一条 role="system" 消息插到 input 最前面，保留 cache_control
+    ——这样每轮重发才有机会命中 sub2api 转译层的缓存断点"""
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "稳定段", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "半稳段", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "变动段"},
+            ],
+        },
+        {"role": "user", "content": "hi"},
+    ]
+    instructions, input_items = _split_messages_for_responses(
+        messages, supports_vision=True, supports_store=False
+    )
+    assert instructions == ""
+    assert len(input_items) == 2
+    system_msg = input_items[0]
+    assert system_msg["role"] == "system"
+    assert system_msg["content"] == [
+        {"type": "input_text", "text": "稳定段", "cache_control": {"type": "ephemeral"}},
+        {"type": "input_text", "text": "半稳段", "cache_control": {"type": "ephemeral"}},
+        {"type": "input_text", "text": "变动段"},
+    ]
+    assert input_items[1] == {"role": "user", "content": "hi"}
+
+
+def test_split_system_string_content_always_goes_to_instructions_regardless_of_store():
+    """system 角色的 string content（比如搜索兜底注入的临时摘要）永远走 instructions，
+    不受 supports_store 影响——一次性内容不需要、也不应该占用缓存前缀的位置"""
+    messages = [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "hi"},
+    ]
+    instructions, input_items = _split_messages_for_responses(
+        messages, supports_vision=True, supports_store=False
+    )
+    assert instructions == "你是助手"
+    assert input_items == [{"role": "user", "content": "hi"}]
 
 
 def test_split_keeps_multi_turn_user_assistant_in_input():
@@ -262,6 +310,89 @@ async def test_responses_payload_uses_instructions_and_input(mock_openai_cls, mo
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
 @patch("app.openai_client.AsyncOpenAI")
+async def test_responses_system_blocks_route_to_system_input_for_claude(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """Claude（store=False）收到 Stage B 的 list-block system 时，应作为 role="system"
+    的 input 消息发送并保留 cache_control，而不是拼进 instructions"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "稳定段", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "半稳段", "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+            {"role": "user", "content": "Q"},
+        ],
+        target_model="fast",
+        conversation_id="conv-claude-cache",
+    ):
+        pass
+
+    call_kwargs = mock_client.responses.create.call_args.kwargs
+    assert not call_kwargs.get("instructions")
+    assert call_kwargs["input"][0]["role"] == "system"
+    system_blocks = call_kwargs["input"][0]["content"]
+    assert system_blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert system_blocks[1]["cache_control"] == {"type": "ephemeral"}
+    assert call_kwargs["input"][-1] == {"role": "user", "content": "Q"}
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value="resp_prev_xyz")
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_prev_id_still_refreshes_system_blocks_for_gpt(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """回归防护：GPT 精简续接路径（previous_response_id 存在，只发最后一条 user 消息）下，
+    Stage B 的 list-block system 内容必须仍然通过 instructions 每轮刷新——不能因为挪去
+    input[0] 而被精简路径（只扫 role=="user"）漏发，导致日期/Soul/群信息冻结在第一轮"""
+    mock_get_config.return_value = _model_config("gpt-5.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "稳定段"},
+                    {"type": "text", "text": "变动段：今天是新的一天"},
+                ],
+            },
+            {"role": "user", "content": "首都？"},
+            {"role": "assistant", "content": "巴黎"},
+            {"role": "user", "content": "人口？"},
+        ],
+        target_model="fast",
+        conversation_id="conv-gpt-slim",
+    ):
+        pass
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    # 精简路径确实只发了最后一条 user 消息
+    assert len(kwargs["input"]) == 1
+    assert kwargs["input"][0]["content"] == "人口？"
+    # 但 system 内容（含"变动段"）必须仍然出现在 instructions 里，每轮刷新
+    assert "稳定段" in kwargs["instructions"]
+    assert "变动段：今天是新的一天" in kwargs["instructions"]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
 async def test_responses_enable_search_adds_web_search_tool(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
@@ -446,6 +577,50 @@ def _make_response_completed_event(response_id="resp_test_001"):
     evt.type = "response.completed"
     evt.response = response
     return evt
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_cached_tokens_parsed_from_real_field_shape(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """回归防护：字段名(usage.input_tokens_details.cached_tokens)手滑打错时必须被测试
+    发现——之前只用没设置嵌套字段的 MagicMock，isinstance(int) 兜底会把任何手滑都
+    悄悄归零成 cached=0，测试却照样全绿。这里显式给一个真实非零值，断言真的解析到了。"""
+    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+
+    response = MagicMock()
+    response.id = "resp_cache_test"
+    response.model = "anthropic/claude-haiku-4.5"
+    response.usage = MagicMock(
+        input_tokens=1000,
+        output_tokens=20,
+        input_tokens_details=MagicMock(cached_tokens=800),
+    )
+    response.error = None
+    evt = MagicMock()
+    evt.type = "response.completed"
+    evt.response = response
+
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([evt]))
+
+    yielded = []
+    async for chunk in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        conversation_id="conv-cache-parse",
+    ):
+        yielded.append(chunk)
+
+    usages = [c["usage"] for c in yielded if "usage" in c]
+    assert len(usages) == 1
+    assert usages[0]["cached_tokens"] == 800
+    assert usages[0]["input_tokens"] == 1000
 
 
 @pytest.mark.asyncio

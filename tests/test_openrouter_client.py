@@ -387,6 +387,126 @@ class TestOpenrouterClientStream:
             assert assistant_msg["reasoning_details"] == prior_rd
 
     @pytest.mark.asyncio
+    async def test_system_list_content_cache_control_reaches_sdk_call(self):
+        """system 角色的 list-of-blocks 内容（Stage B 的 cache_control 分段）必须原样
+        传到 SDK 调用的 messages 参数里——之前只分别验证了"block 构造时带 cache_control"
+        和"默认 config 的 provider_order 字符串含 Anthropic"，从未接起来断言到真正的
+        SDK 调用参数上，这是补这个空档。"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-sonnet-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(prompt_tokens=50, completion_tokens=5)
+
+        async def mock_aiter(self):
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        system_blocks = [
+            {"type": "text", "text": "稳定段", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "半稳段", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "变动段"},
+        ]
+        messages = [
+            {"role": "system", "content": system_blocks},
+            {"role": "user", "content": "hi"},
+        ]
+
+        with patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            async for _ in call_openrouter_stream(messages, target_model="pro"):
+                pass
+
+            call_kwargs = mock_client.chat.send_async.call_args.kwargs
+            sent_system = next(m for m in call_kwargs["messages"] if m.get("role") == "system")
+            assert sent_system["content"] == system_blocks
+            assert sent_system["content"][0]["cache_control"] == {"type": "ephemeral"}
+            assert sent_system["content"][1]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_provider_order_applied_to_provider_kwarg(self):
+        """OPENROUTER_PROVIDER_ORDER 默认值必须真正接到 SDK 调用的 provider 参数上，
+        不能只停留在 config 字典层面——否则请求可能被路由到 Bedrock，Bedrock 会
+        静默忽略 cache_control。"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-sonnet-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(prompt_tokens=3, completion_tokens=2)
+
+        async def mock_aiter(self):
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        with patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            async for _ in call_openrouter_stream(
+                [{"role": "user", "content": "hi"}], target_model="fast",
+            ):
+                pass
+
+            call_kwargs = mock_client.chat.send_async.call_args.kwargs
+            assert call_kwargs["provider"].order == ["Anthropic"]
+
+    @pytest.mark.asyncio
+    async def test_cached_tokens_parsed_from_real_field_shape(self):
+        """回归防护：字段名(usage.prompt_tokens_details.cached_tokens)手滑打错时必须被
+        测试发现——给一个真实非零值，断言真的解析到了 yield 出的 usage dict 里。"""
+        from app.openrouter_client import call_openrouter_stream
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        usage_chunk = MagicMock()
+        usage_chunk.model = "anthropic/claude-sonnet-4-5"
+        usage_chunk.choices = []
+        usage_chunk.usage = MagicMock(
+            prompt_tokens=1000,
+            completion_tokens=20,
+            prompt_tokens_details=MagicMock(cached_tokens=600),
+        )
+
+        async def mock_aiter(self):
+            yield usage_chunk
+
+        mock_stream_ctx = MagicMock()
+        mock_stream_ctx.__aenter__ = AsyncMock(return_value=mock_stream_ctx)
+        mock_stream_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_stream_ctx.__aiter__ = mock_aiter
+
+        with patch("app.openrouter_client._build_client") as mock_build:
+            mock_client = MagicMock()
+            mock_client.chat.send_async = AsyncMock(return_value=mock_stream_ctx)
+            mock_build.return_value = mock_client
+
+            chunks = []
+            async for chunk in call_openrouter_stream(
+                [{"role": "user", "content": "hi"}], target_model="pro",
+            ):
+                chunks.append(chunk)
+
+        usages = [c["usage"] for c in chunks if "usage" in c]
+        assert len(usages) == 1
+        assert usages[0]["cached_tokens"] == 600
+        assert usages[0]["input_tokens"] == 1000
+
+    @pytest.mark.asyncio
     async def test_enable_search_adds_web_plugin_when_supported(self):
         """OpenRouter 支持搜索且 enable_search=True 时，应下发 web plugin。"""
         from app.openrouter_client import call_openrouter_stream

@@ -163,16 +163,26 @@ def _convert_block_to_responses_format(block: Dict[str, Any], role: Optional[str
 def _split_messages_for_responses(
     messages: List[Dict[str, Any]],
     supports_vision: bool,
+    supports_store: bool = True,
 ):
     """把 chat completions messages 拆成 Responses API 需要的 (instructions, input)。
 
-    - system 角色 → 拼接到 instructions 字符串（注意：Stage B 的 cache_control 会丢失，
-      因为 instructions 是 string 字段，无法挂 ephemeral 标签）
+    - system 角色的 string content（如搜索兜底注入的一次性摘要）→ 恒定拼接到 instructions
+      字符串，不受 supports_store 影响——一次性内容不需要占用缓存前缀。
+    - system 角色的 list content（Stage B 分段 blocks，带 cache_control）：
+        - supports_store=True（GPT，会用 previous_response_id 精简续接）→ 仍拼进
+          instructions。instructions 每轮都无条件重发（不受精简路径影响，精简路径只
+          精简 input 里的 user/assistant 历史），所以不会丢内容；cache_control 在此路径
+          丢失是刻意选择，因为这条路径本来就没有精简路径以外能吃到显式缓存的场景。
+        - supports_store=False（Claude/sub2api，没有服务端续接，每轮都全量重发 input）
+          → 转换后作为一条 role="system" 消息插到 input 最前面，保留 cache_control，
+          让每轮重发都有机会命中缓存断点。
     - 其他角色 → 放进 input 数组；string content 透传；list content 按 Responses
       词汇表逐块转换（text→input_text/output_text，image_url→input_image）
     - 视觉模型保留图片块；非视觉模型剥掉图片
     """
     instructions_parts: List[str] = []
+    system_blocks: List[Dict[str, Any]] = []
     input_items: List[Dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role")
@@ -181,9 +191,13 @@ def _split_messages_for_responses(
             if isinstance(content, str):
                 instructions_parts.append(content)
             elif isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        instructions_parts.append(blk.get("text", ""))
+                if supports_store:
+                    for blk in content:
+                        if isinstance(blk, dict) and blk.get("type") == "text":
+                            instructions_parts.append(blk.get("text", ""))
+                else:
+                    for blk in content:
+                        system_blocks.append(_convert_block_to_responses_format(blk, "system"))
             continue
         if isinstance(content, list):
             if not supports_vision:
@@ -192,6 +206,8 @@ def _split_messages_for_responses(
             else:
                 content = [_convert_block_to_responses_format(blk, role) for blk in content]
         input_items.append({"role": role, "content": content})
+    if system_blocks:
+        input_items.insert(0, {"role": "system", "content": system_blocks})
     return "\n\n".join(p for p in instructions_parts if p), input_items
 
 
@@ -401,15 +417,21 @@ async def _stream_via_responses(
     - 状态保存在 responses_state（Redis + 文件降级，TTL 7 天）
     - previous_response_id 失效时清除状态、回退全量历史重试一次
 
-    Stage B 的 system cache_control 在此路径丢失（instructions 是 string 字段，
-    无法挂 ephemeral），上游可能仍做隐式 prompt cache。
+    Stage B 的 system cache_control 按 _supports_store 分流（见 _split_messages_for_responses）：
+    GPT（store=True）走 instructions，每轮无条件刷新，不受精简续接路径影响；
+    Claude（store=False）走 input[0] 的 role="system" 消息，保留 cache_control，
+    每轮全量重发才有机会命中 sub2api 转译层的缓存。
     """
     from app import responses_state
 
-    full_instructions, full_input_items = _split_messages_for_responses(messages, config["supports_vision"])
-
-    # previous_response_id 仅对支持 store 的上游有效（OpenAI 原生），Anthropic 不支持
+    # previous_response_id 仅对支持 store 的上游有效（OpenAI 原生），Anthropic 不支持；
+    # 同一个信号也决定 system 内容走 instructions 还是 input[0] 的 system 消息——
+    # 不是按模型名分叉消息结构，是按这个已有的 store 机制信号分叉（见函数内 docstring）
     _supports_store = not model_name.startswith("anthropic/")
+    full_instructions, full_input_items = _split_messages_for_responses(
+        messages, config["supports_vision"], _supports_store
+    )
+
     prev_response_id = (
         responses_state.get_response_id(conversation_id)
         if (conversation_id and _supports_store)
@@ -433,8 +455,8 @@ async def _stream_via_responses(
         input_items = full_input_items
 
     def _build_kwargs(use_prev: bool, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        # Anthropic 没有 Responses API 服务端存储，sub2api 转发 store=True 会 502
-        _supports_store = not model_name.startswith("anthropic/")
+        # _supports_store 复用外层闭包变量（Anthropic 没有 Responses API 服务端存储，
+        # sub2api 转发 store=True 会 502）
         kw: Dict[str, Any] = {
             "model": model_name,
             "input": items,
@@ -484,6 +506,7 @@ async def _stream_via_responses(
     thinking_sent = False
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     content_chars = 0
     actual_model = model_name
     new_response_id: Optional[str] = None
@@ -544,6 +567,9 @@ async def _stream_via_responses(
             if usage:
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
                 output_tokens = getattr(usage, "output_tokens", 0) or 0
+                _det = getattr(usage, "input_tokens_details", None)
+                _c = (getattr(_det, "cached_tokens", 0) or 0) if _det else 0
+                cached_tokens = _c if isinstance(_c, int) else 0
 
         elif event_type == "response.failed":
             response = getattr(event, "response", None)
@@ -557,6 +583,8 @@ async def _stream_via_responses(
 
     latency_ms = int((time.time() - start_time) * 1000)
     print(f"✅ [OpenAI/responses] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 字符: {content_chars}, 延迟: {latency_ms}ms")
+    _cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
+    print(f"💾 [Cache] OpenAI/responses | cached={cached_tokens}/{input_tokens} ({_cache_pct}%)")
 
     if content_chars == 0 and output_tokens == 0:
         yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
@@ -569,6 +597,7 @@ async def _stream_via_responses(
     yield {
         "usage": {
             "model": actual_model,
+            "cached_tokens": cached_tokens,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "latency_ms": latency_ms,

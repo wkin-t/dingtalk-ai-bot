@@ -332,6 +332,30 @@ class TestCallGeminiStream:
         assert content_results[1]["content"] == "！"
 
     @pytest.mark.asyncio
+    async def test_cached_tokens_parsed_from_real_field_shape(self):
+        """回归防护：字段名(usage_metadata.cached_content_token_count)手滑打错时必须
+        被测试发现——给一个真实非零值，断言真的解析到了 usage dict 里。"""
+        from app.gemini_client import call_gemini_stream
+
+        chunk = self._make_chunk("答案", usage={"input": 1000, "output": 10})
+        chunk.usage_metadata.cached_content_token_count = 750
+
+        with patch("app.gemini_client.client") as mock_client:
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([chunk]))
+
+            results = []
+            async for c in call_gemini_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                target_model="gemini-3-flash-preview",
+            ):
+                results.append(c)
+
+        usages = [r["usage"] for r in results if "usage" in r]
+        assert len(usages) == 1
+        assert usages[0]["cached_tokens"] == 750
+        assert usages[0]["input_tokens"] == 1000
+
+    @pytest.mark.asyncio
     async def test_stream_with_thinking(self):
         """流式带思考过程"""
         from app.gemini_client import call_gemini_stream

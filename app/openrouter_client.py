@@ -83,7 +83,14 @@ def _serialize_rd(rd_objects: list) -> List[Dict[str, Any]]:
 
 
 def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """过滤掉图片内容，只保留文本。"""
+    """过滤掉图片内容，只保留文本。
+
+    已知限制（不在当前范围修复）：list content 拍扁成纯文本会连带丢弃 block 上的
+    cache_control（Stage B 的 system prompt 分段就是这种 list-of-blocks 结构）。
+    目前三档 OPENROUTER_MODEL_CONFIG 都默认 supports_vision=True，这条分支打不到，
+    等哪天真的有 tier 需要 supports_vision=False 时需要重新设计（保留文本结构、
+    只剥图片块，而不是整体拍扁）。
+    """
     cleaned = []
     for msg in messages:
         content = msg.get("content", "")
@@ -135,6 +142,7 @@ async def call_openrouter_stream(
     start_time = time.time()
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
 
     try:
         client = _build_client()
@@ -215,6 +223,11 @@ async def call_openrouter_stream(
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens or 0
                     output_tokens = chunk.usage.completion_tokens or 0
+                    # 镜像 OpenAI Chat Completions 的字段命名；OpenRouter 代理多家上游，
+                    # 该字段是否总是存在不确定，getattr 链缺失时安全退化到 0（best-effort）
+                    _det = getattr(chunk.usage, "prompt_tokens_details", None)
+                    _c = (getattr(_det, "cached_tokens", 0) or 0) if _det else 0
+                    cached_tokens = _c if isinstance(_c, int) else 0
 
                 if not chunk.choices:
                     continue
@@ -252,6 +265,8 @@ async def call_openrouter_stream(
 
         latency_ms = int((time.time() - start_time) * 1000)
         print(f"✅ [OpenRouter] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 延迟: {latency_ms}ms")
+        _cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
+        print(f"💾 [Cache] OpenRouter | cached={cached_tokens}/{input_tokens} ({_cache_pct}%)")
 
         if output_tokens == 0:
             yield {"error": "⚠️ 模型未返回任何内容，请检查模型名和 API Key 配置"}
@@ -262,6 +277,7 @@ async def call_openrouter_stream(
                 "model": actual_model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cached_tokens": cached_tokens,
                 "latency_ms": latency_ms,
             }
         }
