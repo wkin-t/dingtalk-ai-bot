@@ -147,7 +147,8 @@ class AIHandler:
                 history_messages = full_history
 
             # 构造 System Prompt
-            system_prompt = self._build_system_prompt(group_info, soul_content=None)
+            from app.ai.system_prompt import build_system_prompt_content
+            system_prompt = build_system_prompt_content(group_info=group_info, soul_content=None)
 
             messages_raw = [{"role": "system", "content": system_prompt}]
 
@@ -283,35 +284,6 @@ class AIHandler:
             import traceback
             traceback.print_exc()
             return f"💥 **系统异常**\n\n{error_msg}"
-    def _build_system_prompt(self, group_info: Optional[Dict] = None, soul_content: Optional[str] = None):
-        """构建 System Prompt。
-
-        返回:
-          - 如果 ENABLE_CACHE_BLOCKS=True 且后端支持: list of blocks
-          - 否则: str（向下兼容）
-        """
-        from app.config import ENABLE_CACHE_BLOCKS, AI_BACKEND, get_bot_display_name
-        from app.ai.system_prompt import build_system_prompt_blocks
-
-        beijing_tz = timezone(timedelta(hours=8))
-        current_date = datetime.now(beijing_tz)
-
-        bot_name = get_bot_display_name()
-
-        blocks = build_system_prompt_blocks(
-            group_info=group_info,
-            soul_content=soul_content,
-            bot_name=bot_name,
-            current_date=current_date,
-        )
-
-        # LiteLLM/OpenRouter 路径支持 list blocks；Gemini/OpenClaw 用 string 拼接（B.5 处理）
-        if ENABLE_CACHE_BLOCKS and AI_BACKEND in ("openai", "openrouter"):
-            return blocks
-
-        # 降级：拼接成 string
-        return "\n\n".join(b["text"] for b in blocks)
-
     def _format_history_with_meta(self, history_messages: List[Dict], current_bot_id: str, cutoff_at=None) -> List[Dict]:
         """格式化历史消息，保留 bot_id 给后续 transform 层。"""
         from app.ai.history_format import format_history_with_meta

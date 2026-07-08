@@ -12,8 +12,8 @@
 
 调用方负责把这个 list 作为 system message 的 content 字段。
 """
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any, Union
 
 
 _WEEKDAY_CN = "一二三四五六日"
@@ -98,3 +98,38 @@ def build_system_prompt_blocks(
     })
 
     return blocks
+
+
+def build_system_prompt_content(
+    *,
+    group_info: Optional[Dict],
+    soul_content: Optional[str],
+) -> Union[str, List[Dict[str, Any]]]:
+    """构建可直接放进 system message content 字段的最终内容。
+
+    bot_name / current_date 从这里统一取值，调用方（dingtalk_bot.py、
+    app/ai/handler.py）此前各自独立复刻过一份完全相同的组装逻辑（bot_name +
+    current_date 计算、ENABLE_CACHE_BLOCKS 分支），有静默漂移风险——这是唯一
+    入口，两处调用方都改为调用这里。
+
+    返回 list of blocks（openai/openrouter，可被 Stage B cache_control 命中）
+    还是拼接后的纯字符串（Gemini/OpenClaw 降级），由 ENABLE_CACHE_BLOCKS +
+    AI_BACKEND 决定。
+    """
+    from app.config import ENABLE_CACHE_BLOCKS, AI_BACKEND, get_bot_display_name
+
+    beijing_tz = timezone(timedelta(hours=8))
+    current_date = datetime.now(beijing_tz)
+    bot_name = get_bot_display_name()
+
+    blocks = build_system_prompt_blocks(
+        group_info=group_info,
+        soul_content=soul_content,
+        bot_name=bot_name,
+        current_date=current_date,
+    )
+
+    if ENABLE_CACHE_BLOCKS and AI_BACKEND in ("openai", "openrouter"):
+        return blocks
+
+    return "\n\n".join(b["text"] for b in blocks)

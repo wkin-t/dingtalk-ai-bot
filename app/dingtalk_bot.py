@@ -975,29 +975,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             else:
                 history_messages = full_history
 
-            from app.config import get_bot_display_name
-            bot_name = get_bot_display_name()
-            from datetime import datetime, timezone, timedelta
-            from app.config import ENABLE_CACHE_BLOCKS
-            from app.ai.system_prompt import build_system_prompt_blocks
+            from app.ai.system_prompt import build_system_prompt_content
 
             soul_content = _load_soul(conversation_id) or None
-            beijing_tz = timezone(timedelta(hours=8))
-            current_date = datetime.now(beijing_tz)
+            system_content = build_system_prompt_content(group_info=group_info, soul_content=soul_content)
 
-            blocks = build_system_prompt_blocks(
-                group_info=group_info,
-                soul_content=soul_content,
-                bot_name=bot_name,
-                current_date=current_date,
-            )
-
-            messages_raw = []
-            if ENABLE_CACHE_BLOCKS and AI_BACKEND in ("openai", "openrouter"):
-                messages_raw.append({"role": "system", "content": blocks})
-            else:
-                # 降级：string 拼接（Gemini/OpenClaw）
-                messages_raw.append({"role": "system", "content": "\n\n".join(b["text"] for b in blocks)})
+            messages_raw = [{"role": "system", "content": system_content}]
 
             from app.ai.history_format import format_history_with_meta
             from app.clear_cutoff import get_cutoff

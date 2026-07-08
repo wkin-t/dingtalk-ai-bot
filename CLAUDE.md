@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-多平台 AI 机器人服务，支持钉钉和企业微信，后端可切换 Gemini、OpenClaw、OpenAI（含中转站 sub2api，覆盖 GPT/Claude/Gemini）或 OpenRouter（原生）。Python + Flask，Docker 部署。LiteLLM 已完全移除，所有 OpenAI 兼容路径走官方 `openai` SDK。
+多平台 AI 机器人服务，支持钉钉（生产使用中）和企业微信（**Deprecated，2026-07-08 起暂不使用**，代码保留但不再维护），后端可切换 Gemini、OpenClaw、OpenAI（含中转站 sub2api，覆盖 GPT/Claude/Gemini）或 OpenRouter（原生）。Python + Flask，Docker 部署。LiteLLM 已完全移除，所有 OpenAI 兼容路径走官方 `openai` SDK。
 
 ## 常用命令
 
@@ -22,7 +22,7 @@ docker-compose up -d --build      # gemini 版本
 docker-compose -f docker-compose.openclaw.yml up -d --build  # openclaw 版本
 docker-compose -f docker-compose.openai.yml up -d --build    # openai 版本（含中转站路径）
 docker-compose -f docker-compose.openrouter.yml up -d --build # openrouter 版本 (端口 35002)
-docker-compose -f docker-compose.wecom.yml up -d --build     # 企业微信版本
+docker-compose -f docker-compose.wecom.yml up -d --build     # 企业微信版本（Deprecated，暂不使用）
 docker logs -f dingtalk-ai-bot-gemini   # 查看日志
 
 # 部署 (使用 skill)
@@ -61,7 +61,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   │   ├── sampling_pipeline.py  # Stage C: top_p/temperature pipeline (router→最终下发)
 │   │   ├── messages_pipeline.py  # 消息预处理 pipeline 入口
 │   │   └── history_format.py     # 历史记录格式化工具
-│   └── wecom/
+│   └── wecom/                # ⚠️ Deprecated（暂不使用，服务器未部署，代码保留）
 │       ├── crypto.py        # 企业微信消息加解密 (WXBizMsgCrypt)
 │       ├── callback.py      # Webhook 回调路由 (Flask Blueprint)
 │       ├── bot.py           # 消息处理器
@@ -76,7 +76,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **四后端切换**: `AI_BACKEND` 环境变量选择 `gemini`、`openclaw`、`openai`（含 sub2api 中转站路径）或 `openrouter`（原生 OpenRouter）。切换点是 `app/ai/backend.py` 的 `create_backend_stream()`，handler/bot 层不感知具体后端。
 - **openai_client 双协议分支**: `app/openai_client.py::call_openai_stream` 按 model_name 自动选 API——Gemini 上游走 Chat Completions（sub2api Gemini 适配不支持 Responses），其他（Claude/GPT）走 Responses API（绕开 sub2api chat completions 在多轮对话下的 400 bug）。Stage B system cache_control 在 Responses 路径丢失（`instructions` 是 string 字段无法挂 ephemeral）。带图请求会按 Responses API 词汇表转换 content block（`text → input_text/output_text`，`image_url → input_image`）。
 - **路由/Soul 调用不限 max_tokens**: `analyze_complexity_with_*` 和 `call_*_simple` 不下发 `max_tokens`，让上游用默认值（通常 4096+）。原因：Gemini-3.5-flash / Claude reasoning / GPT-5 等思考模型的 `max_tokens` 控制的是 **thinking + output 总额**，设小（如 300）会让思考吃光预算、输出为空，bot 拿到空 content 后 JSON 解析失败降级到默认（thinking_text 缺失等）。
-- **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 抽象了钉钉/企业微信的平台差异，共享相同的 AI 调用逻辑。
+- **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 目前只被企业微信（Deprecated）使用；钉钉走自己在 `app/dingtalk_bot.py::handle_ai_stream` 里的独立实现，并不经过 `AIHandler`——两条路径共享 `app/ai/system_prompt.py::build_system_prompt_content` 等下游工具函数，但顶层调用骨架是分开的，改动一处不会自动同步到另一处。System Prompt 构建口径已在 2026-07-08 统一收敛到 `build_system_prompt_content`（此前钉钉/AIHandler 各自复刻过一份相同逻辑，属于已修复的维护风险）。**已知限制（不修复，因 WeCom Deprecated）**：`AIHandler.process_message` 对 `soul_content`/`group_info` 硬编码传 `None`，企业微信从未获得 Soul 个性注入或群名上下文，也没有 `/soul` 命令；钉钉三生产后端（gemini/openai/openrouter）已用真实日志验证 Soul 正确注入。
 - **三档智能路由**: 路由分析在**卡片创建前**完成（让卡片初始就显示正确思考文字）。所有后端均使用 `MODEL_ROUTER`（默认值按后端自动选，如 Haiku/gemini-flash-lite）。路由输出：lite/fast/pro 三档 + thinking level + need_search + temperature（precise/balanced/creative → 0.1/0.7/0.9）+ need_image_gen/need_image_edit。
 - **生图+改图流水线**: 路由检测 `need_image_gen` → `image_gen.generate_image()`（Gemini `GEMINI_IMAGE_MODEL` 或 OpenAI `gpt-image-2`）；检测 `need_image_edit`（用户发图+修改指令）→ `image_gen.edit_image()`（Gemini `GEMINI_IMAGE_EDIT_MODEL` 或 OpenAI images.edit，OpenRouter/OpenClaw 不支持）。图片经 `image_store.py` 上传 COS → 预签名 URL 展示。
 - **Soul 自主进化**: 每次对话后 AI 自主反思并进化个性，JSON 格式输出，30 分钟冷却，changelog 存档。后台调用 `MODEL_ROUTER` 轻量模型。命令：`/soul` 查看、`/soul <text>` 设置、`/soul reset` 重置、`/soul evolve` 手动进化、`/soul log` 历史。管理员权限：`SOUL_ADMIN_IDS` 环境变量控制（空=允许所有）。
