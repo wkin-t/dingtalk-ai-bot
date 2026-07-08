@@ -60,8 +60,14 @@ from app.config import (
     WECOM_BOT_TOKEN, WECOM_BOT_ENCODING_AES_KEY,
     PLATFORM
 )
+from app.database import init_database
 from app.dingtalk_bot import GeminiBotHandler
 from app.memory import DATA_DIR # 导入数据目录
+
+# 建表 + schema 迁移（如 thinking_blocks 列）必须先于 Stream/Webhook 处理消息执行，
+# 否则运行中的表结构永远追不上代码里的新增列（历史上 main.py 从未调用过此函数，
+# 导致 thinking_blocks 列迁移代码虽然存在且有测试覆盖，却从未在生产环境执行过）。
+init_database()
 
 def start_dingtalk_stream_async():
     if not DINGTALK_CLIENT_ID or not DINGTALK_CLIENT_SECRET:
