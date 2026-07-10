@@ -154,3 +154,39 @@ Feature flags（默认全 `true`，独立可回滚）:
 - 文件操作显式指定 `encoding='utf-8'`
 - 不提交 `.env` 文件或密钥
 - Push 前审计：`git diff origin/master...HEAD | grep -iE 'key|secret|token|password'`，仓库是公有的
+
+## Agent skills
+
+### Issue tracker
+
+Issues 与 PRD 存放于本仓库的 GitHub Issues（通过 `gh` CLI 操作）；外部贡献者的 PR 也作为 triage 队列的一种需求来源。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个规范角色使用默认标签字符串（`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`）。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文布局——根目录一个 `CONTEXT.md` + `docs/adr/`。详见 `docs/agents/domain.md`。
+
+<!-- TRELLIS:START -->
+# Trellis Instructions
+
+These instructions are for AI assistants working in this project.
+
+This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
+
+- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
+- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
+- `.trellis/workspace/` — per-developer journals and session traces
+- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
+
+If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
+
+If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
+- `.agents/skills/` — reusable Trellis skills
+- `.codex/agents/` — optional custom subagents
+
+Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
+
+<!-- TRELLIS:END -->
