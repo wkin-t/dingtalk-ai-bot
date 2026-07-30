@@ -119,7 +119,7 @@ OpenRouter 专属变量: `OPENROUTER_API_KEY`，`OPENROUTER_PROVIDER_ORDER=Anthr
 - Gemini 路径: `AI_BACKEND=gemini` + `GEMINI_API_BASE=http://127.0.0.1:38090`（sub2api 的 `/v1beta` Gemini 原生协议层）+ `GEMINI_API_BASE_KEY`（sub2api key）→ `google_search` 工具透传，`groundingMetadata` 回流。**`GEMINI_API_KEY` 保持为 Google 直连 key 不要动**——生图的 `generate_images(:predict)` 端点 sub2api 不覆盖，`image_gen` 走 `gemini_client.direct_client` 始终直连。
 - GPT 路径（openai 容器）: Responses API 下发 `tools=[{"type":"web_search"}]`，sub2api Codex 账号池真实执行（响应缺 `web_search_call` item 属正常，sub2api 翻译层丢弃）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。
 - Claude 路径（openrouter 容器）: 保持 `AI_BACKEND=openai` 走 sub2api，`web_search` 工具被翻译成 OpenRouter web plugin（Exa）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。**不要**切 `AI_BACKEND=openrouter`——服务器无 `OPENROUTER_API_KEY`，切了直接全挂。
-- 模型不支持原生搜索时降级：`SEARCH_FALLBACK_PROVIDER=gemini` 用 `gemini_client.google_search()` 搜索后注入 system 消息（旧方案，仅作兜底）。
+- 模型不支持原生搜索时，默认不再调用旧摘要注入路径：`SEARCH_FALLBACK_PROVIDER=none`；如需临时兼容回滚，才显式设为 `gemini`，由 `gemini_client.google_search()` 搜索后注入 system 消息。
 - **🌐 图标只在真实搜索时点亮**（`app/ai/backend.py::should_show_search_icon`）：全自主下"挂了工具"≠"搜了"，图标仅在真实搜索信号回流时亮——Gemini 看 `grounding_metadata`、Responses 看 `web_search_call` item / `url_citation` annotation、OpenRouter 看 `delta.annotations`。客户端检测到即补发 `{"search": {"executed": True}}`，消费端（dingtalk_bot/handler）**合并**而非覆盖 search chunk。**GPT 路径若 sub2api 丢弃 web_search_call+annotation，则图标漏报（宁可不亮也不常亮误报）**；`🌐 [搜索执行]` 日志是探针，可 grep 确认 sub2api 到底透不透。
 
 Feature flags（默认全 `true`，独立可回滚）:
