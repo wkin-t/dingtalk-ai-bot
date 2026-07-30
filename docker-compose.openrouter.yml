@@ -12,10 +12,9 @@ services:
     restart: always
     network_mode: "host"
     environment:
-      # 走 sub2api 中转（Claude 账号池，上游 OpenRouter），不直连 OpenRouter 官方 SDK：
-      # 服务器未配 OPENROUTER_API_KEY，且 sub2api 的 Responses API 会把 web_search 工具
-      # 翻译成 OpenRouter web plugin（已实测），原生搜索无需切换后端。
-      - AI_BACKEND=openai
+      # 通过 Gemini 原生协议调用 sub2api Antigravity 专用端点；
+      # Claude 模型由 Antigravity 在 /antigravity/v1beta 下统一适配。
+      - AI_BACKEND=gemini
       - BOT_ID=openrouter
       - FLASK_PORT=35002
     env_file:
