@@ -12,9 +12,9 @@ services:
     restart: always
     network_mode: "host"
     environment:
-      # 通过 Gemini 原生协议调用 sub2api Antigravity 专用端点；
-      # Claude 模型由 Antigravity 在 /antigravity/v1beta 下统一适配。
-      - AI_BACKEND=gemini
+      # 通过 OpenAI Responses 协议调用 sub2api /v1 端点；
+      # Claude 模型经 sub2api /v1 Responses API 路由到 Antigravity。
+      - AI_BACKEND=openai
       - BOT_ID=openrouter
       - FLASK_PORT=35002
     env_file:
