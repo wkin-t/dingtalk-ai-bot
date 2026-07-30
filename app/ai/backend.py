@@ -123,13 +123,18 @@ async def create_backend_stream(
         )
     else:
         from app.gemini_client import call_gemini_stream
+        gemini_kwargs = {
+            "messages": messages,
+            "target_model": target_model,
+            "thinking_level": thinking_level,
+            "enable_search": enable_search,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if kwargs.get("route_slot") in {"router", "lite", "fast", "pro"}:
+            gemini_kwargs["route_slot"] = kwargs["route_slot"]
         stream = call_gemini_stream(
-            messages,
-            target_model=target_model,
-            thinking_level=thinking_level,
-            enable_search=enable_search,
-            temperature=temperature,
-            top_p=top_p,
+            **gemini_kwargs,
         )
 
     async for chunk in stream:

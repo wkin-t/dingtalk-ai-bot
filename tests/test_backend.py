@@ -71,6 +71,73 @@ class TestBackendSelection:
             cfg.AI_BACKEND = original
 
     @pytest.mark.asyncio
+    async def test_gemini_route_slot_reaches_vertex_fallback_model(self):
+        """相同主模型下，backend route_slot 必须决定最终 Vertex fallback 模型。"""
+        import app.config as cfg
+        from app import gemini_circuit, gemini_client
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        def make_chunk(text):
+            part = MagicMock(thought=False, text=text)
+            candidate = MagicMock()
+            candidate.content.parts = [part]
+            candidate.finish_reason = None
+            candidate.grounding_metadata = None
+            chunk = MagicMock()
+            chunk.candidates = [candidate]
+            chunk.usage_metadata = MagicMock(
+                prompt_token_count=1,
+                candidates_token_count=1,
+                cached_content_token_count=0,
+            )
+            chunk.model_version = None
+            return chunk
+
+        async def one_chunk(chunk):
+            yield chunk
+
+        primary_client = MagicMock()
+        fallback_client = MagicMock()
+        primary_client.aio.models.generate_content_stream = AsyncMock(
+            side_effect=RuntimeError("primary unavailable")
+        )
+        fallback_generate = AsyncMock()
+        fallback_client.aio.models.generate_content_stream = fallback_generate
+
+        expected_models = {
+            "lite": "vertex-lite",
+            "fast": "vertex-fast",
+            "pro": "vertex-pro",
+        }
+        with patch.object(cfg, "AI_BACKEND", "gemini"), \
+             patch.object(gemini_client, "client", primary_client), \
+             patch.object(gemini_client, "fallback_client", fallback_client), \
+             patch.object(gemini_client, "MODEL_LITE_FALLBACK", "vertex-lite"), \
+             patch.object(gemini_client, "MODEL_FAST_FALLBACK", "vertex-fast"), \
+             patch.object(gemini_client, "MODEL_PRO_FALLBACK", "vertex-pro"), \
+             patch.object(gemini_circuit, "is_circuit_open_async", AsyncMock(return_value=False)), \
+             patch.object(gemini_circuit, "open_circuit_async", AsyncMock(return_value=True)):
+            from app.ai.backend import create_backend_stream
+
+            for route_slot, expected_model in expected_models.items():
+                fallback_generate.reset_mock()
+                fallback_generate.return_value = one_chunk(make_chunk(route_slot))
+                chunks = [
+                    chunk
+                    async for chunk in create_backend_stream(
+                        [{"role": "user", "content": "test"}],
+                        target_model="same-primary-model",
+                        thinking_level="low",
+                        enable_search=False,
+                        route_slot=route_slot,
+                    )
+                ]
+
+                usage = next(item["usage"] for item in chunks if "usage" in item)
+                assert usage["model"] == expected_model
+                assert fallback_generate.await_args.kwargs["model"] == expected_model
+
+    @pytest.mark.asyncio
     async def test_openai_backend_dispatches_to_openai_client(self):
         """openai 后端应调用 call_openai_stream"""
         import app.config as cfg

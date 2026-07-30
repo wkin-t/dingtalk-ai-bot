@@ -39,7 +39,13 @@ from app.ai.handler import TEMPERATURE_MAP
 from app.ai.router import should_force_search
 from app.ai.sampling_clamp import clamp_temperature
 from app.dingtalk_card import DingTalkCardHelper
-from app.gemini_client import analyze_complexity_with_model as _analyze_with_gemini
+from app.gemini_client import (
+    analyze_complexity_with_model as _analyze_with_gemini,
+    call_gemini_sync,
+    safe_error_summary,
+    safe_display_text,
+    safe_model_name,
+)
 from app.image_gen import generate_image, edit_image
 from app.image_store import save_image
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
@@ -173,7 +179,7 @@ def _load_soul(conversation_id: str) -> str:
             print(f"🎭 [Soul] 加载: {os.path.basename(target)}")
         return content
     except Exception as e:
-        print(f"⚠️ [Soul] 读取失败: {e}")
+        print(f"⚠️ [Soul] 读取失败: {safe_error_summary(e, 'soul')}")
         return ""
 
 
@@ -182,10 +188,31 @@ def _load_soul(conversation_id: str) -> str:
 
 def _shorten_model_name(model: str) -> str:
     """归一化模型名用于 UI 显示：去掉 provider 前缀、版本后缀、Gemini 系列前缀"""
+    if not isinstance(model, str) or not model:
+        return "unknown"
     if "/" in model:
         model = model.split("/")[-1]
     model = re.sub(r'[@:].*$', '', model)
     return model.replace("gemini-", "").replace("-preview", "")
+
+
+def _build_model_status(usage_info: dict | None, target_model: str) -> str:
+    """构建模型状态栏；fallback 时先显示实际模型，再显示主模型错误。"""
+    usage_info = usage_info if isinstance(usage_info, dict) else {}
+    if not usage_info.get("fallback"):
+        actual_model = _shorten_model_name(usage_info.get("model") or target_model)
+        actual_display = safe_display_text(actual_model, 160)
+        return f"🤖 {actual_display}"
+
+    actual_model = safe_model_name(usage_info.get("model") or target_model)
+    actual_display = safe_display_text(actual_model, 160)
+    requested_model = safe_model_name(usage_info.get("requested_model") or target_model)
+    requested_display = safe_display_text(requested_model, 160)
+    fallback_error = "circuit open" if usage_info.get("circuit_open") else (
+        usage_info.get("fallback_error") or "circuit open"
+    )
+    fallback_error = safe_display_text(fallback_error, 1000)
+    return f"🤖 {actual_display} | ⚠️ 主模型 {requested_display}: {fallback_error}"
 
 
 def _is_soul_admin(sender_id: str) -> bool:
@@ -299,7 +326,7 @@ def _trim_changelog(filepath: str, max_bytes: int = _CHANGELOG_MAX_BYTES):
             f.write(f"*(旧记录已清理，仅保留最近部分)*\n\n{truncated}")
         print(f"🧬 [Soul进化] changelog 已截断: {filepath}")
     except Exception as e:
-        print(f"⚠️ [Soul进化] changelog 截断失败: {e}")
+        print(f"⚠️ [Soul进化] changelog 截断失败: {safe_error_summary(e, 'soul')}")
 
 
 async def _ask_lightweight_model(prompt: str) -> str:
@@ -312,22 +339,81 @@ async def _ask_lightweight_model(prompt: str) -> str:
             from app.openai_client import call_openai_simple
             return await call_openai_simple(prompt)
         else:
-            from app.gemini_client import client as _gemini_client
-            from google.genai import types
+            from app import gemini_client, gemini_circuit
             loop = asyncio.get_running_loop()
+            fallback = gemini_client.fallback_client
+            fallback_model = gemini_client._select_fallback_model(GEMINI_MODEL_LITE, "router")
 
-            def _call():
-                resp = _gemini_client.models.generate_content(
-                    model=GEMINI_MODEL_LITE,
-                    contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-                    config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=500)
-                )
-                return resp.text
+            async def _circuit_open() -> bool:
+                if fallback is None:
+                    await gemini_client.warn_stale_circuit_without_fallback()
+                    return False
+                try:
+                    return await gemini_circuit.is_circuit_open_async()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    print("⚠️ [Soul进化] 熔断状态读取异常，按主模型探测")
+                    return False
 
-            return await loop.run_in_executor(None, _call)
+            def _call_once(active_client, model):
+                # worker 只执行一次 provider 调用；不在此处写 Redis 或提交 fallback。
+                return call_gemini_sync(active_client, model, prompt)
+
+            if await _circuit_open():
+                try:
+                    return await loop.run_in_executor(None, _call_once, fallback, fallback_model)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    print(f"⚠️ [Soul进化] Vertex fallback 失败: {safe_error_summary(error, 'soul')}")
+                    return ""
+
+            try:
+                return await loop.run_in_executor(None, _call_once, gemini_client.client, GEMINI_MODEL_LITE)
+            except asyncio.CancelledError:
+                raise
+            except Exception as primary_error:
+                safe_primary = safe_error_summary(primary_error, "soul")
+                if fallback is None:
+                    print(f"⚠️ [Soul进化] 主模型失败且未配置 fallback: {safe_primary}")
+                    return ""
+
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    return ""
+                try:
+                    await gemini_circuit.open_circuit_async()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Redis 是保护性状态，不得因为写 marker 失败而跳过 Vertex 保底。
+                    print("⚠️ [Soul进化] 熔断状态写入异常，按 fail-open 继续 fallback")
+
+                try:
+                    return await loop.run_in_executor(None, _call_once, fallback, fallback_model)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as fallback_error:
+                    safe_fallback = safe_error_summary(fallback_error, "fallback")
+                    print(f"⚠️ [Soul进化] fallback 失败: {safe_fallback}; 主模型: {safe_primary}")
+                    return ""
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        print(f"⚠️ [Soul进化] 模型调用失败: {e}")
+        print(f"⚠️ [Soul进化] 模型调用失败: {safe_error_summary(e, 'soul')}")
         return ""
+
+
+def _resolve_main_route_slot(complexity: dict, thinking_level: str) -> str:
+    """保留路由档位语义，避免用相同模型名反推 lite/fast/pro。"""
+    slot = complexity.get("route_slot") if isinstance(complexity, dict) else None
+    if slot in {"lite", "fast", "pro"}:
+        return slot
+    if thinking_level == "minimal":
+        return "lite"
+    # 旧版分析结果没有显式 slot 时选择保守的 fast；不按模型名猜档位。
+    return "fast"
 
 
 def _sanitize_evolution_input(text: str, max_len: int = 200) -> str:
@@ -829,8 +915,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             self.reply_markdown("使用统计", "\n".join(lines), incoming_message)
 
         except Exception as e:
-            print(f"⚠️ 获取统计失败: {e}")
-            self.reply_markdown("系统提示", f"⚠️ 获取统计失败: {str(e)}", incoming_message)
+            safe_error = safe_error_summary(e, "provider")
+            print(f"⚠️ 获取统计失败: {safe_error}")
+            self.reply_markdown("系统提示", f"⚠️ 获取统计失败: {safe_error}", incoming_message)
 
     def _build_display_content(self, thinking: str, response: str, is_thinking: bool = False) -> str:
         """
@@ -953,7 +1040,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                                 else:
                                     vision_sections.append(f"[图片{idx}识别结果]\n(空结果)")
                             except Exception as e:
-                                vision_sections.append(f"[图片{idx}识别失败]\n{e}")
+                                vision_sections.append(
+                                    f"[图片{idx}识别失败]\n{safe_error_summary(e, 'provider')}"
+                                )
                     else:
                         vision_sections.append(
                             "[系统]\n未配置 OPENCLAW_TOOLS_URL / OPENCLAW_TOOLS_TOKEN / OPENCLAW_VISION_TOOL_NAME，无法识别图片。"
@@ -1047,6 +1136,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         has_images = bool(image_data_list)
         soul_text = _load_soul(conversation_id)
         complexity = {}
+        route_slot = None
 
         temperature = 0.7
         if AI_BACKEND == "openclaw":
@@ -1059,8 +1149,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             try:
                 complexity = await _analyze_with_openai(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
-            except Exception as e:
-                print(f"❌ [路由] 预分析异常: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"❌ [路由] 预分析异常: {safe_error_summary(error, 'analysis')}")
                 complexity = {
                     "model": "fast",
                     "thinking_level": "low",
@@ -1071,6 +1163,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
+            route_slot = _resolve_main_route_slot(complexity, thinking_level)
             need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
@@ -1080,8 +1173,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 from app.openrouter_client import analyze_complexity_with_openrouter
                 complexity = await analyze_complexity_with_openrouter(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
-            except Exception as e:
-                print(f"❌ [路由] 预分析异常: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"❌ [路由] 预分析异常: {safe_error_summary(error, 'analysis')}")
                 complexity = {
                     "model": "fast",
                     "thinking_level": "low",
@@ -1092,6 +1187,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
+            route_slot = _resolve_main_route_slot(complexity, thinking_level)
             need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
@@ -1100,8 +1196,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             try:
                 complexity = await _analyze_with_gemini(content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
-            except Exception as e:
-                print(f"❌ [路由] 预分析异常: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"❌ [路由] 预分析异常: {safe_error_summary(error, 'analysis')}")
                 complexity = {
                     "model": GEMINI_MODEL_FAST,
                     "thinking_level": "low",
@@ -1112,6 +1210,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             target_model = complexity.get("model", GEMINI_MODEL_FAST)
             thinking_level = complexity.get("thinking_level", "low")
+            route_slot = _resolve_main_route_slot(complexity, thinking_level)
             need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
@@ -1319,6 +1418,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 enable_search=need_search,
                 temperature=final_temp,
                 top_p=final_top_p,
+                route_slot=route_slot,
                 conversation_id=conversation_id,
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,
@@ -1341,8 +1441,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     continue
 
                 if "error" in chunk:
-                    print(f"❌ {chunk['error']}")
-                    await self.card_helper.stream_update(out_track_id, f"❌ **API 请求失败**\n\n{chunk['error']}", is_finalize=True, content_key="msgContent")
+                    raw_error = chunk.get("error")
+                    error_text = safe_display_text(
+                        raw_error if isinstance(raw_error, str) else "请求失败",
+                        1000,
+                        keep_newlines=True,
+                    )
+                    print(f"❌ {error_text}")
+                    await self.card_helper.stream_update(out_track_id, f"❌ **API 请求失败**\n\n{error_text}", is_finalize=True, content_key="msgContent")
                     return
 
                 # 处理 thinking 开始/结束标记
@@ -1492,10 +1598,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 search_icon = "🌐" if should_show_search_icon(search_info) else ""
                 status_text += f"\n\n<font color='#808080' size='2'>🧠 {thinking_level} {search_icon}</font>"
             else:
-                if usage_info and usage_info.get("model"):
-                    model_short = _shorten_model_name(usage_info["model"])
-                else:
-                    model_short = _shorten_model_name(target_model)
+                model_status = _build_model_status(usage_info, target_model)
                 search_icon = "🌐" if should_show_search_icon(search_info) else ""
                 # 显示真实下发温度 + top_p，⚙️ 标记手动设置
                 _display_temp = final_temp if 'final_temp' in dir() else temperature
@@ -1504,7 +1607,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     _top_p_part = f" | top_p={final_top_p:.2f}⚙️"
                 else:
                     _top_p_part = " | top_p=default"
-                status_text += f"\n\n<font color='#808080' size='2'>🤖 {model_short} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
+                status_text += f"\n\n<font color='#808080' size='2'>{model_status} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
 
             buttons = [
                 {
@@ -1559,8 +1662,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # Soul 自主进化（异步后台，不阻塞响应）
             try:
                 asyncio.create_task(_maybe_evolve_soul(conversation_id, messages_raw, clean_response))
-            except Exception as e:
-                print(f"⚠️ [Soul进化] 调度失败: {e}")
+            except Exception as error:
+                print(f"⚠️ [Soul进化] 调度失败: {safe_error_summary(error, 'soul')}")
             
             await self.card_helper.stream_update(
                 out_track_id,
@@ -1605,8 +1708,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             
             print(f"✅ [DingTalk Stream] AI 卡片流式响应完成")
 
-        except Exception as e:
-            error_msg = f"系统异常: {str(e)}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            error_msg = f"系统异常: {safe_error_summary(error, 'provider')}"
             print(f"💥 {error_msg}")
             try:
                 await self.card_helper.stream_update(

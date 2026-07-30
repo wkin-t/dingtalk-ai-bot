@@ -10,6 +10,7 @@ Soul 系统单元测试
 """
 import os
 import json
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock, call
 
@@ -20,6 +21,83 @@ from app.dingtalk_bot import (
     _handle_soul_command,
 )
 from app.config import BOT_ID
+
+
+class TestGeminiLightweightFallback:
+    """Soul 后台调用与主对话共用 marker，但不生成主对话 footer。"""
+
+    @pytest.mark.asyncio
+    async def test_provider_error_opens_circuit_then_calls_fallback_once(self):
+        import app.dingtalk_bot as bot
+        import app.gemini_client as gemini_client
+        import app.gemini_circuit as gemini_circuit
+
+        fallback = object()
+        with patch.object(bot, "AI_BACKEND", "gemini"), \
+             patch.object(gemini_client, "fallback_client", fallback), \
+             patch.object(bot, "call_gemini_sync", side_effect=[RuntimeError("primary detail"), "fallback soul"]) as call_sync, \
+             patch.object(gemini_circuit, "is_circuit_open_async", AsyncMock(return_value=False)), \
+             patch.object(gemini_circuit, "open_circuit_async", AsyncMock()) as open_circuit:
+            result = await bot._ask_lightweight_model("evolve")
+
+        assert result == "fallback soul"
+        open_circuit.assert_awaited_once()
+        assert call_sync.call_count == 2
+        assert call_sync.call_args_list[1].args[0] is fallback
+
+    @pytest.mark.asyncio
+    async def test_open_circuit_skips_primary(self):
+        import app.dingtalk_bot as bot
+        import app.gemini_client as gemini_client
+        import app.gemini_circuit as gemini_circuit
+
+        fallback = object()
+        with patch.object(bot, "AI_BACKEND", "gemini"), \
+             patch.object(gemini_client, "fallback_client", fallback), \
+             patch.object(bot, "call_gemini_sync", return_value="fallback soul") as call_sync, \
+             patch.object(gemini_circuit, "is_circuit_open_async", AsyncMock(return_value=True)), \
+             patch.object(gemini_circuit, "open_circuit_async", AsyncMock()) as open_circuit:
+            result = await bot._ask_lightweight_model("evolve")
+
+        assert result == "fallback soul"
+        call_sync.assert_called_once()
+        assert call_sync.call_args.args[0] is fallback
+        open_circuit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_redis_write_failure_does_not_block_fallback(self):
+        """熔断 marker 写失败按 fail-open，Vertex 仍必须执行。"""
+        import app.dingtalk_bot as bot
+        import app.gemini_client as gemini_client
+        import app.gemini_circuit as gemini_circuit
+
+        fallback = object()
+        with patch.object(bot, "AI_BACKEND", "gemini"), \
+             patch.object(gemini_client, "fallback_client", fallback), \
+             patch.object(bot, "call_gemini_sync", side_effect=[RuntimeError("primary"), "fallback soul"]) as call_sync, \
+             patch.object(gemini_circuit, "is_circuit_open_async", AsyncMock(return_value=False)), \
+             patch.object(gemini_circuit, "open_circuit_async", AsyncMock(side_effect=RuntimeError("redis"))):
+            result = await bot._ask_lightweight_model("evolve")
+
+        assert result == "fallback soul"
+        assert call_sync.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cancellation_does_not_open_or_submit_fallback(self):
+        import app.dingtalk_bot as bot
+        import app.gemini_client as gemini_client
+        import app.gemini_circuit as gemini_circuit
+
+        fallback = object()
+        with patch.object(bot, "AI_BACKEND", "gemini"), \
+             patch.object(gemini_client, "fallback_client", fallback), \
+             patch.object(bot, "call_gemini_sync", side_effect=asyncio.CancelledError()), \
+             patch.object(gemini_circuit, "is_circuit_open_async", AsyncMock(return_value=False)), \
+             patch.object(gemini_circuit, "open_circuit_async", AsyncMock()) as open_circuit:
+            with pytest.raises(asyncio.CancelledError):
+                await bot._ask_lightweight_model("evolve")
+
+        open_circuit.assert_not_awaited()
 
 
 # ─── _soul_filename 测试 ──────────────────────────────────────

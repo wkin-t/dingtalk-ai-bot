@@ -45,6 +45,10 @@ GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "").strip().rstrip("/")
 # 中转站的认证 key（作为 x-goog-api-key 下发）；不设则复用 GEMINI_API_KEY
 GEMINI_API_BASE_KEY = os.getenv("GEMINI_API_BASE_KEY", "").strip() or GEMINI_API_KEY
 
+# Gemini 文本保底路径。fallback key 必须显式配置，不能复用直连 Google key。
+GEMINI_API_BASE_FALLBACK = os.getenv("GEMINI_API_BASE_FALLBACK", "").strip().rstrip("/")
+GEMINI_API_BASE_FALLBACK_KEY = os.getenv("GEMINI_API_BASE_FALLBACK_KEY", "").strip()
+
 # 钉钉配置
 DINGTALK_CLIENT_ID = os.getenv("DINGTALK_CLIENT_ID")
 DINGTALK_CLIENT_SECRET = os.getenv("DINGTALK_CLIENT_SECRET")
@@ -262,6 +266,12 @@ MODEL_LITE   = os.getenv("MODEL_LITE",   _md["lite"])    # lite 档（简单问�
 MODEL_FAST   = os.getenv("MODEL_FAST",   _md["fast"])    # fast 档（日常问答）
 MODEL_PRO    = os.getenv("MODEL_PRO",    _md["pro"])     # pro 档（复杂推理）
 
+# Vertex fallback 模型名仅作为显式 route slot 的可选 override；空值沿用主模型名。
+MODEL_ROUTER_FALLBACK = os.getenv("MODEL_ROUTER_FALLBACK", "").strip()
+MODEL_LITE_FALLBACK = os.getenv("MODEL_LITE_FALLBACK", "").strip()
+MODEL_FAST_FALLBACK = os.getenv("MODEL_FAST_FALLBACK", "").strip()
+MODEL_PRO_FALLBACK = os.getenv("MODEL_PRO_FALLBACK", "").strip()
+
 # 兼容别名，避免破坏现有引用
 DEFAULT_MODEL     = MODEL_PRO
 GEMINI_MODEL_LITE = MODEL_ROUTER
@@ -273,6 +283,12 @@ GEMINI_MODEL_FAST = MODEL_FAST
 GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "gemini-3.5-flash")
 # 搜索 fallback 超时（秒）：代理半死/网络黑洞时避免挂死整个对话流
 SEARCH_TIMEOUT_SECONDS = _get_int("SEARCH_TIMEOUT_SECONDS", 15)
+
+# 熔断状态专用 Redis 超时；不要复用数据层的 5 秒连接/读写超时。
+GEMINI_CIRCUIT_REDIS_TIMEOUT_SECONDS = max(
+    0.05,
+    _get_float("GEMINI_CIRCUIT_REDIS_TIMEOUT_SECONDS", 0.2),
+)
 
 
 def get_bot_display_name() -> str:
@@ -303,7 +319,7 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 
 # 是否启用 Google Search (让 AI 自动搜索实时信息)
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "true").lower() == "true"
-SEARCH_FALLBACK_PROVIDER = os.getenv("SEARCH_FALLBACK_PROVIDER", "gemini").strip().lower()
+SEARCH_FALLBACK_PROVIDER = os.getenv("SEARCH_FALLBACK_PROVIDER", "none").strip().lower()
 
 # 多 agent 角色重塑 + cache + 采样改造 feature flags
 ENABLE_CACHE_BLOCKS    = _get_bool("ENABLE_CACHE_BLOCKS", True)       # B: system prompt 分块 cache

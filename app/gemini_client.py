@@ -7,27 +7,52 @@ Gemini 官方 SDK 客户端 (使用新版 google-genai)
 import os
 import time
 import asyncio
+import re
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from google import genai
 from google.genai import types
 from app.ai.sampling_clamp import clamp_top_p
+from app.error_safety import safe_error_summary, safe_display_text, safe_model_name
 from app.config import (
     GEMINI_API_KEY,
     GEMINI_API_BASE,
     GEMINI_API_BASE_KEY,
+    GEMINI_API_BASE_FALLBACK,
+    GEMINI_API_BASE_FALLBACK_KEY,
     DEFAULT_MODEL,
     GEMINI_MODEL_LITE,
     GEMINI_MODEL_FAST,
+    MODEL_ROUTER_FALLBACK,
+    MODEL_LITE_FALLBACK,
+    MODEL_FAST_FALLBACK,
+    MODEL_PRO_FALLBACK,
     GEMINI_SEARCH_MODEL,
     SEARCH_TIMEOUT_SECONDS,
     ENABLE_THINKING,
     SOCKS_PROXY,
     ENABLE_SEARCH,
 )
+from app import gemini_circuit
 
 # 配置代理 (仅 Gemini API 使用代理，通过 httpx_client 单独配置)
 # 将 socks5h:// 转换为 socks5:// (httpx 格式)
 proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
+
+
+class _ProviderPreOutputError(Exception):
+    """provider 在尚未产生用户可见输出时失败。"""
+
+    def __init__(self, error: BaseException):
+        super().__init__()
+        self.error = error
+
+
+class _ProviderStreamError(Exception):
+    """provider 在流式处理阶段失败，禁止重放。"""
+
+    def __init__(self, error: BaseException):
+        super().__init__()
+        self.error = error
 
 
 def _build_direct_client() -> genai.Client:
@@ -67,6 +92,85 @@ else:
     direct_client = client
 
 
+# Vertex fallback 只用于文本/搜索调用；生图仍明确使用上面的 direct_client。
+fallback_client = None
+if GEMINI_API_BASE_FALLBACK:
+    if not GEMINI_API_BASE_FALLBACK_KEY:
+        print("⚠️ Gemini fallback base 已配置但缺少显式 fallback key，保底路径未启用")
+    else:
+        try:
+            print("🔗 Gemini SDK fallback 已启用（Vertex）")
+            fallback_client = genai.Client(
+                api_key=GEMINI_API_BASE_FALLBACK_KEY,
+                http_options=types.HttpOptions(
+                    api_version="v1beta",
+                    base_url=GEMINI_API_BASE_FALLBACK,
+                )
+            )
+        except Exception:
+            print("⚠️ Gemini fallback client 构建失败，保底路径未启用")
+
+
+def _select_fallback_model(primary_model: str, route_slot: Optional[str] = None) -> str:
+    """按调用方显式 route slot 选择 fallback override，默认沿用主模型名。"""
+    overrides = {
+        "router": MODEL_ROUTER_FALLBACK,
+        "lite": MODEL_LITE_FALLBACK,
+        "fast": MODEL_FAST_FALLBACK,
+        "pro": MODEL_PRO_FALLBACK,
+    }
+    return overrides.get(route_slot, "") or primary_model
+
+
+async def _is_circuit_open_safe() -> bool:
+    """熔断状态读取失败时按未熔断处理，不能反向阻断主请求。"""
+    try:
+        return await gemini_circuit.is_circuit_open_async()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        print("⚠️ [Gemini 熔断] 状态读取异常，按 fail-open 处理")
+        return False
+
+
+async def _open_circuit_safe() -> None:
+    """记录 provider 故障；Redis 失败不能阻断后续 fallback。"""
+    try:
+        await gemini_circuit.open_circuit_async()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        print("⚠️ [Gemini 熔断] 状态写入异常，按 fail-open 处理")
+
+
+_stale_circuit_checked = False
+
+
+async def warn_stale_circuit_without_fallback() -> None:
+    """fallback 未配置时最多探测一次 stale marker，并保持主路径可用。"""
+    global _stale_circuit_checked
+    if fallback_client is not None or _stale_circuit_checked:
+        return
+    _stale_circuit_checked = True
+    try:
+        if await gemini_circuit.is_circuit_open_async():
+            print("⚠️ [Gemini 熔断] 检测到 marker 但未配置 fallback，忽略并继续主路径")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        print("⚠️ [Gemini 熔断] stale marker 检查异常，按 fail-open 处理")
+
+
+def call_gemini_sync(active_client: genai.Client, model: str, prompt: str) -> str:
+    """执行一次同步 Gemini provider 调用，不包含熔断或 fallback 副作用。"""
+    response = active_client.models.generate_content(
+        model=model,
+        contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+        config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=500),
+    )
+    return response.text or ""
+
+
 async def analyze_complexity_with_model(content: str, has_images: bool = False, analysis_model: str = None, soul_text: str = "") -> dict:
     """
     使用 Gemini 模型快速分析问题复杂度
@@ -86,8 +190,6 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         }
     """
     import json
-    import re
-    import traceback
 
     if analysis_model is None:
         analysis_model = GEMINI_MODEL_LITE
@@ -120,25 +222,30 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
    - false: 不需要联网（默认）
 
-4. thinking_text:
+4. route_slot:
+   - "lite": 简单问候、短确认，通常配合 minimal thinking
+   - "fast": 日常问答、代码、一般分析
+   - "pro": 复杂数学证明、学术研究、系统架构设计
+
+5. thinking_text:
    - 一句简短的思考状态（10字以内，不用emoji），要和问题内容相关，风格符合你的性格
    - {soul_instruction}例如: 代码问题→"正在编译思路中", 数学问题→"开始推演计算", 闲聊→"让我想想"
    - 要有个性、不重复
 
-5. need_image_gen:
+6. need_image_gen:
    - true: 用户明确要求生成图片、画画、插图、绘制、画一张、生成图片
    - false: 不需要生图（默认）
 
-6. image_gen_params (仅当 need_image_gen=true 时):
+7. image_gen_params (仅当 need_image_gen=true 时):
    - prompt: 提取用户描述的图片内容，转为英文描述（生图模型只支持英文）
    - aspect_ratio: 解析用户指定的比例 → "1:1" | "3:4" | "4:3" | "9:16" | "16:9"，默认 "1:1"
    - number_of_images: 解析数量 → 1-4，默认 1
 
-7. need_image_edit:
+8. need_image_edit:
    - true: 有图片(has_images=是) 且用户文字中明确包含修改指令（"帮我改"、"修改"、"换颜色"、"去掉背景"、"再生成类似的"等）
    - false: 默认 — 以下情况均为 false：无图片；只发图片没有文字；文字是提问/分析（"这是什么"、"帮我看看"、"分析一下"）；没有明确修改词
 
-8. temperature:
+9. temperature:
    - "precise": 代码、数学、翻译、事实查询（需要准确性）
    - "balanced": 普通问答（默认）
    - "creative": 写作、诗歌、头脑风暴、创意任务
@@ -148,27 +255,86 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"{GEMINI_MODEL_FAST}","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+{{"model":"{GEMINI_MODEL_FAST}","route_slot":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+
+    async def _collect_analysis(active_client: genai.Client, model: str) -> str:
+        """收集完整预分析流；任意 provider iterator 异常都回给 fallback 边界。"""
+        raw_parts = []
+        try:
+            response = await active_client.aio.models.generate_content_stream(
+                model=model,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=300,
+                ),
+            )
+            iterator = response.__aiter__()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise _ProviderPreOutputError(error) from None
+        while True:
+            try:
+                chunk = await iterator.__anext__()
+            except StopAsyncIteration:
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise _ProviderPreOutputError(error) from None
+
+            try:
+                if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                    for part in chunk.candidates[0].content.parts:
+                        if not getattr(part, "thought", False) and part.text:
+                            raw_parts.append(part.text)
+            except Exception as error:
+                print(f"⚠️ [预分析] chunk 处理失败: {safe_error_summary(error, 'analysis')}")
+
+        return "".join(raw_parts)
 
     try:
         print(f"🔍 [预分析] 准备调用 {analysis_model}...")
-        # generate_content（非流式）在 Python 3.14 下通过同步 httpx.Client 会触发 Network unreachable
-        # 改用 generate_content_stream，与主调用路径一致，代理配置有效
-        raw_parts = []
-        async for chunk in await client.aio.models.generate_content_stream(
-            model=analysis_model,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=300
-            )
-        ):
-            if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
-                for part in chunk.candidates[0].content.parts:
-                    if not getattr(part, 'thought', False) and part.text:
-                        raw_parts.append(part.text)
-        result_text = "".join(raw_parts)
-        print(f"📝 [预分析] 原始返回: {result_text[:200]}")
+        fallback_model = _select_fallback_model(analysis_model, "router")
+        using_fallback = False
+        primary_error = None
+
+        if fallback_client is None:
+            await warn_stale_circuit_without_fallback()
+        if fallback_client is not None and await _is_circuit_open_safe():
+            active_client = fallback_client
+            active_model = fallback_model
+            using_fallback = True
+        else:
+            active_client = client
+            active_model = analysis_model
+
+        try:
+            result_text = await _collect_analysis(active_client, active_model)
+        except _ProviderPreOutputError as failure:
+            if using_fallback or fallback_client is None:
+                safe_failure = safe_error_summary(failure.error, "analysis")
+                if using_fallback:
+                    print(f"⚠️ [预分析] Vertex fallback 失败: {safe_failure}")
+                else:
+                    print(f"⚠️ [预分析] 主模型失败且未配置 fallback: {safe_failure}")
+                raise
+
+            primary_error = safe_error_summary(failure.error, "analysis")
+            print(f"⚠️ [预分析] 主模型失败，切换 Vertex: {primary_error}")
+            await _open_circuit_safe()
+            using_fallback = True
+            active_client = fallback_client
+            active_model = fallback_model
+            try:
+                result_text = await _collect_analysis(active_client, active_model)
+            except _ProviderPreOutputError as fallback_failure:
+                fallback_error = safe_error_summary(fallback_failure.error, "fallback")
+                print(f"⚠️ [预分析] Vertex fallback 失败: {fallback_error}; 主模型: {primary_error}")
+                raise
+
+        print(f"📝 [预分析] 返回摘要: {result_text[:200]}")
 
         # 解析 JSON（支持嵌套对象）
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
@@ -179,6 +345,13 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
                 result["model"] = GEMINI_MODEL_FAST
             if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
                 result["thinking_level"] = "low"
+            route_slot = result.get("route_slot")
+            if route_slot not in {"lite", "fast", "pro"}:
+                if result.get("thinking_level") == "minimal":
+                    route_slot = "lite"
+                else:
+                    route_slot = "fast"
+            result["route_slot"] = route_slot
             if "need_search" not in result:
                 result["need_search"] = False
             if "need_image_gen" not in result:
@@ -188,16 +361,21 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
             print(f"🤖 预分析结果: {result}")
             return result
         else:
-            print(f"⚠️ 无法从返回中提取 JSON: {result_text}")
+            print("⚠️ 无法从返回中提取 JSON，使用降级默认配置")
 
-    except Exception as e:
-        print(f"⚠️ 模型预分析失败: {e}")
-        traceback.print_exc()
+    except asyncio.CancelledError:
+        raise
+    except _ProviderPreOutputError:
+        # 上面的 provider 分支已输出安全摘要；这里仅进入原有保守路由。
+        pass
+    except Exception as error:
+        print(f"⚠️ 模型预分析失败: {safe_error_summary(error, 'analysis')}")
 
     # 降级：返回保守的默认值
     print("⚠️ 使用降级默认配置")
     return {
         "model": GEMINI_MODEL_FAST,
+        "route_slot": "fast",
         "thinking_level": "low",
         "need_search": False,
         "reason": "预分析失败，使用默认配置",
@@ -262,8 +440,10 @@ def _convert_openai_to_gemini(messages: List[Dict[str, Any]]) -> tuple[Optional[
                                 data=image_bytes,
                                 mime_type=mime_type
                             ))
-                        except Exception as e:
-                            print(f"⚠️ 解析图片 data URL 失败: {e}")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            print(f"⚠️ 解析图片 data URL 失败: {safe_error_summary(error, 'provider')}")
         else:
             parts.append(types.Part.from_text(text=str(content)))
 
@@ -279,6 +459,7 @@ async def call_gemini_stream(
     enable_search: bool = False,
     temperature: float = 0.7,
     top_p: Optional[float] = None,
+    route_slot: Optional[str] = None,
 ) -> AsyncGenerator[Dict[str, str], None]:
     """
     调用 Gemini API 进行流式生成
@@ -289,6 +470,7 @@ async def call_gemini_stream(
         thinking_level: 思考深度
         enable_search: 是否启用 Google Search
         top_p: 核采样参数，None 表示使用 Gemini 默认值
+        route_slot: 调用方明确的模型档位，用于选择对应 fallback override
 
     Yields:
         {"content": "...", "thinking": "..."} 或 {"error": "..."}
@@ -377,111 +559,216 @@ async def call_gemini_stream(
                 print("⚡ Thinking 模式 (level=minimal, 最快响应)")
                 print("⚡ Thinking 模式 (level=low, 快速响应)")
 
-        # 异步流式生成（原生 async，不阻塞 event loop）
-        response = await client.aio.models.generate_content_stream(
-            model=target_model,
-            contents=contents,
-            config=config
-        )
+        async def _iterate_attempt(
+            active_client: genai.Client,
+            active_model: str,
+            fallback_used: bool,
+            circuit_open: bool,
+            fallback_error: Optional[str],
+            state: Dict[str, Any],
+        ):
+            """拉取一次 provider 流，首个可见输出前的异常交给外层 fallback。"""
+            nonlocal input_tokens, output_tokens, cached_tokens
+            thinking_sent = False
+            search_executed_sent = False
+            actual_model = active_model
 
-        # 标记是否已发送 thinking 内容
-        thinking_sent = False
-        # 标记是否已上报"真实执行搜索"（grounding_metadata 出现即证明用了 Google Search）
-        search_executed_sent = False
-
-        # 迭代异步流式响应
-        async for chunk in response:
             try:
-                # 提取 usage_metadata (token 统计)
-                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-                    usage = chunk.usage_metadata
-                    if hasattr(usage, 'prompt_token_count'):
-                        input_tokens = usage.prompt_token_count or 0
-                    if hasattr(usage, 'candidates_token_count'):
-                        output_tokens = usage.candidates_token_count or 0
-                    if hasattr(usage, 'cached_content_token_count'):
-                        _c = usage.cached_content_token_count or 0
-                        cached_tokens = _c if isinstance(_c, int) else 0
+                response = await active_client.aio.models.generate_content_stream(
+                    model=active_model,
+                    contents=contents,
+                    config=config,
+                )
+                iterator = response.__aiter__()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise _ProviderPreOutputError(error) from None
 
-                # 检查是否有候选内容
-                if not chunk.candidates:
-                    continue
+            while True:
+                try:
+                    chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if state["output_started"]:
+                        raise _ProviderStreamError(error) from None
+                    raise _ProviderPreOutputError(error) from None
 
-                candidate = chunk.candidates[0]
+                try:
+                    model_version = getattr(chunk, "model_version", None)
+                    if isinstance(model_version, str) and model_version.strip():
+                        actual_model = safe_model_name(model_version.strip())
 
-                # 真实搜索信号：模型用了 Google Search 时 candidate 带 grounding_metadata
-                if not search_executed_sent and getattr(candidate, "grounding_metadata", None):
-                    search_executed_sent = True
-                    print("🌐 [搜索执行] Gemini grounding_metadata 回流，本次真实联网")
-                    yield {"search": {"executed": True}}
+                    if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                        usage = chunk.usage_metadata
+                        if hasattr(usage, "prompt_token_count"):
+                            input_tokens = usage.prompt_token_count or 0
+                        if hasattr(usage, "candidates_token_count"):
+                            output_tokens = usage.candidates_token_count or 0
+                        if hasattr(usage, "cached_content_token_count"):
+                            cached = usage.cached_content_token_count or 0
+                            cached_tokens = cached if isinstance(cached, int) else 0
 
-                # 检查 finish_reason - 如果因安全原因被阻止，报告给用户
-                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                    finish_reason = str(candidate.finish_reason)
-                    if 'SAFETY' in finish_reason:
-                        yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
-                        return
-                    elif finish_reason not in ['STOP', 'MAX_TOKENS', '']:
-                        print(f"⚠️ 异常的 finish_reason: {finish_reason}")
-
-                if not candidate.content or not candidate.content.parts:
-                    continue
-
-                for part in candidate.content.parts:
-                    # part.thought 是布尔值，表示这个 part 是否是思考内容
-                    # 思考内容和正式回复都在 part.text 里
-                    is_thought = getattr(part, 'thought', False)
-                    text_content = getattr(part, 'text', '')
-
-                    if not text_content:
+                    if not chunk.candidates:
                         continue
 
-                    if is_thought:
-                        # 这是思考内容
-                        if ENABLE_THINKING and not thinking_sent:
-                            yield {"thinking_start": True}
-                            thinking_sent = True
-                        yield {"thinking": text_content}
-                    else:
-                        # 这是正式回复
-                        if thinking_sent:
-                            yield {"thinking_end": True}
-                            thinking_sent = False
-                        yield {"content": text_content}
+                    candidate = chunk.candidates[0]
+                    if not search_executed_sent and getattr(candidate, "grounding_metadata", None):
+                        search_executed_sent = True
+                        print("🌐 [搜索执行] Gemini grounding_metadata 回流，本次真实联网")
+                        yield {"search": {"executed": True}}
 
-            except ValueError as e:
-                print(f"⚠️ Chunk 处理警告: {e}")
-                continue
-            except Exception as e:
-                print(f"⚠️ 处理 chunk 异常: {e}")
-                continue
+                    if getattr(candidate, "finish_reason", None):
+                        finish_reason = str(candidate.finish_reason)
+                        if "SAFETY" in finish_reason:
+                            yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
+                            return
+                        if finish_reason not in ["STOP", "MAX_TOKENS", ""]:
+                            print(f"⚠️ 异常的 finish_reason: {finish_reason}")
 
-        # 计算延迟
-        latency_ms = int((time.time() - start_time) * 1000)
-        print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
-        _cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
-        print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({_cache_pct}%)")
+                    if not candidate.content or not candidate.content.parts:
+                        continue
 
-        # 检查是否返回了内容
-        if output_tokens == 0:
-            yield {"error": "⚠️ Gemini API 没有返回任何内容。可能原因：\n1. 图片内容触发了安全过滤器\n2. 图片格式不支持或损坏\n3. API 遇到内部错误\n\n请尝试：\n- 更换其他图片\n- 添加文字描述一起发送\n- 稍后重试"}
-            return
+                    for part in candidate.content.parts:
+                        is_thought = getattr(part, "thought", False)
+                        text_content = getattr(part, "text", "")
+                        if not text_content:
+                            continue
 
-        # 返回统计信息
-        yield {
-            "usage": {
-                "model": target_model,
+                        if is_thought:
+                            if ENABLE_THINKING and not thinking_sent:
+                                yield {"thinking_start": True}
+                                thinking_sent = True
+                            if ENABLE_THINKING:
+                                state["output_started"] = True
+                                yield {"thinking": text_content}
+                        else:
+                            if thinking_sent:
+                                yield {"thinking_end": True}
+                                thinking_sent = False
+                            state["output_started"] = True
+                            yield {"content": text_content}
+
+                except asyncio.CancelledError:
+                    raise
+                except ValueError as error:
+                    print(f"⚠️ Chunk 处理警告: {safe_error_summary(error, 'stream')}")
+                except Exception as error:
+                    print(f"⚠️ 处理 chunk 异常: {safe_error_summary(error, 'stream')}")
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+            cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
+            print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({cache_pct}%)")
+
+            if output_tokens == 0 and not state["output_started"]:
+                yield {"error": "⚠️ Gemini API 没有返回任何内容。可能原因：\n1. 图片内容触发了安全过滤器\n2. 图片格式不支持或损坏\n3. API 遇到内部错误\n\n请尝试：\n- 更换其他图片\n- 添加文字描述一起发送\n- 稍后重试"}
+                return
+
+            usage_payload = {
+                "model": safe_model_name(actual_model),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cached_tokens": cached_tokens,
-                "latency_ms": latency_ms
+                "latency_ms": latency_ms,
             }
-        }
+            if fallback_used:
+                usage_payload.update({
+                    "requested_model": safe_model_name(target_model),
+                    "fallback": True,
+                    "fallback_error": fallback_error or "circuit open",
+                    "circuit_open": circuit_open,
+                })
+            yield {"usage": usage_payload}
 
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Gemini API 错误: {error_msg}")
-        yield {"error": f"Gemini API Error: {error_msg}"}
+        primary_model = target_model
+        fallback_model = _select_fallback_model(primary_model, route_slot)
+        fallback_used = False
+        circuit_open = False
+        fallback_error = None
+
+        if fallback_client is None:
+            await warn_stale_circuit_without_fallback()
+        if fallback_client is not None and await _is_circuit_open_safe():
+            active_client = fallback_client
+            active_model = fallback_model
+            fallback_used = True
+            circuit_open = True
+            fallback_error = "circuit open"
+        else:
+            active_client = client
+            active_model = primary_model
+
+        state = {"output_started": False}
+        try:
+            async for chunk in _iterate_attempt(
+                active_client,
+                active_model,
+                fallback_used,
+                circuit_open,
+                fallback_error,
+                state,
+            ):
+                yield chunk
+        except _ProviderPreOutputError as failure:
+            if fallback_used:
+                fallback_safe = safe_error_summary(failure.error, "fallback")
+                print(f"❌ [Gemini] Vertex fallback 失败: {fallback_safe}")
+                yield {
+                    "error": (
+                        f"❌ fallback 模型 {safe_model_name(active_model)}:\n{fallback_safe}\n\n"
+                        f"主模型 {safe_model_name(primary_model)}:\n{safe_display_text(fallback_error or 'circuit open', 1000)}"
+                    )
+                }
+                return
+
+            if fallback_client is None:
+                safe_primary = safe_error_summary(failure.error, "provider")
+                print(f"❌ [Gemini] 主模型失败且未配置 fallback: {safe_primary}")
+                yield {"error": f"Gemini API Error: {safe_primary}"}
+                return
+
+            fallback_error = safe_error_summary(failure.error, "provider")
+            print(f"⚠️ [Gemini] 主模型 {safe_model_name(primary_model)} 失败，切换 Vertex: {fallback_error}")
+            await _open_circuit_safe()
+            fallback_used = True
+            state = {"output_started": False}
+            input_tokens = output_tokens = cached_tokens = 0
+            try:
+                async for chunk in _iterate_attempt(
+                    fallback_client,
+                    fallback_model,
+                    True,
+                    False,
+                    fallback_error,
+                    state,
+                ):
+                    yield chunk
+            except (_ProviderPreOutputError, _ProviderStreamError) as fallback_failure:
+                fallback_safe = safe_error_summary(fallback_failure.error, "fallback")
+                print(f"❌ [Gemini] fallback 失败: {fallback_safe}; 主模型: {fallback_error}")
+                yield {
+                    "error": (
+                        f"❌ fallback 模型 {safe_model_name(fallback_model)}:\n{fallback_safe}\n\n"
+                        f"主模型 {safe_model_name(primary_model)}:\n{safe_display_text(fallback_error, 1000)}"
+                    )
+                }
+                return
+        except _ProviderStreamError as failure:
+            safe_stream_error = safe_error_summary(failure.error, "stream")
+            print(f"❌ [Gemini] 流式响应中断: {safe_stream_error}")
+            yield {"error": f"Gemini API Error: {safe_stream_error}"}
+            return
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        safe_error = safe_error_summary(error, "provider")
+        print(f"❌ Gemini API 错误: {safe_error}")
+        yield {"error": f"Gemini API Error: {safe_error}"}
 
 
 async def google_search(query: str) -> Optional[str]:
@@ -523,6 +810,8 @@ async def google_search(query: str) -> Optional[str]:
     except asyncio.TimeoutError:
         print(f"⚠️ [Google Search] 搜索超时（>{SEARCH_TIMEOUT_SECONDS}s）: {query[:50]}")
         return None
-    except Exception as e:
-        print(f"⚠️ [Google Search] 搜索失败: {e}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        print(f"⚠️ [Google Search] 搜索失败: {safe_error_summary(error, 'provider')}")
         return None

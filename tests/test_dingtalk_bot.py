@@ -45,3 +45,60 @@ class TestShortenModelName:
     def test_no_slash_no_at_no_colon(self):
         from app.dingtalk_bot import _shorten_model_name
         assert _shorten_model_name("claude-haiku-4-5") == "claude-haiku-4-5"
+
+
+class TestModelStatus:
+    """模型 footer 的显示顺序和安全编码。"""
+
+    def test_fallback_shows_actual_then_primary_error(self):
+        from app.dingtalk_bot import _build_model_status
+
+        status = _build_model_status(
+            {
+                "model": "gemini-3.6-flash",
+                "requested_model": "gemini-3.6-flash-tiered",
+                "fallback": True,
+                "fallback_error": "Gemini server error HTTP 503: upstream </font>\n\u202e details",
+            },
+            "unused-primary",
+        )
+
+        assert status.index("🤖 gemini-3.6-flash") < status.index("主模型 gemini-3.6-flash-tiered")
+        assert "&lt;/font&gt;" in status
+        assert "\u202e" not in status
+        assert "Gemini server error HTTP 503" in status
+
+    def test_open_circuit_hides_historical_error(self):
+        from app.dingtalk_bot import _build_model_status
+
+        status = _build_model_status(
+            {
+                "model": "gemini-3.6-flash",
+                "requested_model": "gemini-3.6-flash-tiered",
+                "fallback": True,
+                "circuit_open": True,
+                "fallback_error": "historical secret HTTP 503",
+            },
+            "unused-primary",
+        )
+
+        assert "🤖 gemini-3.6-flash" in status
+        assert "主模型 gemini-3.6-flash-tiered: circuit open" in status
+        assert "HTTP" not in status
+
+    def test_primary_status_keeps_existing_shape(self):
+        from app.dingtalk_bot import _build_model_status
+
+        assert _build_model_status({"model": "gemini-3.6-flash"}, "unused") == "🤖 3.6-flash"
+
+    def test_error_card_display_preserves_markdown_newlines(self):
+        from app.dingtalk_bot import safe_display_text
+
+        rendered = safe_display_text(
+            "❌ fallback 模型异常\n\n主模型异常\n1. 图片触发安全过滤\n2. 请稍后重试",
+            1000,
+            keep_newlines=True,
+        )
+
+        assert "fallback 模型异常\n\n主模型异常" in rendered
+        assert "1. 图片触发安全过滤\n2. 请稍后重试" in rendered

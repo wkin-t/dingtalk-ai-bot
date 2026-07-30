@@ -12,6 +12,26 @@ import pytest
 from app.openai_client import _build_client, _split_messages_for_responses, call_openai_stream
 
 
+def test_search_fallback_provider_defaults_to_none(monkeypatch):
+    """环境未配置时默认关闭，不受开发机 .env 或进程配置影响。"""
+    import dotenv
+    import runpy
+    from pathlib import Path
+
+    monkeypatch.delenv("SEARCH_FALLBACK_PROVIDER", raising=False)
+    original_load_dotenv = dotenv.load_dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
+    try:
+        isolated_config = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "app" / "config.py"),
+            run_name="__test_config__",
+        )
+    finally:
+        monkeypatch.setattr(dotenv, "load_dotenv", original_load_dotenv)
+
+    assert isolated_config["SEARCH_FALLBACK_PROVIDER"] == "none"
+
+
 # ------------- _split_messages_for_responses (pure) -------------
 
 def test_build_client_omits_base_url_for_native_openai(monkeypatch):
@@ -428,12 +448,13 @@ async def test_chat_completions_search_fallback_injects_gemini_summary(
     mock_openai_cls.return_value = mock_client
     mock_client.chat.completions.create = AsyncMock(return_value=_make_async_stream([]))
 
-    async for _ in call_openai_stream(
-        [{"role": "user", "content": "查一下今天的新闻"}],
-        target_model="fast",
-        enable_search=True,
-    ):
-        pass
+    with patch("app.openai_client.SEARCH_FALLBACK_PROVIDER", "gemini"):
+        async for _ in call_openai_stream(
+            [{"role": "user", "content": "查一下今天的新闻"}],
+            target_model="fast",
+            enable_search=True,
+        ):
+            pass
 
     mock_google_search.assert_awaited_once()
     call_kwargs = mock_client.chat.completions.create.call_args.kwargs
@@ -441,6 +462,35 @@ async def test_chat_completions_search_fallback_injects_gemini_summary(
     assert sent_messages[0]["role"] == "system"
     assert "搜索摘要：今天有重要新闻。" in sent_messages[0]["content"]
     assert sent_messages[-1]["content"] == "查一下今天的新闻"
+
+
+@pytest.mark.asyncio
+@patch("app.openai_client.google_search", new_callable=AsyncMock)
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_search_fallback_disabled_does_not_call_or_inject_summary(
+    mock_openai_cls, mock_get_config, mock_google_search,
+):
+    """SEARCH_FALLBACK_PROVIDER=none 时不调用旧搜索，也不注入 system 摘要。"""
+    mock_get_config.return_value = _model_config("gemini-3.5-flash", supports_search=False)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create = AsyncMock(return_value=_make_async_stream([]))
+
+    with patch("app.openai_client.SEARCH_FALLBACK_PROVIDER", "none"):
+        async for _ in call_openai_stream(
+            [{"role": "user", "content": "查一下今天的新闻"}],
+            target_model="fast",
+            enable_search=True,
+        ):
+            pass
+
+    mock_google_search.assert_not_awaited()
+    sent_messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+    assert not any(
+        message.get("role") == "system" and "联网搜索结果" in message.get("content", "")
+        for message in sent_messages
+    )
 
 
 @pytest.mark.asyncio
@@ -459,13 +509,14 @@ async def test_responses_search_fallback_injects_gemini_summary_when_native_disa
     mock_openai_cls.return_value = mock_client
     mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
 
-    async for _ in call_openai_stream(
-        [{"role": "user", "content": "最新 OpenAI web search API 是什么"}],
-        target_model="fast",
-        enable_search=True,
-        conversation_id="conv-search-fallback",
-    ):
-        pass
+    with patch("app.openai_client.SEARCH_FALLBACK_PROVIDER", "gemini"):
+        async for _ in call_openai_stream(
+            [{"role": "user", "content": "最新 OpenAI web search API 是什么"}],
+            target_model="fast",
+            enable_search=True,
+            conversation_id="conv-search-fallback",
+        ):
+            pass
 
     mock_google_search.assert_awaited_once()
     call_kwargs = mock_client.responses.create.call_args.kwargs

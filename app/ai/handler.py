@@ -15,6 +15,7 @@ from app.config import (
 from app.memory import get_history, update_history
 from app.ai.router import analyze_complexity_unified
 from app.ai.sampling_clamp import clamp_temperature
+from app.error_safety import safe_error_summary
 
 TEMPERATURE_MAP = {
     "precise": 0.1,   # 代码、数学、事实查询
@@ -192,7 +193,9 @@ class AIHandler:
 
         # 智能路由
         has_images = bool(image_data_list)
-        target_model, thinking_level, need_search, temperature = await self._route_model(content, has_images)
+        target_model, thinking_level, need_search, temperature, route_slot = await self._route_model(
+            content, has_images
+        )
 
         print(f"🎯 [AIHandler] 路由结果: model={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
@@ -216,6 +219,7 @@ class AIHandler:
                 enable_search=need_search,
                 temperature=final_temp,
                 top_p=final_top_p,
+                route_slot=route_slot,
                 conversation_id=session_key,
                 sender_id=user_id,
                 sender_nick=sender_nick,
@@ -278,11 +282,11 @@ class AIHandler:
 
             return full_response
 
-        except Exception as e:
-            error_msg = f"系统异常: {str(e)}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            error_msg = f"系统异常: {safe_error_summary(error, 'provider')}"
             print(f"💥 [AIHandler] {error_msg}")
-            import traceback
-            traceback.print_exc()
             return f"💥 **系统异常**\n\n{error_msg}"
     def _format_history_with_meta(self, history_messages: List[Dict], current_bot_id: str, cutoff_at=None) -> List[Dict]:
         """格式化历史消息，保留 bot_id 给后续 transform 层。"""
@@ -301,14 +305,16 @@ class AIHandler:
         """
         if AI_BACKEND == "openclaw":
             # OpenClaw 模式: Gateway 自行决定模型和 thinking，客户端无法控制
-            return ("openclaw", "default", False)
+            return ("openclaw", "default", False, 0.7, None)
         elif AI_BACKEND == "openrouter":
             # OpenRouter 模式: 用 Haiku 替代 Gemini flash-lite 做路由判断
             from app.openrouter_client import analyze_complexity_with_openrouter
             try:
                 complexity = await analyze_complexity_with_openrouter(content, has_images)
-            except Exception as e:
-                print(f"❌ [OR路由] 异常: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"❌ [OR路由] 异常: {safe_error_summary(error, 'analysis')}")
                 complexity = {
                     "model": "fast",
                     "thinking_level": "low",
@@ -321,8 +327,10 @@ class AIHandler:
                 from app.gemini_client import analyze_complexity_with_model  # 延迟导入，避免循环依赖
                 complexity = await analyze_complexity_with_model(content, has_images)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
-            except Exception as e:
-                print(f"❌ [路由] 预分析异常: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"❌ [路由] 预分析异常: {safe_error_summary(error, 'analysis')}")
                 complexity = {
                     "model": GEMINI_MODEL_FAST,
                     "thinking_level": "low",
@@ -332,10 +340,13 @@ class AIHandler:
 
         target_model = complexity.get("model", "fast")
         thinking_level = complexity.get("thinking_level", "low")
+        route_slot = complexity.get("route_slot")
+        if route_slot not in {"lite", "fast", "pro"}:
+            route_slot = "lite" if thinking_level == "minimal" else "fast"
         from app.ai.router import should_force_search
         need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
         temp_label = complexity.get("temperature", "balanced")
         temperature = TEMPERATURE_MAP.get(str(temp_label), 0.7)
         temperature = clamp_temperature(temperature, AI_BACKEND)
 
-        return (target_model, thinking_level, need_search, temperature)
+        return (target_model, thinking_level, need_search, temperature, route_slot)
