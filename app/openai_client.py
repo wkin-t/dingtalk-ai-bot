@@ -31,6 +31,28 @@ EFFORT_MAPPING = {
     "xhigh": "xhigh",
 }
 
+RESPONSES_REASONING_DELTA_EVENTS = frozenset({
+    "response.reasoning_text.delta",
+    "response.reasoning_summary_text.delta",
+})
+ANTIGRAVITY_GROUNDING_REDIRECT_PREFIX = (
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+)
+ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE = re.compile(
+    re.escape(ANTIGRAVITY_GROUNDING_REDIRECT_PREFIX)
+    + r"[A-Za-z0-9._~%/-]{32,}"
+)
+ANTIGRAVITY_GROUNDING_WINDOW_LIMIT = (
+    len(ANTIGRAVITY_GROUNDING_REDIRECT_PREFIX) + 256
+)
+
+
+def _is_claude_model(model_name: str) -> bool:
+    """识别带 provider 前缀或 Antigravity 无前缀的 Claude 模型。"""
+    model_lower = model_name.lower()
+    model_base = model_lower.rsplit("/", 1)[-1]
+    return model_lower.startswith("anthropic/") or model_base.startswith("claude-")
+
 
 def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     for msg in reversed(messages):
@@ -233,7 +255,7 @@ async def call_openai_stream(
     config = get_litellm_model_config(route_key)
     model_name = config["model"]
 
-    is_claude = "claude" in model_name.lower() or model_name.startswith("anthropic/")
+    is_claude = _is_claude_model(model_name)
     clamp_provider = "openclaw" if is_claude else "openai"
     clamped_temp = clamp_temperature(temperature, clamp_provider)
     if clamped_temp != temperature:
@@ -427,7 +449,7 @@ async def _stream_via_responses(
     # previous_response_id 仅对支持 store 的上游有效（OpenAI 原生），Anthropic 不支持；
     # 同一个信号也决定 system 内容走 instructions 还是 input[0] 的 system 消息——
     # 不是按模型名分叉消息结构，是按这个已有的 store 机制信号分叉（见函数内 docstring）
-    _supports_store = not model_name.startswith("anthropic/")
+    _supports_store = not _is_claude_model(model_name)
     full_instructions, full_input_items = _split_messages_for_responses(
         messages, config["supports_vision"], _supports_store
     )
@@ -475,6 +497,10 @@ async def _stream_via_responses(
             kw["top_p"] = top_p
 
         effort = EFFORT_MAPPING.get(thinking_level)
+        # 当前只有 Claude Responses 的生产证据证明 low 可用；GPT 与 Gemini
+        # 请求保持历史行为，避免扩大 35002 canary 之外的费用和延迟变化。
+        if thinking_level == "low" and _is_claude_model(model_name):
+            effort = "low"
         if config["supports_reasoning"] and effort and effort != "none":
             kw["reasoning"] = {"effort": effort}
 
@@ -510,12 +536,40 @@ async def _stream_via_responses(
     content_chars = 0
     actual_model = model_name
     new_response_id: Optional[str] = None
-    # 真实搜索信号：web_search_call item 或 url_citation annotation。
-    # sub2api 可能丢弃这些事件——丢了就不上报（图标宁可漏报也不误报常亮）。
-    # 日志探针用于部署后 grep 确认 sub2api 到底透不透这些信号。
+    content_started = False
+    # sub2api 的 Antigravity Responses 路径可能只在正文返回完整 Grounding source link，
+    # 不透传标准搜索事件。该信号是生产形态启发式证据，不是工具执行的密码学证明。
+    # 只在本次确实挂载原生工具时检查，并限制缓冲区大小。
     search_executed_sent = False
+    grounding_tail = ""
+    native_search = bool(enable_search and config.get("supports_search"))
 
-    async for event in stream:
+    stream_error_after_thinking = object()
+    stream_cancel_after_thinking = object()
+
+    async def _events_with_thinking_cleanup():
+        """让流异常先收口 thinking，再交给外层保留原有错误 contract。"""
+        nonlocal thinking_sent
+        try:
+            async for event in stream:
+                yield event
+        except asyncio.CancelledError:
+            if thinking_sent:
+                thinking_sent = False
+                yield stream_cancel_after_thinking
+            raise
+        except Exception:
+            if thinking_sent:
+                thinking_sent = False
+                yield stream_error_after_thinking
+            raise
+
+    event_stream = _events_with_thinking_cleanup()
+    async for event in event_stream:
+        if event is stream_error_after_thinking or event is stream_cancel_after_thinking:
+            yield {"thinking_end": True}
+            continue
+
         event_type = getattr(event, "type", None)
         if not event_type:
             continue
@@ -537,20 +591,29 @@ async def _stream_via_responses(
                 yield {"search": {"executed": True}}
 
         if event_type == "response.output_text.delta":
-            if thinking_sent:
-                yield {"thinking_end": True}
-                thinking_sent = False
             delta = getattr(event, "delta", "")
             if delta:
+                content_started = True
+                if thinking_sent:
+                    yield {"thinking_end": True}
+                    thinking_sent = False
+                if native_search and not search_executed_sent:
+                    grounding_window = grounding_tail + delta
+                    if ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE.search(grounding_window):
+                        search_executed_sent = True
+                        print("🌐 [搜索执行] Responses grounding_redirect detected，本次真实联网")
+                        yield {"search": {"executed": True}}
+                    else:
+                        grounding_tail = grounding_window[-ANTIGRAVITY_GROUNDING_WINDOW_LIMIT:]
                 content_chars += len(delta)
                 yield {"content": delta}
 
-        elif event_type == "response.reasoning_text.delta":
-            if not thinking_sent:
-                yield {"thinking_start": True}
-                thinking_sent = True
+        elif event_type in RESPONSES_REASONING_DELTA_EVENTS:
             delta = getattr(event, "delta", "")
-            if delta:
+            if delta and not content_started:
+                if not thinking_sent:
+                    yield {"thinking_start": True}
+                    thinking_sent = True
                 yield {"thinking": delta}
 
         elif event_type in ("response.created", "response.completed"):
@@ -575,6 +638,12 @@ async def _stream_via_responses(
             response = getattr(event, "response", None)
             err = getattr(response, "error", None) if response else None
             err_msg = getattr(err, "message", None) or str(err) if err else "Unknown failure"
+            if thinking_sent:
+                thinking_sent = False
+                await event_stream.aclose()
+                yield {"thinking_end": True}
+            else:
+                await event_stream.aclose()
             yield {"error": f"OpenAI Responses Error: {err_msg}"}
             return
 
@@ -591,7 +660,7 @@ async def _stream_via_responses(
         return
 
     # 成功响应：存 response.id 给下一轮 previous_response_id 用
-    if new_response_id and conversation_id:
+    if _supports_store and new_response_id and conversation_id:
         responses_state.set_response_id(conversation_id, new_response_id)
 
     yield {

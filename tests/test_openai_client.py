@@ -5,11 +5,18 @@ openai_client 单测——覆盖以下回归点：
 2. call_openai_stream 路由分支：Gemini → Chat Completions，Claude/GPT → Responses
 3. content_chars 兜底：sub2api Gemini 无 usage 字段时不误判"无返回"
 """
+import asyncio
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.openai_client import _build_client, _split_messages_for_responses, call_openai_stream
+from app.openai_client import (
+    ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE,
+    _build_client,
+    _split_messages_for_responses,
+    call_openai_stream,
+)
 
 
 def test_search_fallback_provider_defaults_to_none(monkeypatch):
@@ -222,6 +229,39 @@ def _make_async_stream(events):
     return _gen()
 
 
+def _response_event(event_type, **fields):
+    """构造脱敏的 Responses 流事件，不携带真实 prompt、响应或标识。"""
+    event = MagicMock()
+    event.type = event_type
+    for name, value in fields.items():
+        setattr(event, name, value)
+    return event
+
+
+GROUNDING_REDIRECT_PREFIX = (
+    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+)
+GROUNDING_OPAQUE_PATH = "AbCdEf0123456789_-AbCdEf0123456789"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        ("A" * 32, True),
+        ("A._~%/-09" * 4, True),
+        ("A" * 31, False),
+        ("A" * 31 + "中" + "B" * 32, False),
+        ("A" * 16 + "+" + "B" * 32, False),
+    ],
+)
+def test_grounding_source_link_regex_uses_ascii_opaque_path_boundary(
+    suffix, expected,
+):
+    """opaque path 只接受生产证据中的 ASCII URL 字符，且至少连续 32 字符。"""
+    text = GROUNDING_REDIRECT_PREFIX + suffix
+    assert bool(ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE.search(text)) is expected
+
+
 def _model_config(name, supports_reasoning=False, supports_vision=True, supports_search=False):
     return {
         "model": name,
@@ -432,6 +472,764 @@ async def test_responses_enable_search_adds_web_search_tool(
 
     call_kwargs = mock_client.responses.create.call_args.kwargs
     assert call_kwargs["tools"] == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "anthropic/claude-opus-4-6-thinking",
+        "claude-opus-4-6-thinking",
+    ],
+)
+async def test_responses_claude_low_sends_low_reasoning_effort(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, model_name,
+):
+    """带或不带 anthropic 前缀的 Claude Responses 都应真实下发 low effort。"""
+    mock_get_config.return_value = _model_config(
+        model_name, supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level="low",
+    ):
+        pass
+
+    assert mock_client.responses.create.call_args.kwargs["reasoning"] == {
+        "effort": "low"
+    }
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_gpt_low_keeps_reasoning_omitted(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """Claude 专属 low 修复不能改变 GPT Responses 的既有请求参数。"""
+    mock_get_config.return_value = _model_config("gpt-5.6-sol", supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level="low",
+    ):
+        pass
+
+    assert "reasoning" not in mock_client.responses.create.call_args.kwargs
+
+
+@pytest.mark.asyncio
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_chat_completions_gemini_low_keeps_reasoning_omitted(
+    mock_openai_cls, mock_get_config,
+):
+    """Claude Responses 修复不能改变 Gemini Chat Completions 的 low 参数。"""
+    mock_get_config.return_value = _model_config(
+        "gemini-3.6-flash-tiered", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level="low",
+    ):
+        pass
+
+    assert "extra_body" not in mock_client.chat.completions.create.call_args.kwargs
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_minimal_omits_reasoning(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """minimal 继续代表关闭 reasoning，不应下发 reasoning 参数。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level="minimal",
+    ):
+        pass
+
+    assert "reasoning" not in mock_client.responses.create.call_args.kwargs
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_reasoning_summary_normalizes_to_thinking_chunks(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """Claude reasoning summary 应复用既有 thinking chunk contract。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta="核对证据"),
+        _response_event("response.reasoning_summary_text.delta", delta="并形成结论"),
+        _response_event("response.output_text.delta", delta="最终回答"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:5] == [
+        {"thinking_start": True},
+        {"thinking": "核对证据"},
+        {"thinking": "并形成结论"},
+        {"thinking_end": True},
+        {"content": "最终回答"},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_typed_reasoning_summary_event_is_normalized(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """当前 OpenAI SDK 的 typed summary event 必须走真实字段契约而非 MagicMock。"""
+    responses_types = pytest.importorskip("openai.types.responses")
+    event_type = getattr(
+        responses_types, "ResponseReasoningSummaryTextDeltaEvent", None
+    )
+    if event_type is None:
+        pytest.skip("当前 OpenAI SDK 尚未提供 typed reasoning summary delta event")
+    mock_get_config.return_value = _model_config(
+        "claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    typed_event = event_type(
+        delta="脱敏思考摘要",
+        item_id="reasoning_item_redacted",
+        output_index=0,
+        sequence_number=1,
+        summary_index=0,
+        type="response.reasoning_summary_text.delta",
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        typed_event,
+        _response_event("response.output_text.delta", delta="回答"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:4] == [
+        {"thinking_start": True},
+        {"thinking": "脱敏思考摘要"},
+        {"thinking_end": True},
+        {"content": "回答"},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_empty_output_delta_does_not_close_thinking(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """空正文 delta 不代表正文开始，不能截断并重启 thinking 状态。"""
+    mock_get_config.return_value = _model_config(
+        "claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta="A"),
+        _response_event("response.output_text.delta", delta=""),
+        _response_event("response.reasoning_summary_text.delta", delta="B"),
+        _response_event("response.output_text.delta", delta="answer"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:5] == [
+        {"thinking_start": True},
+        {"thinking": "A"},
+        {"thinking": "B"},
+        {"thinking_end": True},
+        {"content": "answer"},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_reasoning_summary_closes_thinking_at_stream_end(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """没有正文事件时，流结束仍必须关闭已开始的 thinking 状态。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta="核对证据"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:3] == [
+        {"thinking_start": True},
+        {"thinking": "核对证据"},
+        {"thinking_end": True},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_late_reasoning_after_content_is_ignored(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """正文开始后迟到的 reasoning 不能重新开启 thinking。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta="先前思考"),
+        _response_event("response.output_text.delta", delta="正式回答"),
+        _response_event("response.reasoning_summary_text.delta", delta="迟到思考"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:4] == [
+        {"thinking_start": True},
+        {"thinking": "先前思考"},
+        {"thinking_end": True},
+        {"content": "正式回答"},
+    ]
+    assert not any(chunk.get("thinking") == "迟到思考" for chunk in chunks)
+    assert sum(1 for chunk in chunks if chunk.get("thinking_start")) == 1
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_failed_closes_thinking_before_error(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """provider terminal failure 必须先闭合已启动的 thinking。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    failed_response = MagicMock()
+    failed_response.error = MagicMock(message="上游失败")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta="失败前摘要"),
+        _response_event("response.failed", response=failed_response),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:4] == [
+        {"thinking_start": True},
+        {"thinking": "失败前摘要"},
+        {"thinking_end": True},
+        {"error": "OpenAI Responses Error: 上游失败"},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_stream_exception_closes_thinking_before_outer_error(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """async iterator 异常必须先闭合 thinking，再由外层保留 error contract。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+
+    async def failing_stream():
+        yield _response_event("response.reasoning_summary_text.delta", delta="异常前摘要")
+        raise RuntimeError("stream interrupted")
+
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=failing_stream())
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:4] == [
+        {"thinking_start": True},
+        {"thinking": "异常前摘要"},
+        {"thinking_end": True},
+        {"error": "OpenAI API Error: stream interrupted"},
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_task_cancel_closes_thinking_and_propagates(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """真实 Task.cancel() 应闭合 thinking、传播取消且不转成 error 或写 response ID。"""
+    mock_get_config.return_value = _model_config(
+        "claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    waiting_for_next_event = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def cancellable_stream():
+        yield _response_event(
+            "response.reasoning_summary_text.delta", delta="取消前摘要"
+        )
+        waiting_for_next_event.set()
+        await blocked.wait()
+
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=cancellable_stream())
+
+    chunks = []
+
+    async def consume():
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+            conversation_id="cancel-conversation",
+        ):
+            chunks.append(chunk)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(waiting_for_next_event.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert chunks[:3] == [
+        {"thinking_start": True},
+        {"thinking": "取消前摘要"},
+        {"thinking_end": True},
+    ]
+    assert sum(1 for chunk in chunks if chunk.get("thinking_end")) == 1
+    assert not any("error" in chunk for chunk in chunks)
+    mock_set_rid.assert_not_called()
+    mock_get_rid.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_task_cancel_without_thinking_does_not_emit_end(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """未启动 thinking 的真实取消不得伪造 thinking_end。"""
+    mock_get_config.return_value = _model_config(
+        "claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    waiting_for_next_event = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def cancellable_stream():
+        waiting_for_next_event.set()
+        await blocked.wait()
+        yield _response_event("response.completed")
+
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=cancellable_stream())
+
+    chunks = []
+
+    async def consume():
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+            conversation_id="cancel-without-thinking",
+        ):
+            chunks.append(chunk)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(waiting_for_next_event.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not any(chunk.get("thinking_end") for chunk in chunks)
+    assert not any("error" in chunk for chunk in chunks)
+    mock_set_rid.assert_not_called()
+    mock_get_rid.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_empty_reasoning_delta_does_not_start_thinking(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """空 reasoning 事件不能伪造 thinking start/end。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_summary_text.delta", delta=""),
+        _response_event("response.output_text.delta", delta="普通回答"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert not any("thinking" in chunk or "thinking_start" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_grounding_prefix_across_deltas_emits_executed_once(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """Antigravity Grounding URL 跨 delta 时也必须且只能上报一次真实搜索。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_search=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    split_at = len(GROUNDING_REDIRECT_PREFIX) // 2
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event(
+            "response.output_text.delta",
+            delta="来源：" + GROUNDING_REDIRECT_PREFIX[:split_at],
+        ),
+        _response_event(
+            "response.output_text.delta",
+            delta=GROUNDING_REDIRECT_PREFIX[split_at:] + GROUNDING_OPAQUE_PATH,
+        ),
+        _response_event(
+            "response.output_text.delta",
+            delta="\n备用：" + GROUNDING_REDIRECT_PREFIX + GROUNDING_OPAQUE_PATH[::-1],
+        ),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "查询实时资料"}],
+            target_model="fast",
+            enable_search=True,
+        )
+    ]
+
+    assert [chunk for chunk in chunks if chunk.get("search", {}).get("executed")] == [
+        {"search": {"executed": True}}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "signal_event",
+    [
+        _response_event(
+            "response.output_item.added",
+            item=MagicMock(type="web_search_call"),
+        ),
+        _response_event(
+            "response.output_text.annotation.added",
+            annotation=MagicMock(type="url_citation"),
+        ),
+    ],
+)
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_standard_search_signals_still_emit_executed_once(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, signal_event,
+):
+    """标准 Responses 搜索事件继续作为真实执行证据，且与 Grounding 信号共用门闩。"""
+    mock_get_config.return_value = _model_config(
+        "gpt-5.5", supports_search=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        signal_event,
+        _response_event(
+            "response.output_text.delta",
+            delta=GROUNDING_REDIRECT_PREFIX + GROUNDING_OPAQUE_PATH,
+        ),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "查询实时资料"}],
+            target_model="fast",
+            enable_search=True,
+        )
+    ]
+
+    assert [chunk for chunk in chunks if chunk.get("search", {}).get("executed")] == [
+        {"search": {"executed": True}}
+    ]
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_existing_reasoning_text_event_remains_supported(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """新增 summary 兼容不能破坏原有 reasoning_text 事件。"""
+    mock_get_config.return_value = _model_config(
+        "gpt-5.5", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.reasoning_text.delta", delta="原有思考"),
+        _response_event("response.output_text.delta", delta="回答"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+        )
+    ]
+
+    assert chunks[:4] == [
+        {"thinking_start": True},
+        {"thinking": "原有思考"},
+        {"thinking_end": True},
+        {"content": "回答"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Sources: https://example.com/article",
+        "用户正在讨论 web_search 与 google_search 的语法",
+        GROUNDING_REDIRECT_PREFIX + "看起来像来源",
+    ],
+)
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_without_native_search_does_not_infer_executed_from_text(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, text,
+):
+    """未挂载原生搜索时，即使正文含 URL 或搜索字样也不能点亮图标。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_search=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.output_text.delta", delta=text),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "普通请求"}],
+            target_model="fast",
+            enable_search=False,
+        )
+    ]
+
+    assert not any(chunk.get("search", {}).get("executed") for chunk in chunks)
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_native_search_without_execution_evidence_stays_off(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """仅挂载工具以及普通 Sources/URL 文本都不是搜索执行证据。"""
+    mock_get_config.return_value = _model_config(
+        "anthropic/claude-opus-4-6-thinking", supports_search=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event(
+            "response.output_text.delta",
+            delta="Sources: https://example.com/article",
+        ),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "普通请求"}],
+            target_model="fast",
+            enable_search=True,
+        )
+    ]
+
+    assert not any(chunk.get("search", {}).get("executed") for chunk in chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forged_text",
+    [
+        GROUNDING_REDIRECT_PREFIX,
+        GROUNDING_REDIRECT_PREFIX + "short",
+        GROUNDING_REDIRECT_PREFIX + ("a" * 20),
+        GROUNDING_REDIRECT_PREFIX + ("a" * 31) + " 非法分隔",
+    ],
+)
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_native_search_rejects_bare_or_short_grounding_shape(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, forged_text,
+):
+    """已挂工具时，复述裸前缀或短伪造路径仍不能点亮搜索图标。"""
+    mock_get_config.return_value = _model_config(
+        "claude-opus-4-6-thinking", supports_search=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.output_text.delta", delta=forged_text),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "复述链接格式"}],
+            target_model="fast",
+            enable_search=True,
+        )
+    ]
+
+    assert not any(chunk.get("search", {}).get("executed") for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -700,6 +1498,34 @@ async def test_responses_store_false_for_anthropic_model(
 
 
 @pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value="resp_should_not_be_used")
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_store_false_for_unprefixed_claude_model(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
+):
+    """Antigravity 无前缀 Claude 也不支持 store 或 previous_response_id。"""
+    mock_get_config.return_value = _model_config("claude-opus-4-6-thinking")
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        conversation_id="conv-antigravity",
+    ):
+        pass
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs["store"] is False
+    assert "previous_response_id" not in kwargs
+    mock_get_rid.assert_not_called()
+    mock_set_rid.assert_not_called()
+
+
+@pytest.mark.asyncio
 @patch("app.responses_state.get_response_id", return_value=None)
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
@@ -768,8 +1594,8 @@ async def test_responses_with_prior_id_sends_only_last_user_and_previous_respons
 async def test_responses_stores_response_id_after_stream(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """response.created/completed 事件携带的 response.id 应被存到 responses_state"""
-    mock_get_config.return_value = _model_config("anthropic/claude-haiku-4.5")
+    """GPT 的 response.created/completed 事件仍应存 response.id。"""
+    mock_get_config.return_value = _model_config("gpt-5.5")
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
     text_delta = MagicMock()
@@ -789,6 +1615,46 @@ async def test_responses_stores_response_id_after_stream(
         pass
 
     mock_set_rid.assert_called_with("conv-store-test", "resp_new_999")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [
+    "anthropic/claude-haiku-4.5",
+    "claude-opus-4-6-thinking",
+])
+@patch("app.responses_state.get_response_id", return_value="resp_should_not_be_used")
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_claude_does_not_store_response_id_from_success_events(
+    mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid, model_name,
+):
+    """带/不带 provider 前缀的 Claude 成功流都不读写 response state。"""
+    mock_get_config.return_value = _model_config(model_name, supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _make_response_created_event("resp_claude_success"),
+        _response_event("response.output_text.delta", delta="回答"),
+        _make_response_completed_event("resp_claude_success"),
+    ]))
+
+    chunks = [
+        chunk
+        async for chunk in call_openai_stream(
+            [{"role": "user", "content": "hi"}],
+            target_model="fast",
+            thinking_level="medium",
+            conversation_id="conv-claude-no-store",
+        )
+    ]
+
+    assert any(chunk.get("content") == "回答" for chunk in chunks)
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs["store"] is False
+    assert "previous_response_id" not in kwargs
+    mock_get_rid.assert_not_called()
+    mock_set_rid.assert_not_called()
 
 
 @pytest.mark.asyncio

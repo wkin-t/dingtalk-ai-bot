@@ -1,8 +1,94 @@
 """dingtalk_bot 辅助函数单元测试"""
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
+
+
+async def _iter_consumer_chunks(chunks):
+    for chunk in chunks:
+        yield chunk
+
+
+async def _run_dingtalk_consumer(chunks):
+    """运行真实 DingTalk handler 收尾逻辑，返回最终卡片全量更新数据。"""
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-test")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    incoming_message = SimpleNamespace(
+        sender_id="sender-test",
+        sender_nick="测试用户",
+        conversation_id="conversation-test",
+        conversation_type="1",
+    )
+
+    route_result = {
+        "model": "fast",
+        "thinking_level": "medium",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在核对",
+        "reason": "test",
+    }
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.get_session_key", return_value="session-test"), \
+         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks(chunks)), \
+         patch("app.dingtalk_bot.update_history"), \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(
+            incoming_message,
+            "测试消息",
+            "conversation-test",
+            [],
+        )
+
+    return handler.card_helper.update_card.await_args_list[-1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_consumer_promotes_reasoning_summary_to_final_status():
+    """Responses summary chunk 应进入 DingTalk full_thinking 和最终摘要。"""
+    final_update = await _run_dingtalk_consumer([
+        {"thinking_start": True},
+        {"thinking": "核对证据"},
+        {"thinking": "并形成结论"},
+        {"thinking_end": True},
+        {"content": "最终回答"},
+        {"usage": {"model": "claude-opus-4-6-thinking", "input_tokens": 1, "output_tokens": 1}},
+    ])
+
+    assert "最终回答" in final_update["msgContent"]
+    assert "<font color='#aaaaaa' size='2'>🧠 核对证据并形成结论</font>" in final_update["statusText"]
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_consumer_without_reasoning_has_no_fake_summary():
+    """没有 reasoning chunk 时，DingTalk statusText 不应凭空生成思考摘要。"""
+    final_update = await _run_dingtalk_consumer([
+        {"content": "普通回答"},
+        {"usage": {"model": "claude-opus-4-6-thinking", "input_tokens": 1, "output_tokens": 1}},
+    ])
+
+    assert "普通回答" in final_update["msgContent"]
+    assert "<font color='#aaaaaa' size='2'>🧠" not in final_update["statusText"]
 
 
 
