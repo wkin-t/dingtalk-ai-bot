@@ -115,3 +115,24 @@ output; cancellation propagation; Redis fail-open and TTL; explicit fallback
 key/base; route-slot propagation; `model_version` usage; footer escaping; old
 search fallback default; and the separation between local evidence and
 production canary evidence.
+
+## Responses Streaming Contract
+
+Normalize provider-specific Responses events at the client boundary. Consumers
+must receive the existing stream chunk contract rather than inspect SDK event
+types. Treat both `response.reasoning_text.delta` and
+`response.reasoning_summary_text.delta` as reasoning input, but ignore empty
+deltas and never reopen thinking after visible content has started.
+
+If thinking has started, emit exactly one `thinking_end` before normal content,
+terminal failure, stream exception, or task cancellation. Preserve the original
+exception or `CancelledError` after cleanup; cancellation must not become a
+normal error chunk. Store and retrieve response IDs only for providers/models
+that use Responses state continuation; Claude requests with `store=False` must
+not touch that state.
+
+Search UI signals must be emitted once per request. Prefer structured provider
+search events; when an upstream proxy exposes only a documented Grounding
+source-link heuristic, keep it bounded, gated by native-search enablement, and
+document that it cannot prove tool execution. Do not log the source URL,
+prompt, raw event, or response body.
