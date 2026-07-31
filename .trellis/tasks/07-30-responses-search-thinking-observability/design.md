@@ -48,6 +48,19 @@ Grounding URL 可能跨 delta。客户端维护固定上限的 rolling buffer；
 验收必须把 canary 回答、固定探针与 footer 一并观察，未来上游恢复结构化事件后
 应优先以结构化事件为准。
 
+### 3.1 2026-07-31 回流缺口补充
+
+生产长上下文请求没有产生现有 `🌐 [搜索执行]` 探针，但隔离重放曾产生
+Grounding redirect 信号。该差异说明“上游执行搜索”和“客户端收到可识别证据”
+必须分开记录。事件归一化 helper 应兼容 SDK 对象与字典，并只读取固定的
+`type`、`item`、`annotation(s)`、`output`、`delta`、`text` 字段；不对未知响应
+对象做完整序列化，避免日志泄露。
+
+在得到生产事件形状前，不扩大到任意包含 `search` 的字符串匹配。结构化类型必须
+使用 allowlist；Grounding source-link 继续使用固定 host/path、有界 rolling buffer
+和 native-search gate。若上游没有任何结构化或 Grounding 证据，应用层只能报告
+“证据未回流”，不能可靠地补判“已搜索”。
+
 ## 4. Reasoning normalization
 
 以下事件均归一化为 thinking chunks：

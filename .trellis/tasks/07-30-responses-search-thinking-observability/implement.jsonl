@@ -3,3 +3,4 @@
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Streaming chunk and cross-layer test contract"}
 {"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Provider event normalization boundary"}
 {"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/production-event-evidence.md", "reason": "Real sub2api event shapes and validation boundary"}
+{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/search-signal-gap-20260731.md", "reason": "Current production evidence: long-context search signal missing while isolated replay emitted Grounding; use for implementation boundary."}

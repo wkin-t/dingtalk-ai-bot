@@ -68,6 +68,16 @@ git diff --check
   不生成普通 error chunk、不写 response ID；未启动 thinking 时不补结束事件。
 - 未执行 deployment / production canary，下面项目保持未勾选。
 
+2026-07-31 搜索信号归一化迭代最终证据：
+
+- 搜索归一化专项：`10 passed`，退出码 `0`。
+- openai/search-icon/搜索归一化联合 targeted：`83 passed`，退出码 `0`；补充 bounded-list
+  测试后专项仍通过。
+- 最终全量 pytest：`549 passed, 3 warnings`，退出码 `0`；使用会话可写 basetemp，
+  规避默认 pytest temp 根目录权限问题。
+- Sol 第二轮复核：无 P0-P2；普通 diff-check 对既有 CRLF JSONL 的提示已由
+  CRLF-aware 检查确认可接受。
+
 ## 7. Deployment
 
 - [x] 展示本地/远端当前值与目标值；备份三个生产 env 文件。
@@ -98,6 +108,17 @@ docker compose -f docker-compose.openrouter.yml up -d --build
 - [ ] Claude medium/high 推理：真实 reasoning summary event、`thinking > 0`、最终状态显示摘要。
 - [ ] low 请求：确认真实下发 low reasoning，并记录延迟/费用影响。
 - [ ] 明确区分自动化验证、用户钉钉见证和仍未验证边界。
+
+## 9. 2026-07-31 搜索信号缺口修复
+
+- [x] 增加固定事件类型/路径摘要诊断，不记录 prompt、正文、URL 或原始事件。
+- [x] 集中归一化 SDK 对象、字典事件、嵌套 annotations、`output_item.done`、
+  `output_text.done` 和最终 output 中的 allowlisted 搜索证据。
+- [x] 补充长上下文与嵌套事件 fixture，验证一次性 `executed=True` 和无误报。
+- [x] 根据 Sol 两轮对抗性复核修复 native-search 门控、未知事件日志和有界遍历问题。
+- [ ] 仅重建 OpenRouter 容器，完成普通闲聊、短上下文新闻、长上下文新闻 canary。
+- [ ] 若上游仍无证据回流，记录为 sub2api/Antigravity 能力边界，不把工具挂载改成
+  常亮图标。
 
 ## Rollback points
 
