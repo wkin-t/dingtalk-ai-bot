@@ -70,15 +70,26 @@ git diff --check
 
 ## 7. Deployment
 
-- [ ] 展示本地/远端当前值与目标值；备份 `.env.openrouter`。
-- [ ] 提交并推送经确认的代码变更。
-- [ ] 服务器 fast-forward 后仅执行：
+- [x] 展示本地/远端当前值与目标值；备份三个生产 env 文件。
+- [x] 提交并推送经确认的代码变更。
+- [x] 服务器 fast-forward 后分别执行三个 Compose 重建：
 
 ```bash
 docker compose -f docker-compose.openrouter.yml up -d --build
 ```
 
-- [ ] 验证 server commit、容器状态、RestartCount 和固定前缀日志。
+- [x] 验证 server commit、容器状态、RestartCount、端口和镜像代码哈希。
+
+部署证据（2026-07-31）：
+
+- 服务器项目 fast-forward 到 `cc047d2`。
+- `.env`、`.env.openai`、`.env.openrouter` 已备份到
+  `.deploy-backup-20260731-143833/`；原文件与备份 SHA-256 一致，部署后仍一致。
+- 三个 Compose 均以 `up -d --build` 重建；三个容器均 `running`、`RestartCount=0`，无配置的 Docker healthcheck。
+- 35000、35001、35002 根端点均返回 HTTP 200，Gunicorn 均监听对应端口。
+- 服务器工作区与三个容器内的 `app/openai_client.py` SHA-256 均为
+  `27ff6848ee76e2fd38de435ed96fabcbd2a718a6dba03e88fec0e5cf07ecb14d`。
+- 服务器既存未跟踪目录 `data-openai/`、`data-openrouter/` 未修改；未执行生产模型 canary。
 
 ## 8. Production canary
 
