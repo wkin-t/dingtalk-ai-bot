@@ -5,6 +5,7 @@ import json
 import re
 import time
 import traceback
+from collections.abc import Mapping
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 import httpx
@@ -35,6 +36,38 @@ RESPONSES_REASONING_DELTA_EVENTS = frozenset({
     "response.reasoning_text.delta",
     "response.reasoning_summary_text.delta",
 })
+RESPONSES_SEARCH_ITEM_TYPES = frozenset({"web_search_call"})
+RESPONSES_SEARCH_ANNOTATION_TYPES = frozenset({"url_citation", "url"})
+RESPONSES_GROUNDING_TEXT_EVENTS = frozenset({
+    "response.output_text.delta",
+    "response.output_text.done",
+})
+RESPONSES_SEARCH_ITEM_EVENTS = frozenset({
+    "response.output_item.added",
+    "response.output_item.done",
+})
+RESPONSES_SEARCH_ANNOTATION_EVENTS = frozenset({
+    "response.output_text.annotation.added",
+    "response.output_text.annotation.done",
+})
+RESPONSES_DIAGNOSTIC_EVENT_TYPES = frozenset({
+    "response.created",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.content_part.added",
+    "response.content_part.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.output_text.annotation.added",
+    "response.output_text.annotation.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.completed",
+    "response.failed",
+})
+RESPONSES_SEARCH_CANDIDATE_LIMIT = 64
 ANTIGRAVITY_GROUNDING_REDIRECT_PREFIX = (
     "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
 )
@@ -45,6 +78,138 @@ ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE = re.compile(
 ANTIGRAVITY_GROUNDING_WINDOW_LIMIT = (
     len(ANTIGRAVITY_GROUNDING_REDIRECT_PREFIX) + 256
 )
+
+
+def _response_field(value: Any, name: str) -> Any:
+    """读取 SDK 对象或兼容网关字典中的字段。"""
+    if isinstance(value, Mapping):
+        return value.get(name)
+    if value is None:
+        return None
+
+    # 不直接对任意对象调用 getattr：测试 double 和部分代理对象会为不存在
+    # 的属性动态创建子对象，递归扫描时会因此无限扩张。OpenAI SDK 的响应
+    # 模型是 Pydantic 对象，字段会出现在 __dict__ / model_fields 中。
+    value_dict = getattr(value, "__dict__", None)
+    if isinstance(value_dict, dict) and name in value_dict:
+        return value_dict[name]
+    model_fields = getattr(type(value), "model_fields", None)
+    if isinstance(model_fields, dict) and name in model_fields:
+        try:
+            return getattr(value, name, None)
+        except Exception:
+            return None
+    legacy_fields = getattr(type(value), "__dict__", {}).get("__fields__")
+    if isinstance(legacy_fields, dict) and name in legacy_fields:
+        try:
+            return getattr(value, name, None)
+        except Exception:
+            return None
+    if hasattr(type(value), name):
+        try:
+            return getattr(value, name, None)
+        except Exception:
+            return None
+    return None
+
+
+def _response_candidates(value: Any) -> List[Any]:
+    """把单值/列表统一成有限候选集合，不展开字符串。"""
+    if value is None or isinstance(value, (str, bytes)):
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value[:RESPONSES_SEARCH_CANDIDATE_LIMIT])
+    return [value]
+
+
+def _response_type(value: Any) -> str:
+    event_type = _response_field(value, "type")
+    return event_type if isinstance(event_type, str) else ""
+
+
+def _find_responses_search_signal(
+    value: Any,
+    path: str,
+    depth: int = 0,
+) -> Optional[str]:
+    """只在固定 Responses 字段树中寻找 allowlist 搜索证据。
+
+    网关可能把标准 item/annotation 放在 SDK 对象、字典或最终 output 的一层
+    嵌套中。这里显式限制字段名和深度，避免对未知响应做全量递归或把普通
+    文本中的 ``search`` 字样当成工具执行。
+    """
+    if depth > 3:
+        return None
+
+    if _response_type(value) in RESPONSES_SEARCH_ITEM_TYPES:
+        return f"structured:{path}.type"
+
+    for field_name in ("annotation", "annotations"):
+        for index, candidate in enumerate(
+            _response_candidates(_response_field(value, field_name))
+        ):
+            if _response_type(candidate) in RESPONSES_SEARCH_ANNOTATION_TYPES:
+                suffix = f"{field_name}[{index}].type"
+                return f"structured:{path}.{suffix}"
+
+    for field_name in ("item", "output", "content", "response", "delta", "output_text"):
+        child = _response_field(value, field_name)
+        for index, candidate in enumerate(_response_candidates(child)):
+            child_path = f"{path}.{field_name}"
+            if isinstance(child, (list, tuple)):
+                child_path += f"[{index}]"
+            signal = _find_responses_search_signal(candidate, child_path, depth + 1)
+            if signal:
+                return signal
+    return None
+
+
+def _responses_search_signal(event: Any) -> Optional[str]:
+    """提取一个 Responses 事件中的结构化搜索证据。"""
+    event_type = _response_type(event)
+    if event_type in RESPONSES_SEARCH_ITEM_EVENTS:
+        item = _response_field(event, "item")
+        if _response_type(item) in RESPONSES_SEARCH_ITEM_TYPES:
+            return "structured:item.type"
+    if event_type in RESPONSES_SEARCH_ANNOTATION_EVENTS:
+        annotation = _response_field(event, "annotation")
+        if _response_type(annotation) in RESPONSES_SEARCH_ANNOTATION_TYPES:
+            return "structured:annotation.type"
+
+    # 兼容 annotation/搜索 item 被包在 delta、output_text 或 response.output 中的
+    # 网关形态；不把任意顶层文本递归进去。
+    for path, value in (
+        ("event", event),
+        ("delta", _response_field(event, "delta")),
+        ("output_text", _response_field(event, "output_text")),
+        ("response", _response_field(event, "response")),
+    ):
+        signal = _find_responses_search_signal(value, path)
+        if signal:
+            return signal
+    return None
+
+
+def _responses_grounding_texts(event: Any) -> List[str]:
+    """提取可用于 Grounding 启发式的有限输出文本字段。"""
+    event_type = _response_type(event)
+    if event_type not in RESPONSES_GROUNDING_TEXT_EVENTS:
+        return []
+
+    texts: List[str] = []
+    for field_name in ("delta", "text", "output_text"):
+        value = _response_field(event, field_name)
+        if isinstance(value, str) and value:
+            texts.append(value)
+    return texts
+
+
+def _safe_response_event_type(event: Any) -> str:
+    """仅保留固定 allowlist 中的事件类型，供诊断摘要使用。"""
+    event_type = _response_type(event)
+    if event_type in RESPONSES_DIAGNOSTIC_EVENT_TYPES:
+        return event_type
+    return "other"
 
 
 def _is_claude_model(model_name: str) -> bool:
@@ -541,8 +706,25 @@ async def _stream_via_responses(
     # 不透传标准搜索事件。该信号是生产形态启发式证据，不是工具执行的密码学证明。
     # 只在本次确实挂载原生工具时检查，并限制缓冲区大小。
     search_executed_sent = False
+    search_evidence_reason: Optional[str] = None
     grounding_tail = ""
     native_search = bool(enable_search and config.get("supports_search"))
+    response_event_counts: Dict[str, int] = {}
+
+    def _print_search_probe() -> None:
+        """打印不含正文/URL 的 Responses 搜索事件摘要。"""
+        if not native_search:
+            return
+        event_summary = ",".join(
+            f"{event_type}={count}"
+            for event_type, count in sorted(response_event_counts.items())
+        ) or "none"
+        print(
+            "🔎 [Responses搜索探针] "
+            f"native=true executed={'true' if search_executed_sent else 'false'} "
+            f"evidence={search_evidence_reason or 'none'} "
+            f"events={event_summary}"
+        )
 
     stream_error_after_thinking = object()
     stream_cancel_after_thinking = object()
@@ -554,11 +736,13 @@ async def _stream_via_responses(
             async for event in stream:
                 yield event
         except asyncio.CancelledError:
+            _print_search_probe()
             if thinking_sent:
                 thinking_sent = False
                 yield stream_cancel_after_thinking
             raise
         except Exception:
+            _print_search_probe()
             if thinking_sent:
                 thinking_sent = False
                 yield stream_error_after_thinking
@@ -570,74 +754,79 @@ async def _stream_via_responses(
             yield {"thinking_end": True}
             continue
 
-        event_type = getattr(event, "type", None)
+        event_type = _response_type(event)
+        event_key = _safe_response_event_type(event)
+        if event_key in response_event_counts or len(response_event_counts) < 24:
+            response_event_counts[event_key] = response_event_counts.get(event_key, 0) + 1
+        elif "other" in response_event_counts:
+            response_event_counts["other"] += 1
+        else:
+            response_event_counts["other"] = 1
         if not event_type:
             continue
 
-        if not search_executed_sent:
-            executed_reason = None
-            if event_type == "response.output_item.added":
-                item = getattr(event, "item", None)
-                if item and getattr(item, "type", None) == "web_search_call":
-                    executed_reason = "web_search_call"
-            elif event_type == "response.output_text.annotation.added":
-                ann = getattr(event, "annotation", None)
-                ann_type = getattr(ann, "type", None) if ann else None
-                if ann_type in ("url_citation", "url"):
-                    executed_reason = f"annotation:{ann_type}"
+        if native_search and not search_executed_sent:
+            executed_reason = _responses_search_signal(event)
             if executed_reason:
                 search_executed_sent = True
+                search_evidence_reason = executed_reason
                 print(f"🌐 [搜索执行] Responses {executed_reason} detected，本次真实联网")
                 yield {"search": {"executed": True}}
 
+        if native_search and not search_executed_sent:
+            for text_fragment in _responses_grounding_texts(event):
+                grounding_window = grounding_tail + text_fragment
+                if ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE.search(grounding_window):
+                    search_executed_sent = True
+                    search_evidence_reason = "grounding_redirect"
+                    print("🌐 [搜索执行] Responses grounding_redirect detected，本次真实联网")
+                    yield {"search": {"executed": True}}
+                    break
+                grounding_tail = grounding_window[-ANTIGRAVITY_GROUNDING_WINDOW_LIMIT:]
+
         if event_type == "response.output_text.delta":
-            delta = getattr(event, "delta", "")
-            if delta:
+            delta = _response_field(event, "delta")
+            if not isinstance(delta, str):
+                delta = _response_field(event, "text")
+            if isinstance(delta, str) and delta:
                 content_started = True
                 if thinking_sent:
                     yield {"thinking_end": True}
                     thinking_sent = False
-                if native_search and not search_executed_sent:
-                    grounding_window = grounding_tail + delta
-                    if ANTIGRAVITY_GROUNDING_SOURCE_LINK_RE.search(grounding_window):
-                        search_executed_sent = True
-                        print("🌐 [搜索执行] Responses grounding_redirect detected，本次真实联网")
-                        yield {"search": {"executed": True}}
-                    else:
-                        grounding_tail = grounding_window[-ANTIGRAVITY_GROUNDING_WINDOW_LIMIT:]
                 content_chars += len(delta)
                 yield {"content": delta}
 
         elif event_type in RESPONSES_REASONING_DELTA_EVENTS:
-            delta = getattr(event, "delta", "")
-            if delta and not content_started:
+            delta = _response_field(event, "delta")
+            if isinstance(delta, str) and delta and not content_started:
                 if not thinking_sent:
                     yield {"thinking_start": True}
                     thinking_sent = True
                 yield {"thinking": delta}
 
         elif event_type in ("response.created", "response.completed"):
-            response = getattr(event, "response", None)
+            response = _response_field(event, "response")
             if response is None:
                 continue
-            rid = getattr(response, "id", None)
+            rid = _response_field(response, "id")
             if rid:
                 new_response_id = rid
-            mdl = getattr(response, "model", None)
+            mdl = _response_field(response, "model")
             if mdl:
                 actual_model = mdl
-            usage = getattr(response, "usage", None)
+            usage = _response_field(response, "usage")
             if usage:
-                input_tokens = getattr(usage, "input_tokens", 0) or 0
-                output_tokens = getattr(usage, "output_tokens", 0) or 0
-                _det = getattr(usage, "input_tokens_details", None)
-                _c = (getattr(_det, "cached_tokens", 0) or 0) if _det else 0
+                input_tokens = _response_field(usage, "input_tokens") or 0
+                output_tokens = _response_field(usage, "output_tokens") or 0
+                _det = _response_field(usage, "input_tokens_details")
+                _c = (_response_field(_det, "cached_tokens") or 0) if _det else 0
                 cached_tokens = _c if isinstance(_c, int) else 0
 
         elif event_type == "response.failed":
-            response = getattr(event, "response", None)
-            err = getattr(response, "error", None) if response else None
-            err_msg = getattr(err, "message", None) or str(err) if err else "Unknown failure"
+            _print_search_probe()
+            response = _response_field(event, "response")
+            err = _response_field(response, "error") if response else None
+            err_msg = _response_field(err, "message") or str(err) if err else "Unknown failure"
             if thinking_sent:
                 thinking_sent = False
                 await event_stream.aclose()
@@ -652,6 +841,7 @@ async def _stream_via_responses(
 
     latency_ms = int((time.time() - start_time) * 1000)
     print(f"✅ [OpenAI/responses] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 字符: {content_chars}, 延迟: {latency_ms}ms")
+    _print_search_probe()
     _cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
     print(f"💾 [Cache] OpenAI/responses | cached={cached_tokens}/{input_tokens} ({_cache_pct}%)")
 

@@ -136,3 +136,11 @@ search events; when an upstream proxy exposes only a documented Grounding
 source-link heuristic, keep it bounded, gated by native-search enablement, and
 document that it cannot prove tool execution. Do not log the source URL,
 prompt, raw event, or response body.
+
+Responses diagnostics are also a provider boundary: record only a fixed
+allowlist of event types, fixed evidence reasons, bounded counters, and boolean
+state. Unknown event types become `other`; never log an arbitrary provider
+field merely because it matches a safe-looking character pattern. When
+normalizing nested `item`/`output`/`content`/`annotation(s)` fields, cap both
+recursion depth and candidates per list so a malformed proxy response cannot
+turn observability into an unbounded traversal.
