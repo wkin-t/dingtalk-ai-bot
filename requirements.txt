@@ -33,7 +33,7 @@ websockets>=12.0
 # 企业微信消息加解密
 pycryptodome
 # OpenAI 官方 SDK (openai 后端)
-openai>=1.50.0
+openai>=2.53.0
 # OpenRouter 官方 SDK (openrouter 后端)
 openrouter>=0.9.1
 # 腾讯云 COS SDK (生图存储)
