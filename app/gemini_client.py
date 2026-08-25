@@ -11,6 +11,8 @@ import re
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from google import genai
 from google.genai import types
+from app import gemini_sse_patch
+gemini_sse_patch.apply()
 from app.ai.sampling_clamp import clamp_top_p
 from app.error_safety import safe_error_summary, safe_display_text, safe_model_name
 from app.config import (
@@ -623,7 +625,10 @@ async def call_gemini_stream(
                         yield {"search": {"executed": True}}
 
                     if getattr(candidate, "finish_reason", None):
-                        finish_reason = str(candidate.finish_reason)
+                        # candidate.finish_reason 是 str 子类枚举，但 str() 会走自定义
+                        # __str__ 返回 "FinishReason.STOP" 而非纯值 "STOP"，用 .name 取真正的
+                        # 枚举名，否则下面的 in 判断永远不匹配，每次正常结束都会误报"异常"。
+                        finish_reason = getattr(candidate.finish_reason, "name", None) or str(candidate.finish_reason)
                         if "SAFETY" in finish_reason:
                             yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
                             return
