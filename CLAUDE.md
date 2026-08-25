@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-多平台 AI 机器人服务，支持钉钉（生产使用中）和企业微信（**Deprecated，2026-07-08 起暂不使用**，代码保留但不再维护），后端可切换 Gemini、OpenClaw、OpenAI（含中转站 sub2api，覆盖 GPT/Claude/Gemini）或 OpenRouter（原生）。Python + Flask，Docker 部署。LiteLLM 已完全移除，所有 OpenAI 兼容路径走官方 `openai` SDK。
+多平台 AI 机器人服务，支持钉钉（生产使用中）和企业微信（**Deprecated，2026-07-08 起暂不使用**，代码保留但不再维护），后端可切换 Gemini、OpenClaw、OpenAI（含中转站 cli-proxy-api，覆盖 GPT/Claude/Gemini）或 OpenRouter（原生）。Python + Flask，Docker 部署。LiteLLM 已完全移除，所有 OpenAI 兼容路径走官方 `openai` SDK。
 
 ## 常用命令
 
@@ -21,7 +21,7 @@ python -m compileall -q app main.py  # 编译检查 (CI 也用这个)
 docker-compose up -d --build      # gemini 版本
 docker-compose -f docker-compose.openclaw.yml up -d --build  # openclaw 版本
 docker-compose -f docker-compose.openai.yml up -d --build    # openai 版本（含中转站路径）
-docker-compose -f docker-compose.openrouter.yml up -d --build # openrouter 版本 (端口 35002)
+docker-compose -f docker-compose.anthropic.yml up -d --build # anthropic/Claude 版本 (端口 35002，容器名 dingtalk-ai-bot-anthropic，2026-08-25 前叫 openrouter)
 docker-compose -f docker-compose.wecom.yml up -d --build     # 企业微信版本（Deprecated，暂不使用）
 docker logs -f dingtalk-ai-bot-gemini   # 查看日志
 
@@ -74,7 +74,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 
 - **Monkey Patch**: `main.py` 顶部对 `aiohttp` 和 `requests` 打补丁，统一注入代理和重试逻辑。必须在所有其他导入之前执行。
 - **四后端切换**: `AI_BACKEND` 环境变量选择 `gemini`、`openclaw`、`openai`（含 sub2api 中转站路径）或 `openrouter`（原生 OpenRouter）。切换点是 `app/ai/backend.py` 的 `create_backend_stream()`，handler/bot 层不感知具体后端。
-- **openai_client 双协议分支**: `app/openai_client.py::call_openai_stream` 按 model_name 自动选 API——Gemini 上游走 Chat Completions（sub2api Gemini 适配不支持 Responses），其他（Claude/GPT）走 Responses API（绕开 sub2api chat completions 在多轮对话下的 400 bug）。Stage B system cache_control 在 Responses 路径丢失（`instructions` 是 string 字段无法挂 ephemeral）。带图请求会按 Responses API 词汇表转换 content block（`text → input_text/output_text`，`image_url → input_image`）。
+- **openai_client 双协议分支**: `app/openai_client.py::call_openai_stream` 按 `is_gemini_upstream = "gemini" in model_name.lower()` 朴素子串匹配选 API——含 "gemini" 字样的模型名走 Chat Completions，其余走 Responses API（历史上是为了绕开旧中转站 chat completions 在多轮对话下的 400 bug，现用的 cli-proxy-api 已验证无此 bug，但分支保留未变）。**这是子串匹配，不是严格判断**：中转站的 Gemini 风味 alias（如曾经的 `gemini-claude-opus-4-6-thinking`）会被误判走 Chat Completions；裸模型名（如 `claude-opus-4-6-thinking`）才会正确走 Responses API。Stage B system cache_control 在 Responses 路径丢失（`instructions` 是 string 字段无法挂 ephemeral）。带图请求会按 Responses API 词汇表转换 content block（`text → input_text/output_text`，`image_url → input_image`）。
 - **路由/Soul 调用不限 max_tokens**: `analyze_complexity_with_*` 和 `call_*_simple` 不下发 `max_tokens`，让上游用默认值（通常 4096+）。原因：Gemini-3.5-flash / Claude reasoning / GPT-5 等思考模型的 `max_tokens` 控制的是 **thinking + output 总额**，设小（如 300）会让思考吃光预算、输出为空，bot 拿到空 content 后 JSON 解析失败降级到默认（thinking_text 缺失等）。
 - **统一 AI 层**: `app/ai/handler.py` 的 `AIHandler` 目前只被企业微信（Deprecated）使用；钉钉走自己在 `app/dingtalk_bot.py::handle_ai_stream` 里的独立实现，并不经过 `AIHandler`——两条路径共享 `app/ai/system_prompt.py::build_system_prompt_content` 等下游工具函数，但顶层调用骨架是分开的，改动一处不会自动同步到另一处。System Prompt 构建口径已在 2026-07-08 统一收敛到 `build_system_prompt_content`（此前钉钉/AIHandler 各自复刻过一份相同逻辑，属于已修复的维护风险）。**已知限制（不修复，因 WeCom Deprecated）**：`AIHandler.process_message` 对 `soul_content`/`group_info` 硬编码传 `None`，企业微信从未获得 Soul 个性注入或群名上下文，也没有 `/soul` 命令；钉钉三生产后端（gemini/openai/openrouter）已用真实日志验证 Soul 正确注入。
 - **三档智能路由**: 路由分析在**卡片创建前**完成（让卡片初始就显示正确思考文字）。所有后端均使用 `MODEL_ROUTER`（默认值按后端自动选，如 Haiku/gemini-flash-lite）。路由输出：lite/fast/pro 三档 + thinking level + need_search + temperature（precise/balanced/creative → 0.1/0.7/0.9）+ need_image_gen/need_image_edit。
@@ -91,9 +91,9 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 ## 配置
 
 环境变量通过 `.env` 文件加载，根据部署类型选择不同文件：
-- `.env` → Gemini 后端（直连 google-genai 或走 sub2api 中转）
-- `.env.openai` → OpenAI/GPT 后端（含 sub2api 中转路径，走 Responses API）
-- `.env.openrouter` → Claude 后端（走 sub2api 或原生 OpenRouter，模型名带 `anthropic/` 前缀）
+- `.env` → Gemini 后端（直连 google-genai 或走 cli-proxy-api 中转）
+- `.env.openai` → OpenAI/GPT 后端（走 cli-proxy-api 中转，Responses API）
+- `.env.anthropic` → Claude 后端（`AI_BACKEND=openai`，走 cli-proxy-api 中转，容器/文件 2026-08-25 前叫 `openrouter`，模型名裸写不带前缀，如 `claude-sonnet-4-6`）
 - `.env.openclaw` → OpenClaw 后端
 - `.env.wecom` → 企业微信+钉钉双平台
 
@@ -107,7 +107,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `MODEL_FAST` — fast 档（日常问答）
 - `MODEL_PRO` — pro 档（复杂推理）
 - 默认值按 `AI_BACKEND` 自动选（gemini=3.5-flash，openai=gpt-5.5，openrouter=haiku/sonnet/opus）
-- **sub2api 中转站模型名硬约束**：GPT 模型必须用 `gpt-5.5` 而**不能带 `openai/` 前缀**（sub2api 会报 `no available accounts supporting model: openai/gpt-5.5`）；Claude 保留 `anthropic/` 前缀；Gemini 无前缀
+- **cli-proxy-api 中转站模型名（2026-08-25 起，替代旧 sub2api）**：GPT/Gemini/Claude 全部裸写模型名，不带任何 provider 前缀（`gpt-5.5`、`gemini-3.7-flash-high`、`claude-sonnet-4-6`）。**这个中转站是自建服务，账号池/模型别名会被主人持续调整，不能假设今天验证过的模型名明天还有效**——`config.yaml` 的 `oauth-model-alias` 曾把部分 Claude 模型包成 `gemini-*` 风味的别名（如 `gemini-claude-opus-4-6-thinking`），后来账号池调整后这个别名直接消失、模型名变回裸写的 `claude-opus-4-6-thinking`，导致对应档位一度报 `unknown provider for model`。改模型名前用 `curl {base}/v1/models` 拉最新列表核对，改完端到端调用验证一次，不要只看容器有没有启动。
 
 **钉钉卡片流式更新节流**: `STREAM_UPDATE_THROTTLE`（默认 **1.5s**，下限 0.5s）控制 bot 层向钉钉下发更新的最小间隔。这是权衡值：太快会让 thinkingText 副标题被首次 msgContent 更新瞬间盖掉，太慢失去流式体感。`dingtalk_card.stream_update` 自身另有 150ms 安全网防 burst。
 
@@ -115,12 +115,12 @@ OpenRouter 专属变量: `OPENROUTER_API_KEY`，`OPENROUTER_PROVIDER_ORDER=Anthr
 
 图片模型: `GEMINI_IMAGE_MODEL`（生图，默认 `imagen-4.0-generate-001`），`GEMINI_IMAGE_EDIT_MODEL`（改图，默认 `gemini-2.0-flash-exp`），`OPENAI_IMAGE_MODEL`（默认 `gpt-image-2`）。
 
-**原生联网搜索**（2026-07-02 起三路径全部原生，sub2api 实测透传；同日起默认**全自主**——`SEARCH_AUTONOMOUS=true` 时 fast/pro 档始终挂原生搜索工具由模型自决是否搜索，lite 档与无原生搜索的路径保持路由 need_search 门控，策略见 `app/ai/backend.py::resolve_enable_search`）:
-- Gemini 路径: `AI_BACKEND=gemini` + `GEMINI_API_BASE=http://127.0.0.1:38090`（sub2api 的 `/v1beta` Gemini 原生协议层）+ `GEMINI_API_BASE_KEY`（sub2api key）→ `google_search` 工具透传，`groundingMetadata` 回流。**`GEMINI_API_KEY` 保持为 Google 直连 key 不要动**——生图的 `generate_images(:predict)` 端点 sub2api 不覆盖，`image_gen` 走 `gemini_client.direct_client` 始终直连。
-- GPT 路径（openai 容器）: Responses API 下发 `tools=[{"type":"web_search"}]`，sub2api Codex 账号池真实执行（响应缺 `web_search_call` item 属正常，sub2api 翻译层丢弃）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。
-- Claude 路径（openrouter 容器）: 保持 `AI_BACKEND=openai` 走 sub2api，`web_search` 工具被翻译成 OpenRouter web plugin（Exa）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。**不要**切 `AI_BACKEND=openrouter`——服务器无 `OPENROUTER_API_KEY`，切了直接全挂。
+**原生联网搜索**（2026-07-02 起三路径全部原生；默认**全自主**——`SEARCH_AUTONOMOUS=true` 时 fast/pro 档始终挂原生搜索工具由模型自决是否搜索，lite 档与无原生搜索的路径保持路由 need_search 门控，策略见 `app/ai/backend.py::resolve_enable_search`）:
+- Gemini 路径: `AI_BACKEND=gemini` + `GEMINI_API_BASE=http://127.0.0.1:38317`（cli-proxy-api 的标准 `/v1beta` 原生协议层，**不带任何路径后缀**——旧 sub2api 用的私有前缀 `/antigravity` 在 cli-proxy-api 上会 404）+ `GEMINI_API_BASE_KEY` → `google_search` 工具透传，`groundingMetadata`/`webSearchQueries`/`groundingChunks` 回流，实测比旧中转站更完整（流式下还会带 `usage`）。**`GEMINI_API_KEY` 保持为 Google 直连 key 不要动**——生图的 `generate_images(:predict)` 端点中转站不覆盖，`image_gen` 走 `gemini_client.direct_client` 始终直连。
+- GPT 路径（openai 容器）: Responses API 下发 `tools=[{"type":"web_search"}]`，cli-proxy-api 真实执行，流式下有完整的 `response.web_search_call.*` 三阶段事件 + `annotation`（比旧中转站完整）。需 `OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true`。
+- Claude 路径（anthropic 容器，2026-08-25 前叫 openrouter 容器）: 保持 `AI_BACKEND=openai` 走 cli-proxy-api。**⚠️ Claude 在这条中转站上没有联网搜索能力**——它是走 Google antigravity/vertex 网关转发的 Claude（响应 id 前缀 `req_vrtx_...`），不是 Anthropic 原生协议；两种工具格式（OpenAI 风格 `{"type":"web_search"}`、Anthropic 原生 `web_search_20250305`）都被静默忽略，模型会回复"我没有联网功能"。`OPENAI_FLASH/PRO_SUPPORTS_SEARCH=true` 保留不动（声明工具零成本，只是不会被执行），这是已知且接受的功能取舍，不用去调。**不要**切 `AI_BACKEND=openrouter`——服务器无 `OPENROUTER_API_KEY`，切了直接全挂。
 - 模型不支持原生搜索时，默认不再调用旧摘要注入路径：`SEARCH_FALLBACK_PROVIDER=none`；如需临时兼容回滚，才显式设为 `gemini`，由 `gemini_client.google_search()` 搜索后注入 system 消息。
-- **🌐 图标只在真实搜索时点亮**（`app/ai/backend.py::should_show_search_icon`）：全自主下"挂了工具"≠"搜了"，图标仅在真实搜索信号回流时亮——Gemini 看 `grounding_metadata`、Responses 看 `web_search_call` item / `url_citation` annotation、OpenRouter 看 `delta.annotations`。客户端检测到即补发 `{"search": {"executed": True}}`，消费端（dingtalk_bot/handler）**合并**而非覆盖 search chunk。**GPT 路径若 sub2api 丢弃 web_search_call+annotation，则图标漏报（宁可不亮也不常亮误报）**；`🌐 [搜索执行]` 日志是探针，可 grep 确认 sub2api 到底透不透。
+- **🌐 图标只在真实搜索时点亮**（`app/ai/backend.py::should_show_search_icon`）：全自主下"挂了工具"≠"搜了"，图标仅在真实搜索信号回流时亮——Gemini 看 `grounding_metadata`、Responses 看 `web_search_call` item / `url_citation` annotation、OpenRouter 看 `delta.annotations`。客户端检测到即补发 `{"search": {"executed": True}}`，消费端（dingtalk_bot/handler）**合并**而非覆盖 search chunk。`🌐 [搜索执行]` 日志是探针，可 grep 确认中转站到底透不透。
 
 Feature flags（默认全 `true`，独立可回滚）:
 - `ENABLE_CACHE_BLOCKS` — Stage B system prompt 分块 cache

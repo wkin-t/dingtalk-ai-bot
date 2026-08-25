@@ -660,7 +660,7 @@ async def call_gemini_stream(
                     print(f"⚠️ 处理 chunk 异常: {safe_error_summary(error, 'stream')}")
 
             latency_ms = int((time.time() - start_time) * 1000)
-            print(f"✅ 流式响应结束 | 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+            print(f"✅ 流式响应结束 | 请求模型: {safe_model_name(target_model)}, 实际模型: {safe_model_name(actual_model)}, 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
             cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
             print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({cache_pct}%)")
 
