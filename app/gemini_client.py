@@ -554,7 +554,7 @@ async def call_gemini_stream(
                 )
                 print(f"🧠 已启用 Thinking 模式 (level={thinking_level})")
             else:
-                # gemini-3.7 系列不支持 minimal/none（400 THINKING_LEVEL_MINIMAL），
+                # gemini-3.8 系列不支持 minimal/none（400 THINKING_LEVEL_MINIMAL），
                 # low 是被支持档位里最轻量的一档，用它替代
                 config.thinking_config = types.ThinkingConfig(
                     thinking_level="low",

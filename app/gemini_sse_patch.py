@@ -10,7 +10,7 @@ https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server
 "Failed to parse response as JSON. Raw response: : keep-alive"）。
 
 cli-proxy-api 的 `streaming.keepalive-seconds` 配置会在流式响应静默期（典型触发
-场景：Gemini 3.7 thinking_level=medium/high 的思考停顿）插入 `: keep-alive`
+场景：Gemini 3.8 thinking_level=medium/high 的思考停顿）插入 `: keep-alive`
 维持连接，必然命中这个 bug，表现为"流式响应中断"——已用生产日志 + 容器内复现
 的真实 traceback 确认，antigravity 和 vertex 两个上游都会中招（bug 在客户端
 解析层，与上游账号池无关）。

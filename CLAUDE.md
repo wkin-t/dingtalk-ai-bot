@@ -107,7 +107,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - `MODEL_FAST` — fast 档（日常问答）
 - `MODEL_PRO` — pro 档（复杂推理）
 - 默认值按 `AI_BACKEND` 自动选（gemini=3.5-flash，openai=gpt-5.5，openrouter=haiku/sonnet/opus）
-- **cli-proxy-api 中转站模型名（2026-08-25 起，替代旧 sub2api）**：GPT/Gemini/Claude 全部裸写模型名，不带任何 provider 前缀（`gpt-5.5`、`gemini-3.7-flash-high`、`claude-sonnet-4-6`）。**这个中转站是自建服务，账号池/模型别名会被主人持续调整，不能假设今天验证过的模型名明天还有效**——`config.yaml` 的 `oauth-model-alias` 曾把部分 Claude 模型包成 `gemini-*` 风味的别名（如 `gemini-claude-opus-4-6-thinking`），后来账号池调整后这个别名直接消失、模型名变回裸写的 `claude-opus-4-6-thinking`，导致对应档位一度报 `unknown provider for model`。改模型名前用 `curl {base}/v1/models` 拉最新列表核对，改完端到端调用验证一次，不要只看容器有没有启动。
+- **cli-proxy-api 中转站模型名（2026-08-25 起，替代旧 sub2api）**：GPT/Gemini/Claude 全部裸写模型名，不带任何 provider 前缀（`gpt-5.5`、`gemini-3.8-flash-high`、`claude-sonnet-4-6`）。**这个中转站是自建服务，账号池/模型别名会被主人持续调整，不能假设今天验证过的模型名明天还有效**——`config.yaml` 的 `oauth-model-alias` 曾把部分 Claude 模型包成 `gemini-*` 风味的别名（如 `gemini-claude-opus-4-6-thinking`），后来账号池调整后这个别名直接消失、模型名变回裸写的 `claude-opus-4-6-thinking`，导致对应档位一度报 `unknown provider for model`。改模型名前用 `curl {base}/v1/models` 拉最新列表核对，改完端到端调用验证一次，不要只看容器有没有启动。
 
 **钉钉卡片流式更新节流**: `STREAM_UPDATE_THROTTLE`（默认 **1.5s**，下限 0.5s）控制 bot 层向钉钉下发更新的最小间隔。这是权衡值：太快会让 thinkingText 副标题被首次 msgContent 更新瞬间盖掉，太慢失去流式体感。`dingtalk_card.stream_update` 自身另有 150ms 安全网防 burst。
 
