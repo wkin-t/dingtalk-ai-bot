@@ -1,6 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "检查取消、搜索失败和安全错误 contract。"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "检查 Responses/function-call 跨层兼容和测试覆盖。"}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "检查 provider 隐藏、日志脱敏和诊断边界。"}
-{"file": ".trellis/tasks/07-31-antigravity-claude-search-bridge/research/tool-loop-design-20260731.md", "reason": "按研究结论复核实现，不把 Gemini 文本当作最终回答。"}
-{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/sub2api-source-search-20260731.md", "reason": "复核 Sub2API 当前 hardcode 行为与实现假设。"}

@@ -1,3 +1,0 @@
-{"file":".trellis/spec/backend/error-handling.md","reason":"熔断触发边界、provider 异常传播、fallback 双失败和 fail-open 语义需要遵循后端错误处理约定。"}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"用户可见长异常、Redis marker 和日志都必须脱敏，需在实现时核对日志字段与敏感信息边界。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"该任务跨配置、异步流、同步线程池和钉钉 footer，需要按项目测试与代码质量门禁实现。"}

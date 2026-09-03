@@ -1,7 +1,0 @@
-{"file": ".trellis/spec/backend/index.md", "reason": "Backend quality checklist"}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review prompt and URL leakage risks"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review streaming contract and tests"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review provider-to-footer data flow"}
-{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/production-event-evidence.md", "reason": "Compare implementation against production evidence"}
-{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/search-signal-gap-20260731.md", "reason": "Review current production search-event gap, false-positive boundary, and canary evidence."}
-{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/sol-search-normalization-review-20260731.md", "reason": "Two-round Sol adversarial review findings and closure evidence for the search signal normalization."}
