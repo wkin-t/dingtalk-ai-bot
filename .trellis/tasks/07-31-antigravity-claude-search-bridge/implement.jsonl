@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "异常、取消和安全错误必须在工具循环与 provider 边界正确传播。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Responses 流式 contract、跨层测试和 provider 回归门禁。"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "搜索桥接日志必须固定字段且不得泄露 query、URL、响应或凭据。"}
+{"file": ".trellis/tasks/07-31-antigravity-claude-search-bridge/research/tool-loop-design-20260731.md", "reason": "本任务的 Sub2API 源码证据与 function-call 设计决策。"}
+{"file": ".trellis/tasks/07-30-responses-search-thinking-observability/research/sub2api-source-search-20260731.md", "reason": "已核对的服务器 Sub2API v0.1.168 适配层源码证据。"}
