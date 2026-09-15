@@ -306,7 +306,8 @@ def get_bot_display_name() -> str:
         return "小克"
     if AI_BACKEND == "openai":
         model = MODEL_PRO or MODEL_FAST or ""
-        if model.startswith("anthropic/"):
+        # 中转站模型名裸写（claude-sonnet-4-6），也可能是 gemini-claude-* 风味别名，须先于 gemini 判断
+        if model.startswith("anthropic/") or "claude" in model.lower():
             return "小克"
         if "gemini" in model.lower() or model.startswith("google/"):
             return "Gem"

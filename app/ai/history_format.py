@@ -8,6 +8,8 @@ _BOT_SOURCE_NAMES = {
     "openclaw": "Claw",
     "openai": "小G",
     "openrouter": "小克",
+    # 2026-08-25 起 Claude 容器 BOT_ID 由 openrouter 改名为 anthropic；保留旧键兼容未迁移的历史
+    "anthropic": "小克",
 }
 
 

@@ -29,6 +29,15 @@ class TestGetBotDisplayName:
              patch.object(cfg, "BOT_NAME", ""):
             assert cfg.get_bot_display_name() == "小克"
 
+    @pytest.mark.parametrize("model", ["claude-opus-4-6-thinking", "gemini-claude-opus-4-6-thinking"])
+    def test_openai_with_bare_or_gemini_flavored_claude_model(self, model):
+        """中转站裸写 Claude 模型名 / gemini-* 风味别名都应识别为 Claude"""
+        with patch.object(cfg, "AI_BACKEND", "openai"), \
+             patch.object(cfg, "MODEL_PRO", model), \
+             patch.object(cfg, "MODEL_FAST", ""), \
+             patch.object(cfg, "BOT_NAME", ""):
+            assert cfg.get_bot_display_name() == "小克"
+
     def test_openai_with_gpt_model(self):
         with patch.object(cfg, "AI_BACKEND", "openai"), \
              patch.object(cfg, "MODEL_PRO", "gpt-5.5"), \

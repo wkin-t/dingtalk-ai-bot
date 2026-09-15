@@ -23,6 +23,13 @@ def test_other_bot_assistant_gets_timestamp_prefix():
     )
 
 
+def test_anthropic_bot_id_maps_to_same_display_name_as_openrouter():
+    """Claude 容器 BOT_ID 改名 anthropic 后，跨 bot 标签仍应显示 小克 而非裸 bot_id"""
+    msgs = [{"role": "assistant", "content": "回答", "bot_id": "anthropic"}]
+    result = format_history_with_meta(msgs, current_bot_id="gemini")
+    assert result[0]["content"] == '<other_bot name="小克">回答</other_bot>'
+
+
 def test_other_bot_assistant_without_timestamp_no_prefix():
     """旧消息没有 timestamp 时，应只加 XML 包裹不加 timestamp（向后兼容）"""
     msgs = [
