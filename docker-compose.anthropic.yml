@@ -1,0 +1,29 @@
+# 1Panel 管理的 DingTalk AI 机器人服务 (Claude / anthropic 容器)
+# 代码位置: /opt/1panel/docker/compose/dingtalk-ai-bot/
+# 2026-08-25 前名为 openrouter（compose / .env / 数据目录 / BOT_ID 均已迁移为 anthropic）
+# 注意: 容器名表示接入的模型家族，协议后端是 AI_BACKEND=openai，并不经过 OpenRouter
+
+services:
+  dingtalk-ai-bot-anthropic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dingtalk-ai-bot:anthropic
+    container_name: dingtalk-ai-bot-anthropic
+    restart: always
+    network_mode: "host"
+    environment:
+      # 通过 OpenAI Responses 协议调用 OpenAI 兼容中转站（cli-proxy-api）的 /v1 端点，
+      # 模型名裸写（如 claude-sonnet-4-6），由中转站转发到 Claude 上游。
+      - AI_BACKEND=openai
+      # BOT_ID 是历史归属 / Soul 文件 / cutoff 的持久化键，改动须同步迁移数据
+      - BOT_ID=anthropic
+      - FLASK_PORT=35002
+    env_file:
+      - .env.anthropic
+    volumes:
+      - ./data-anthropic:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 512M

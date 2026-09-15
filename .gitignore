@@ -4,9 +4,8 @@
 !.env.example
 !.env.*.example
 
-# Claude Code / Continue 配置
-.claude/settings.local.json
-.claude/.store/
+# Claude Code / Continue 配置（.claude 含 SSH 别名、服务器路径等部署信息，整体不入库）
+.claude/
 .continue/
 
 # Demo 目录 (参考代码)
@@ -32,8 +31,9 @@ build/
 venv/
 env/
 
-# 数据目录
+# 数据目录（各容器独立：data-openai/、data-anthropic/ 等，含 Soul 与对话历史）
 data/
+data-*/
 
 # Tailscale 数据
 tailscale_data/

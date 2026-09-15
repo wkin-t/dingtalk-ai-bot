@@ -1,3 +1,5 @@
+# ⚠️ Deprecated：OpenClaw 后端暂不使用，服务器未部署，代码保留但不再维护
+# ⚠️ 与 docker-compose.openai.yml 同为 host 网络 + FLASK_PORT=35001，二者不可同时运行
 # 1Panel 管理的 DingTalk OpenClaw AI 机器人服务
 # 代码位置: /opt/dingtalk-ai-bot/
 # 依赖: openclaw-gateway (由 1Panel 单独管理，提供 ws://127.0.0.1:18789 Gateway)
