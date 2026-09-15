@@ -26,6 +26,13 @@ cli-proxy-api 的 `streaming.keepalive-seconds` 配置会在流式响应静默�
   multi-line SSE"、"Handle SSE error message types properly in streaming"）
   均未涉及注释行跳过
 
+**2026-09-15 复核（google-genai==2.23.0，生产容器 `pip` 未锁版本随 --build 升级）**：
+- `inspect.getsource()` 逐行比对：两个方法体与本文件复制的原版一致（仅注释与
+  `list[str]` 类型标注差异），仍无注释行分支，bug 未修复
+- `_api_client` 中 `startswith('data: ')` 仍只有同步 / httpx 异步 / aiohttp 异步三处，
+  均被本补丁覆盖；新增的 `byte_segments` 不解析 SSE 文本行
+- 容器内复现：原版同步/异步均抛 `Raw response: : keep-alive`，打补丁后正常解析
+
 **升级 google-genai 后必须做的事**：本文件的补丁是对 `_aiter_response_stream`/
 `_iter_response_stream` 方法体的完整替换，不是简单包装——如果官方在某个新版本
 里改了这两个方法的内部结构（哪怕只是改了 SSE 注释行处理之外的逻辑），本补丁会
@@ -41,7 +48,7 @@ from typing import Any, AsyncIterator, Iterator
 
 logger = logging.getLogger(__name__)
 
-EXPECTED_VERSION = "2.19.0"
+EXPECTED_VERSION = "2.23.0"
 _PATCHED = False
 
 

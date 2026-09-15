@@ -21,7 +21,8 @@ PySocks
 alibabacloud-tea-util
 alibabacloud-tea-openapi
 # Google Gemini 官方 SDK (新版)
-google-genai
+# 锁定版本：app/gemini_sse_patch.py 整体替换 SDK 私有流解析方法，升级前须按该文件说明重新核对并更新 EXPECTED_VERSION
+google-genai==2.23.0
 # httpx SOCKS 代理支持 (官方 SDK 底层使用 httpx)
 httpx[socks]
 # Redis 客户端
