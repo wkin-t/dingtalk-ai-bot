@@ -1,5 +1,7 @@
 # ✅ OpenClaw 群路由配置完成
 
+> ⚠️ **Deprecated**：OpenClaw 后端已暂停使用，服务器未部署。本文是 2026-02-13 的部署快照，保留作历史记录，不代表当前生产状态。
+
 **时间**: 2026-02-13 14:05
 **状态**: ✅ 已部署并验证
 
@@ -11,9 +13,9 @@
 
 | 群名 | conversation_id | 对应 Agent | 状态 |
 |------|-----------------|-----------|------|
-| 陈皮泡茶 | `cidnLpPCkB3FUXxqovf8sKC8A==` | 陈皮泡茶 | ✅ |
-| 雅致兴旺 | `cidHK/gGNmaMK6OlQADeVzVLA==` | 雅致兴旺 | ✅ |
-| 马上发财 | `cidWcDfj12DvTH6DGBYsm2IwQ==` | 马上发财 | ✅ |
+| 陈皮泡茶 | `cidXXXXXXXXXXXXXXXXXXXX1==` | 陈皮泡茶 | ✅ |
+| 雅致兴旺 | `cidXXXXXXXXXXXXXXXXXXXX2==` | 雅致兴旺 | ✅ |
+| 马上发财 | `cidXXXXXXXXXXXXXXXXXXXX3==` | 马上发财 | ✅ |
 
 ### 环境变量配置
 
@@ -28,9 +30,9 @@ OPENCLAW_CONTEXT_MESSAGES=6
 
 # 群路由映射（新增）
 OPENCLAW_GROUP_AGENT_MAPPING={
-  "cidnLpPCkB3FUXxqovf8sKC8A==": "陈皮泡茶",
-  "cidHK/gGNmaMK6OlQADeVzVLA==": "雅致兴旺",
-  "cidWcDfj12DvTH6DGBYsm2IwQ==": "马上发财"
+  "cidXXXXXXXXXXXXXXXXXXXX1==": "陈皮泡茶",
+  "cidXXXXXXXXXXXXXXXXXXXX2==": "雅致兴旺",
+  "cidXXXXXXXXXXXXXXXXXXXX3==": "马上发财"
 }
 ```
 
@@ -67,9 +69,9 @@ docker logs -f dingtalk-ai-bot-openclaw
 
 **预期看到的日志输出**:
 ```
-📡 正在请求 OpenClaw HTTP API (conversation_id=cidnLpPCkB3FUXxqovf8sKC8A==, agent=陈皮泡茶)...
-📡 正在请求 OpenClaw HTTP API (conversation_id=cidHK/gGNmaMK6OlQADeVzVLA==, agent=雅致兴旺)...
-📡 正在请求 OpenClaw HTTP API (conversation_id=cidWcDfj12DvTH6DGBYsm2IwQ==, agent=马上发财)...
+📡 正在请求 OpenClaw HTTP API (conversation_id=cidXXXXXXXXXXXXXXXXXXXX1==, agent=陈皮泡茶)...
+📡 正在请求 OpenClaw HTTP API (conversation_id=cidXXXXXXXXXXXXXXXXXXXX2==, agent=雅致兴旺)...
+📡 正在请求 OpenClaw HTTP API (conversation_id=cidXXXXXXXXXXXXXXXXXXXX3==, agent=马上发财)...
 ```
 
 ### 3️⃣ 验证 agent 是否正确路由
