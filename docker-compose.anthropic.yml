@@ -13,7 +13,7 @@ services:
     restart: always
     network_mode: "host"
     environment:
-      # 通过 OpenAI Responses 协议调用 OpenAI 兼容中转站（cli-proxy-api）的 /v1 端点，
+      # 通过 OpenAI Responses 协议调用 OpenAI 兼容中转站（s2a）的 /v1 端点，
       # 模型名裸写（如 claude-sonnet-4-6），由中转站转发到 Claude 上游。
       - AI_BACKEND=openai
       # BOT_ID 是历史归属 / Soul 文件 / cutoff 的持久化键，改动须同步迁移数据

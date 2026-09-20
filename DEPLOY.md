@@ -20,7 +20,7 @@
 
 | 依赖 | 用途 | 说明 |
 |---|---|---|
-| OpenAI 兼容中转站（如自建 cli-proxy-api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
+| OpenAI 兼容中转站（如自建 sub2api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
 | SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 生图 / 改图始终直连 Google，需要 `SOCKS_PROXY` |
 | Redis / MySQL | 对话历史 | 可选，不可用时降级到容器内 `data/history/` |
 | 腾讯云 COS | 生图存储 | 可选，生图功能需要 |
@@ -76,9 +76,9 @@ curl http://localhost:35002/
 | 变量 | 注意事项 |
 |---|---|
 | `BOT_ID` | compose 已为每个容器设置了不同值。它是历史消息归属、Soul 文件名（`{BOT_ID}__{cid}.md`）、`/clear` cutoff 的持久化键，**不要随意改**；多个容器共用同一个值会让角色重塑失效 |
-| `GEMINI_API_BASE` | 填中转站根地址（如 `http://127.0.0.1:38317`），SDK 会自动拼接 `/v1beta`，**不要带路径后缀** |
+| `GEMINI_API_BASE` | 填中转站的 Gemini 原生协议入口，SDK 会自动拼接 `/v1beta`。**路径前缀取决于中转站**：sub2api 需要带 `/antigravity`（如 `https://<中转站域名>/antigravity`），不带会返回 400 `API key group platform is not gemini`；标准 `/v1beta` 协议层的中转站则不能带后缀。中转站在公网时用 `https`，`http` 会被 302 跳转导致 POST 失败 |
 | `GEMINI_API_KEY` | 保持为 Google 直连 key。生图的 `:predict` 端点中转站不覆盖，始终直连 |
-| `OPENAI_{FLASH,PRO}_SUPPORTS_SEARCH` | 只有上游真正执行 Responses `web_search` 时才会有搜索效果。经中转站调用的 Claude 目前不执行该工具 |
+| `OPENAI_{FLASH,PRO}_SUPPORTS_SEARCH` | 只有上游真正执行 Responses `web_search` 时才会有搜索效果。不同中转站对不同上游的处理不一样（如 sub2api 上的 Claude 会在服务端搜索并把结果拼进正文，但不产生标准搜索事件），换中转站后需要重新实测 |
 | `SEARCH_FALLBACK_PROVIDER` | 默认 `none`。设为 `gemini` 会启用旧的"Gemini 搜索摘要注入"兼容路径 |
 | `OPENROUTER_PROVIDER_ORDER` | 仅原生 `AI_BACKEND=openrouter` 使用，默认 `Anthropic`；改成其他 provider 时 prompt cache 可能被静默忽略 |
 | `GEMINI_API_BASE_FALLBACK` / `GEMINI_API_BASE_FALLBACK_KEY` | Gemini 主路径熔断后的保底路径，需要显式配置独立 key，见 `docs/deploy/gemini-circuit-breaker-rollout.md` |
@@ -114,7 +114,7 @@ docker restart dingtalk-ai-bot-gemini    # 不涉及 env 变更时，restart 即
 中转站的模型别名发生了变化。核对模型列表后更新对应的 `MODEL_*`，然后 `up -d`：
 
 ```bash
-curl -H "Authorization: Bearer <key>" http://127.0.0.1:38317/v1/models
+curl -H "Authorization: Bearer <key>" https://<中转站域名>/v1/models
 ```
 
 ### Gemini 容器无法连接

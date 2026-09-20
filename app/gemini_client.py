@@ -77,8 +77,8 @@ def _build_direct_client() -> genai.Client:
 
 
 if GEMINI_API_BASE:
-    # 对话/搜索走中转站（如 sub2api 的 /v1beta 原生协议层）。
-    # 中转站在本机/内网，不注入代理；google_search 工具由中转透传（groundingMetadata 已实测可回流）。
+    # 对话/搜索走中转站（sub2api 的 /antigravity/v1beta 原生协议层）。
+    # 中转站是服务器可直连的域名，不注入 SOCKS 代理；google_search 工具由中转透传（groundingMetadata 已实测可回流）。
     print(f"🔗 Gemini SDK 对话走中转: {GEMINI_API_BASE}")
     client = genai.Client(
         api_key=GEMINI_API_BASE_KEY,
@@ -266,10 +266,9 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
             response = await active_client.aio.models.generate_content_stream(
                 model=model,
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=300,
-                ),
+                # 不设 max_output_tokens：思考模型的思考 token 计入输出上限，
+                # 设 300 时实测 10 次里 9 次被思考吃光、JSON 被截断，路由静默降级
+                config=types.GenerateContentConfig(temperature=0.1),
             )
             iterator = response.__aiter__()
         except asyncio.CancelledError:
