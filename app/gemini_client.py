@@ -78,7 +78,7 @@ def _build_direct_client() -> genai.Client:
 
 if GEMINI_API_BASE:
     # 对话/搜索走中转站（sub2api 的 /antigravity/v1beta 原生协议层）。
-    # 中转站是服务器可直连的域名，不注入 SOCKS 代理；google_search 工具由中转透传（groundingMetadata 已实测可回流）。
+    # 中转站 sub2api 跑在服务器本机（127.0.0.1:38090），不注入 SOCKS 代理；google_search 工具由中转透传（groundingMetadata 已实测可回流）。
     print(f"🔗 Gemini SDK 对话走中转: {GEMINI_API_BASE}")
     client = genai.Client(
         api_key=GEMINI_API_BASE_KEY,
