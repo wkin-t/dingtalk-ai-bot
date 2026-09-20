@@ -168,7 +168,9 @@ def call_gemini_sync(active_client: genai.Client, model: str, prompt: str) -> st
     response = active_client.models.generate_content(
         model=model,
         contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
-        config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=500),
+        # 不设 max_output_tokens：Soul 进化用的是思考模型，思考约 800~950 token 计入输出上限，
+        # 设 500 时实测 4 次 0 次能产出有效 JSON（思考吃掉约 478，只剩十几个 token 输出）
+        config=types.GenerateContentConfig(temperature=0.7),
     )
     return response.text or ""
 
