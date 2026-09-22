@@ -284,6 +284,31 @@ GEMINI_SEARCH_MODEL = os.getenv("GEMINI_SEARCH_MODEL", "gemini-3.5-flash")
 # 搜索 fallback 超时（秒）：代理半死/网络黑洞时避免挂死整个对话流
 SEARCH_TIMEOUT_SECONDS = _get_int("SEARCH_TIMEOUT_SECONDS", 15)
 
+# Claude 搜索桥接总开关。默认关闭：s2a antigravity 网关的已知行为是，Claude 一旦
+# 触发联网搜索就会被静默换成非 Claude 模型（实测常见 gemini-2.5-flash），"挂着搜索
+# 工具"本身就是货不对版。关闭时 bridge_ready() 恒为 False，Claude 不再拿到任何搜索
+# 工具，改由 openai_client 注入 system 提示让模型自己向用户说明原因。等 antigravity
+# 那边的路由行为改了 / 有可靠的模型身份校验手段，再打开。
+CLAUDE_SEARCH_BRIDGE_ENABLED = _get_bool("CLAUDE_SEARCH_BRIDGE_ENABLED", False)
+
+# Claude → Antigravity Gemini 搜索桥接。该配置必须独立于 GEMINI_API_KEY，
+# 缺少任一项时桥接保持关闭，避免 openrouter 容器误用直连 Google 凭据。
+ANTIGRAVITY_GEMINI_API_BASE = os.getenv("ANTIGRAVITY_GEMINI_API_BASE", "").strip().rstrip("/")
+ANTIGRAVITY_GEMINI_API_KEY = os.getenv("ANTIGRAVITY_GEMINI_API_KEY", "").strip()
+ANTIGRAVITY_GEMINI_SEARCH_MODEL = os.getenv(
+    "ANTIGRAVITY_GEMINI_SEARCH_MODEL", ""
+).strip()
+ANTIGRAVITY_SEARCH_TIMEOUT_SECONDS = max(
+    1, _get_int("ANTIGRAVITY_SEARCH_TIMEOUT_SECONDS", SEARCH_TIMEOUT_SECONDS)
+)
+
+# 只启用已经通过脱敏 tool-continuation canary 的思考档位；默认仅 low。
+ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS = frozenset(
+    level.strip().lower()
+    for level in os.getenv("ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", "low").split(",")
+    if level.strip().lower() in {"minimal", "low", "medium", "high"}
+)
+
 # 熔断状态专用 Redis 超时；不要复用数据层的 5 秒连接/读写超时。
 GEMINI_CIRCUIT_REDIS_TIMEOUT_SECONDS = max(
     0.05,

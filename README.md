@@ -49,6 +49,7 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 - **流式 AI 卡片**：钉钉卡片逐字更新，展示思考过程；更新节流由 `STREAM_UPDATE_THROTTLE` 控制（默认 1.5s）
 - **原生联网搜索**：Gemini 用 `google_search`，GPT 走 Responses API 的 `web_search`，原生 OpenRouter 使用 annotations。默认全自主（`SEARCH_AUTONOMOUS=true`），fast/pro 档始终挂载搜索工具，由模型自己决定是否搜索。🌐 图标只在确实发生搜索时点亮
+- **Claude 搜索暂时禁用**：s2a 中转站的已知行为是，Claude（anthropic 容器）一旦触发联网搜索就会被静默换成非 Claude 模型（实测常见 gemini-2.5-flash）再作答，属于身份冒充。因此 `CLAUDE_SEARCH_BRIDGE_ENABLED` 默认 `false`，Claude 不挂任何搜索工具；当用户确实要求联网时，改为注入 system 提示，让 Claude 自己说明"搜索工具会把我换成别的模型，所以现在用不了"。相关的桥接实现（`app/antigravity_search.py`）与身份校验保留在代码里，作为将来重新打开该开关时的护栏
 - **生图 + 改图**：Gemini Imagen / OpenAI `gpt-image-2` 生图；Gemini Flash / OpenAI images.edit 改图。图片上传腾讯云 COS，以预签名 URL 展示
 - **多模态**：单图/多图识别，图片 MIME 按文件魔数检测
 - **Soul 自主进化**：每次对话后 AI 反思并进化个性，30 分钟冷却，保留 changelog。Soul 文件按 `{BOT_ID}__{cid}.md` 隔离
@@ -210,6 +211,8 @@ python main.py                     # 默认端口 35000
 > 旧变量 `GEMINI_MODEL`、`OPENAI_MODEL_FLASH`、`OPENROUTER_MODEL_*` 自 2026-05-20 起不再读取。
 
 **Feature flags**（默认均为 `true`，可以单独关闭回滚）：`ENABLE_ROLE_REWRITE`、`ENABLE_CACHE_BLOCKS`、`ENABLE_TOP_P_PIPELINE`、`ENABLE_SAMPLE_OVERRIDE`、`SEARCH_AUTONOMOUS`。
+
+`CLAUDE_SEARCH_BRIDGE_ENABLED` 默认 `false`（与上面相反），是 Claude 搜索桥接的总开关，见上文"Claude 搜索暂时禁用"。
 
 ## 使用说明
 

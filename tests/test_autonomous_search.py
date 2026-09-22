@@ -142,13 +142,17 @@ class TestCreateBackendStreamIntegration:
 
     @pytest.mark.asyncio
     async def test_openai_stream_receives_forced_search(self, monkeypatch):
-        """生产两容器是 AI_BACKEND=openai——强制后的 enable_search 必须传进 call_openai_stream"""
+        """生产两容器是 AI_BACKEND=openai——强制后的 enable_search 必须传进 call_openai_stream，
+        但强制前的原始信号（search_requested=False，路由并未真的要求搜索）也必须保留下来，
+        否则 Claude 会在自主挂载搜索工具的每条消息里都误以为用户真的要求了联网。"""
         captured = {}
 
         async def fake_stream(messages, target_model, thinking_level="low",
-                              enable_search=False, temperature=0.7, top_p=None,
+                              enable_search=False, search_requested=None,
+                              temperature=0.7, top_p=None,
                               conversation_id=""):
             captured["enable_search"] = enable_search
+            captured["search_requested"] = search_requested
             yield {"content": "ok"}
 
         import app.openai_client as oc
@@ -164,6 +168,7 @@ class TestCreateBackendStreamIntegration:
             [{"role": "user", "content": "hi"}], target_model="fast", enable_search=False,
         )]
         assert captured["enable_search"] is True
+        assert captured["search_requested"] is False
         assert chunks == [{"content": "ok"}]
 
     @pytest.mark.asyncio

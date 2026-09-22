@@ -82,6 +82,11 @@ async def create_backend_stream(
     """
     backend = cfg.AI_BACKEND
 
+    # 全自主模式下 enable_search 会被 resolve_enable_search 强制为 True（fast/pro
+    # 档无条件挂搜索工具，模型自决），这个被强制后的值不能代表"用户/路由真的要搜索"。
+    # search_requested 保留强制前的原始信号，只用于 openai_client 判断要不要让
+    # Claude 主动解释"我搜不了"——不能对每条自主挂载的消息都提这一嘴。
+    search_requested = enable_search
     resolved_search = resolve_enable_search(backend, target_model, enable_search)
     if resolved_search and not enable_search:
         print(f"🔍 [全自主搜索] {target_model} 挂载原生搜索工具（模型自决是否搜索）")
@@ -117,6 +122,7 @@ async def create_backend_stream(
             target_model=target_model,
             thinking_level=thinking_level,
             enable_search=enable_search,
+            search_requested=search_requested,
             temperature=temperature,
             top_p=top_p,
             conversation_id=kwargs.get("conversation_id", ""),

@@ -23,7 +23,15 @@ from app.config import (
 )
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
 from app.gemini_client import google_search
-
+from app.error_safety import safe_model_name
+from app.antigravity_search import (
+    BRIDGE_TOOL_NAME,
+    SearchEvidence,
+    bridge_ready,
+    build_search_tool,
+    search_current_web,
+)
+from app.config import ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS
 EFFORT_MAPPING = {
     "minimal": "none",
     "low": "none",
@@ -219,6 +227,597 @@ def _is_claude_model(model_name: str) -> bool:
     return model_lower.startswith("anthropic/") or model_base.startswith("claude-")
 
 
+
+def _bridge_route_matches(expected: str, actual: str) -> bool:
+    """要求网关返回同一 Claude 模型族，允许 provider 前缀和短版本别名。"""
+    if not _is_claude_model(actual):
+        return False
+    expected_base = expected.lower().rsplit("/", 1)[-1]
+    actual_base = actual.lower().rsplit("/", 1)[-1]
+    return (
+        actual_base == expected_base
+        or actual_base.startswith(expected_base + "-")
+        or expected_base.startswith(actual_base + "-")
+    )
+
+BRIDGE_SAFE_ERROR = "Claude 搜索桥接暂不可用，请稍后重试。"
+# antigravity 网关的已知行为：Claude 在搜索场景下会被中转站静默换成非 Claude 模型
+# （实测常见 gemini-2.5-flash）。_bridge_route_matches 会拦截这种响应，这里给出区分
+# 于通用故障的提示，方便群里使用者和看日志的人都能知道这不是普通的桥接故障。
+BRIDGE_MODEL_SWAP_ERROR = (
+    "⚠️ 联网搜索触发了中转站的已知行为：Claude 被静默换成了其他模型（如 gemini-2.5-flash），"
+    "为避免冒充 Claude 回复，本轮已拦截，请重试或换个问法。"
+)
+BRIDGE_MAX_CALLS = 8
+BRIDGE_MAX_ARGUMENT_BYTES = 8192
+BRIDGE_MAX_PENDING_CHARS = 32768
+
+
+def _bridge_safe_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[\x00-\x1f\x7f]", "", value)[:128]
+
+
+def _bridge_merge_field(entry: Dict[str, Any], key: str, value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        entry["invalid"] = True
+        return
+    value = _bridge_safe_id(value)
+    if not value:
+        entry["invalid"] = True
+        return
+    previous = entry.get(key)
+    if previous and previous != value:
+        entry["invalid"] = True
+        return
+    entry[key] = value
+
+
+def _bridge_set_argument(entry: Dict[str, Any], key: str, value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or len(value.encode("utf-8")) > BRIDGE_MAX_ARGUMENT_BYTES:
+        entry["invalid"] = True
+        return
+    previous = entry.get(key)
+    if previous is not None and previous != value:
+        entry["invalid"] = True
+        return
+    entry[key] = value
+
+
+def _bridge_entry(ledger: Dict[str, Dict[str, Any]], item_id: str) -> Dict[str, Any]:
+    return ledger.setdefault(
+        item_id,
+        {
+            "item_id": item_id,
+            "call_id": "",
+            "name": "",
+            "fragments": [],
+            "done_arguments": None,
+            "added_arguments": None,
+            "item_arguments": None,
+            "completed_arguments": None,
+            "invalid": False,
+        },
+    )
+
+
+def _bridge_record_item(
+    ledger: Dict[str, Dict[str, Any]],
+    item: Any,
+    source: str,
+    errors: list[str],
+) -> bool:
+    if _response_type(item) != "function_call":
+        return False
+    item_id = _bridge_safe_id(_response_field(item, "id") or _response_field(item, "item_id"))
+    if not item_id:
+        errors.append("missing_item_id")
+        return True
+    if item_id not in ledger and len(ledger) >= BRIDGE_MAX_CALLS:
+        errors.append("call_limit")
+        return True
+    entry = _bridge_entry(ledger, item_id)
+    _bridge_merge_field(entry, "call_id", _response_field(item, "call_id"))
+    _bridge_merge_field(entry, "name", _response_field(item, "name"))
+    arguments = _response_field(item, "arguments")
+    _bridge_set_argument(entry, f"{source}_arguments", arguments)
+    return True
+
+
+def _bridge_record_event(
+    ledger: Dict[str, Dict[str, Any]],
+    event: Any,
+    errors: list[str],
+) -> bool:
+    event_type = _response_type(event)
+    if event_type == "response.output_item.added":
+        # added 事件可能只携带参数前缀，作为最低优先级候选保存。
+        return _bridge_record_item(ledger, _response_field(event, "item"), "added", errors)
+    if event_type == "response.output_item.done":
+        return _bridge_record_item(ledger, _response_field(event, "item"), "item", errors)
+    if event_type == "response.function_call_arguments.delta":
+        item_id = _bridge_safe_id(_response_field(event, "item_id"))
+        if not item_id:
+            errors.append("missing_item_id")
+            return True
+        entry = _bridge_entry(ledger, item_id)
+        _bridge_merge_field(entry, "call_id", _response_field(event, "call_id"))
+        delta = _response_field(event, "delta")
+        if not isinstance(delta, str):
+            entry["invalid"] = True
+            errors.append("invalid_delta")
+            return True
+        fragments = entry["fragments"]
+        current_bytes = sum(len(part.encode("utf-8")) for part in fragments)
+        if current_bytes + len(delta.encode("utf-8")) > BRIDGE_MAX_ARGUMENT_BYTES:
+            entry["invalid"] = True
+            errors.append("argument_limit")
+        else:
+            fragments.append(delta)
+        return True
+    if event_type == "response.function_call_arguments.done":
+        item_id = _bridge_safe_id(_response_field(event, "item_id"))
+        if not item_id:
+            errors.append("missing_item_id")
+            return True
+        entry = _bridge_entry(ledger, item_id)
+        _bridge_merge_field(entry, "call_id", _response_field(event, "call_id"))
+        # v0.1.168 可能只发 done 信号，不能把缺失 arguments 当成空参数。
+        _bridge_set_argument(entry, "done_arguments", _response_field(event, "arguments"))
+        return True
+    if event_type == "response.completed":
+        response = _response_field(event, "response")
+        output = _response_field(response, "output")
+        if not isinstance(output, (list, tuple)):
+            return False
+        if len(output) > BRIDGE_MAX_CALLS:
+            errors.append("call_limit")
+        bounded_output = list(output)[:BRIDGE_MAX_CALLS]
+        for item in bounded_output:
+            _bridge_record_item(ledger, item, "completed", errors)
+        return any(_response_type(item) == "function_call" for item in bounded_output)
+    return False
+
+
+def _bridge_fixed_tool_output(reason: str) -> str:
+    return SearchEvidence(False, reason=reason).as_tool_output()
+
+
+def _bridge_parse_calls(
+    ledger: Dict[str, Dict[str, Any]],
+    errors: list[str],
+) -> tuple[list[Dict[str, Any]], Optional[int]]:
+    calls: list[Dict[str, Any]] = []
+    if errors:
+        # 缺 item id 等无法配对的事件不能被静默修复，直接 fail-closed。
+        return [], None
+    for entry in ledger.values():
+        primary_candidates = [
+            entry.get("item_arguments"),
+            entry.get("completed_arguments"),
+            entry.get("done_arguments"),
+            "".join(entry.get("fragments") or []),
+        ]
+        primary_candidates = [
+            candidate
+            for candidate in primary_candidates
+            if isinstance(candidate, str) and candidate
+        ]
+        if len(set(primary_candidates)) > 1:
+            entry["invalid"] = True
+        raw_arguments = (
+            primary_candidates[0]
+            if primary_candidates
+            else entry.get("added_arguments") or "{}"
+        )
+        try:
+            parsed = json.loads(raw_arguments)
+        except (TypeError, ValueError, RecursionError):
+            parsed = None
+            entry["invalid"] = True
+        if not isinstance(parsed, dict):
+            entry["invalid"] = True
+        name = entry.get("name") or ""
+        call_id = entry.get("call_id") or ""
+        if not call_id:
+            entry["invalid"] = True
+        query = parsed.get("query") if isinstance(parsed, dict) else None
+        supported = name == BRIDGE_TOOL_NAME and isinstance(query, str) and bool(query.strip()) and len(query) <= 512
+        if entry.get("invalid"):
+            status = "invalid_tool_call"
+            input_name = BRIDGE_TOOL_NAME if name == BRIDGE_TOOL_NAME else "unsupported_tool"
+            input_arguments = "{}"
+            supported = False
+        elif not supported:
+            status = "unsupported_tool"
+            input_name = "unsupported_tool"
+            input_arguments = raw_arguments
+        else:
+            status = "pending"
+            input_name = BRIDGE_TOOL_NAME
+            input_arguments = raw_arguments
+        calls.append(
+            {
+                "item_id": entry["item_id"],
+                "call_id": call_id,
+                "name": input_name,
+                "arguments": input_arguments,
+                "query": query if supported else None,
+                "supported": supported,
+                "status": status,
+                "output": _bridge_fixed_tool_output(status),
+            }
+        )
+    if not calls:
+        return [], None
+
+    call_counts: Dict[str, int] = {}
+    for call in calls:
+        call_id = call["call_id"]
+        call_counts[call_id] = call_counts.get(call_id, 0) + 1
+    duplicate_call_ids = {
+        call_id for call_id, count in call_counts.items() if call_id and count > 1
+    }
+    for call in calls:
+        if call["call_id"] in duplicate_call_ids:
+            call["supported"] = False
+            call["status"] = "duplicate_call_id"
+            call["output"] = _bridge_fixed_tool_output("duplicate_call_id")
+
+    selected: Optional[int] = None
+    for index, call in enumerate(calls):
+        if call["supported"] and selected is None:
+            selected = index
+        elif call["supported"]:
+            call["supported"] = False
+            call["status"] = "limit_reached"
+            call["output"] = _bridge_fixed_tool_output("limit_reached")
+    return calls, selected
+
+
+def _bridge_tool_input(call: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "function_call",
+        "id": call["item_id"],
+        "call_id": call["call_id"],
+        "name": call["name"],
+        "arguments": call["arguments"],
+    }
+
+
+def _bridge_tool_output_input(call: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "function_call_output",
+        "call_id": call["call_id"],
+        "output": call["output"],
+    }
+
+
+
+async def _stream_via_claude_bridge(
+    client: Any,
+    model_name: str,
+    config: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    top_p: Optional[float],
+    thinking_level: str,
+    start_time: float,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """Claude function-tool → 专用 Gemini 搜索 → Claude continuation。"""
+    full_instructions, full_input_items = _split_messages_for_responses(
+        messages, config["supports_vision"], supports_store=False
+    )
+
+    def _kwargs(items: List[Dict[str, Any]], with_tool: bool) -> Dict[str, Any]:
+        request: Dict[str, Any] = {
+            "model": model_name,
+            "input": items,
+            "stream": True,
+            "store": False,
+        }
+        if full_instructions:
+            request["instructions"] = full_instructions
+        model_base = model_name.split("/")[-1]
+        if not (config["supports_reasoning"] or any(
+            model_base.startswith(prefix) for prefix in ("gpt-5", "o1", "o3", "o4")
+        )):
+            request["temperature"] = temperature
+        if top_p is not None:
+            request["top_p"] = top_p
+        effort = EFFORT_MAPPING.get(thinking_level)
+        if thinking_level == "low":
+            effort = "low"
+        if config["supports_reasoning"] and effort and effort != "none":
+            request["reasoning"] = {"effort": effort}
+        if with_tool:
+            request["tools"] = [build_search_tool()]
+        return request
+
+    async def _consume(
+        stream: Any,
+        state: Dict[str, Any],
+        allow_tools: bool,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        ledger: Dict[str, Dict[str, Any]] = {}
+        ledger_errors: list[str] = []
+        pending: list[Dict[str, Any]] = []
+        pending_chars = 0
+        thinking_sent = False
+        content_started = False
+
+        def _queue_or_publish(chunk: Dict[str, Any]) -> bool:
+            nonlocal pending_chars
+            if state["identity_confirmed"]:
+                return True
+            chunk_size = sum(len(str(value)) for value in chunk.values())
+            if pending_chars + chunk_size > BRIDGE_MAX_PENDING_CHARS:
+                state["error"] = "prefix_limit"
+                pending.clear()
+                return False
+            pending.append(chunk)
+            pending_chars += chunk_size
+            return True
+
+        async def _flush_pending() -> AsyncGenerator[Dict[str, Any], None]:
+            nonlocal pending_chars
+            if not state["identity_confirmed"]:
+                return
+            for chunk in pending:
+                yield chunk
+            pending.clear()
+            pending_chars = 0
+
+        try:
+            async for event in stream:
+                event_type = _response_type(event)
+                response = _response_field(event, "response")
+                response_model = _response_field(response, "model")
+                if isinstance(response_model, str) and response_model:
+                    if not _bridge_route_matches(model_name, response_model):
+                        state["identity_error"] = True
+                        state["error"] = "non_claude_model"
+                        print(
+                            f"🔀 [Claude桥接] 中转站把 {model_name} 换成了 {response_model}"
+                            "（antigravity 搜索场景已知行为），已拦截，不会冒充 Claude 回复"
+                        )
+                        pending.clear()
+                        break
+                    if state.get("model") and state["model"] != response_model:
+                        state["identity_error"] = True
+                        state["error"] = "model_conflict"
+                        pending.clear()
+                        break
+                    state["model"] = response_model
+                    if event_type == "response.created":
+                        state["identity_confirmed"] = True
+
+                usage = _response_field(response, "usage")
+                if usage is not None:
+                    input_tokens = _response_field(usage, "input_tokens") or 0
+                    output_tokens = _response_field(usage, "output_tokens") or 0
+                    cached_details = _response_field(usage, "input_tokens_details")
+                    cached_tokens = _response_field(cached_details, "cached_tokens") or 0
+                    if isinstance(input_tokens, int):
+                        state["input_tokens"] = input_tokens
+                    if isinstance(output_tokens, int):
+                        state["output_tokens"] = output_tokens
+                    if isinstance(cached_tokens, int):
+                        state["cached_tokens"] = cached_tokens
+
+                if event_type == "response.failed":
+                    state["error"] = "provider"
+                    if thinking_sent and state["identity_confirmed"]:
+                        yield {"thinking_end": True}
+                        thinking_sent = False
+                    break
+
+                has_tool_event = _bridge_record_event(ledger, event, ledger_errors)
+                if has_tool_event and not allow_tools:
+                    state["unexpected_tool"] = True
+                    if thinking_sent and state["identity_confirmed"]:
+                        yield {"thinking_end": True}
+                    break
+
+                if event_type == "response.reasoning_text.delta" or event_type == "response.reasoning_summary_text.delta":
+                    delta = _response_field(event, "delta")
+                    if isinstance(delta, str) and delta and not content_started:
+                        if not thinking_sent:
+                            thinking_sent = True
+                            chunk = {"thinking_start": True}
+                            if _queue_or_publish(chunk) and state["identity_confirmed"]:
+                                yield chunk
+                        chunk = {"thinking": delta}
+                        state["visible_chars"] += len(delta)
+                        if _queue_or_publish(chunk) and state["identity_confirmed"]:
+                            yield chunk
+
+                elif event_type == "response.output_text.delta":
+                    delta = _response_field(event, "delta")
+                    if not isinstance(delta, str):
+                        delta = _response_field(event, "text")
+                    if isinstance(delta, str) and delta:
+                        content_started = True
+                        state["content_chars"] += len(delta)
+                        state["visible_chars"] += len(delta)
+                        chunks: list[Dict[str, Any]] = []
+                        if thinking_sent:
+                            thinking_sent = False
+                            chunks.append({"thinking_end": True})
+                        chunks.append({"content": delta})
+                        for chunk in chunks:
+                            if _queue_or_publish(chunk) and state["identity_confirmed"]:
+                                yield chunk
+
+                if state["identity_confirmed"] and pending:
+                    async for chunk in _flush_pending():
+                        yield chunk
+
+                if event_type == "response.completed":
+                    state["completed"] = True
+
+        except asyncio.CancelledError:
+            if thinking_sent and state["identity_confirmed"]:
+                yield {"thinking_end": True}
+                thinking_sent = False
+            raise
+        except Exception:
+            state["error"] = "stream"
+
+        if state.get("error"):
+            if thinking_sent and state["identity_confirmed"]:
+                yield {"thinking_end": True}
+                thinking_sent = False
+            pending.clear()
+            return
+        if not state.get("identity_confirmed"):
+            state["error"] = "missing_identity"
+            pending.clear()
+            return
+        if not state.get("completed"):
+            state["error"] = "incomplete"
+            pending.clear()
+            return
+        if thinking_sent:
+            yield {"thinking_end": True}
+            thinking_sent = False
+        state["ledger"] = ledger
+        state["ledger_errors"] = ledger_errors
+        state["thinking_open"] = thinking_sent
+
+    first_state: Dict[str, Any] = {
+        "identity_confirmed": False,
+        "identity_error": False,
+        "model": "",
+        "completed": False,
+        "error": None,
+        "content_chars": 0,
+        "visible_chars": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "unexpected_tool": False,
+    }
+    try:
+        first_stream = await _retry_create(
+            lambda: client.responses.create(**_kwargs(full_input_items, with_tool=True))
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        yield {"error": BRIDGE_SAFE_ERROR}
+        return
+
+    async for chunk in _consume(first_stream, first_state, allow_tools=True):
+        yield chunk
+    if first_state.get("error") or first_state.get("identity_error"):
+        swap_error = first_state.get("error") == "non_claude_model"
+        yield {"error": BRIDGE_MODEL_SWAP_ERROR if swap_error else BRIDGE_SAFE_ERROR}
+        return
+
+    if first_state.get("ledger_errors"):
+        yield {"error": BRIDGE_SAFE_ERROR}
+        return
+
+    calls, selected_index = _bridge_parse_calls(
+        first_state.get("ledger", {}), first_state.get("ledger_errors", [])
+    )
+    if any(call["status"] == "duplicate_call_id" for call in calls):
+        yield {"error": BRIDGE_SAFE_ERROR}
+        return
+    if not calls:
+        if first_state["visible_chars"] <= 0:
+            yield {"error": BRIDGE_SAFE_ERROR}
+            return
+        latency_ms = int((time.time() - start_time) * 1000)
+        yield {
+            "usage": {
+                "model": safe_model_name(first_state["model"]),
+                "input_tokens": first_state["input_tokens"],
+                "output_tokens": first_state["output_tokens"],
+                "cached_tokens": first_state["cached_tokens"],
+                "latency_ms": latency_ms,
+            }
+        }
+        return
+
+    if selected_index is not None:
+        selected_call = calls[selected_index]
+        try:
+            evidence = await search_current_web(selected_call["query"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            evidence = SearchEvidence(False, reason="provider")
+        if isinstance(evidence, SearchEvidence) and evidence.success and evidence.summary and evidence.sources:
+            selected_call["output"] = evidence.as_tool_output()
+            yield {"search": {"executed": True}}
+        else:
+            selected_call["output"] = (
+                evidence.as_tool_output()
+                if isinstance(evidence, SearchEvidence)
+                else _bridge_fixed_tool_output("provider")
+            )
+
+    continuation_items = list(full_input_items)
+    for call in calls:
+        if not call["call_id"]:
+            yield {"error": BRIDGE_SAFE_ERROR}
+            return
+        continuation_items.append(_bridge_tool_input(call))
+        continuation_items.append(_bridge_tool_output_input(call))
+
+    second_state: Dict[str, Any] = {
+        "identity_confirmed": False,
+        "identity_error": False,
+        "model": "",
+        "completed": False,
+        "error": None,
+        "content_chars": 0,
+        "visible_chars": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "unexpected_tool": False,
+    }
+    try:
+        second_stream = await _retry_create(
+            lambda: client.responses.create(**_kwargs(continuation_items, with_tool=False))
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        yield {"error": BRIDGE_SAFE_ERROR}
+        return
+
+    async for chunk in _consume(second_stream, second_state, allow_tools=False):
+        yield chunk
+    if second_state.get("error") or second_state.get("identity_error") or second_state.get("unexpected_tool"):
+        swap_error = second_state.get("error") == "non_claude_model"
+        yield {"error": BRIDGE_MODEL_SWAP_ERROR if swap_error else BRIDGE_SAFE_ERROR}
+        return
+    if second_state["visible_chars"] <= 0:
+        yield {"error": BRIDGE_SAFE_ERROR}
+        return
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    yield {
+        "usage": {
+            "model": safe_model_name(second_state["model"]),
+            "input_tokens": first_state["input_tokens"] + second_state["input_tokens"],
+            "output_tokens": first_state["output_tokens"] + second_state["output_tokens"],
+            "cached_tokens": first_state["cached_tokens"] + second_state["cached_tokens"],
+            "latency_ms": latency_ms,
+        }
+    }
+
+
+
 def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     for msg in reversed(messages):
         if msg.get("role") != "user":
@@ -259,6 +858,41 @@ def _inject_search_summary_message(
         ),
     }
     return [search_message, *messages]
+
+
+def _inject_claude_search_unavailable_notice(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """搜索桥接关闭时用：让 Claude 自己向用户说明为什么这轮没有联网。
+
+    content 用 list-of-blocks（而非纯字符串）：_split_messages_for_responses 对
+    Claude（_supports_store=False）会把 list-content 的 system 消息转成 input[0]
+    的 role=system 条目——这条路径已经在生产验证过能把 Soul/persona 正确送到
+    Claude；纯字符串 content 走的是 instructions 字段，在 Claude 这条 Responses
+    路径上是否被 s2a 转译层转发未经验证，不能拿这条没验证过的路径来发安全提示。
+    """
+    notice = {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "## 联网搜索当前不可用\n"
+                    "这轮对话可能需要联网查询最新信息，但你现在没有可用的搜索工具——"
+                    "中转站的已知行为是，一旦触发联网搜索就会把你静默换成非 Claude 模型再作答，"
+                    "这会导致你在用户不知情的情况下冒充自己完成了搜索。\n"
+                    "如果用户的问题依赖你没有的最新信息，请用自己的话简要说明现在无法联网查询"
+                    "（原因是搜索会把你换成别的模型），然后基于已有知识谨慎作答，"
+                    "并明确指出这部分内容可能不是最新的；不要假装自己刚刚联网查询过。"
+                ),
+            }
+        ],
+    }
+    # 放在 messages 末尾（而非最前）：_split_messages_for_responses 按遇到顺序把
+    # 所有 list-content system 消息的 block 依次塞进同一个 system_blocks，这条
+    # per-turn 可变提示排在 Stage B 稳定/半稳定段前面会让那段本该稳定的 cache
+    # 前缀每轮跟着变——系统消息本身会被整体提到 input 最前，不受这里位置影响。
+    return [*messages, notice]
 
 
 def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -403,6 +1037,7 @@ async def call_openai_stream(
     target_model: str,
     thinking_level: str = "low",
     enable_search: bool = False,
+    search_requested: Optional[bool] = None,
     temperature: float = 0.7,
     top_p: Optional[float] = None,
     conversation_id: str = "",
@@ -413,9 +1048,15 @@ async def call_openai_stream(
       - anthropic/* | openai/* | gpt-* | o1/o3/o4 → Responses API
         （绕开 sub2api Chat Completions 在多轮对话下的 "Invalid Responses API request" bug）
 
+    search_requested: 路由/用户是否真的要求了搜索，区别于 enable_search——全自主模式下
+    enable_search 会被 resolve_enable_search 强制为 True（fast/pro 无条件挂搜索工具，
+    模型自决），不代表真实需求。None 时退化为 enable_search，兼容旧调用方。
+
     Yields:
         {"content": "...", "thinking": "...", "usage": {...}, "error": "..."}
     """
+    if search_requested is None:
+        search_requested = enable_search
     route_key = get_route_key(target_model)
     config = get_litellm_model_config(route_key)
     model_name = config["model"]
@@ -444,6 +1085,66 @@ async def call_openai_stream(
 
     try:
         client = _build_client()
+
+        # Claude 使用应用层 function bridge；即使配置缺失，也不回退到旧摘要
+        # google_search()，避免在用户未授权的共享 Google key 上旁路搜索。
+        if is_claude and enable_search:
+            bridge_enabled = bool(
+                bridge_ready()
+                and thinking_level.lower() in ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS
+            )
+            yield {
+                "search": {
+                    "requested": search_requested,
+                    "native_enabled": False,
+                    "bridge_enabled": bridge_enabled,
+                    "fallback_injected": False,
+                    "reason": "claude_tool_bridge" if bridge_enabled else "bridge_disabled",
+                }
+            }
+            if bridge_enabled:
+                try:
+                    async for evt in _stream_via_claude_bridge(
+                        client,
+                        model_name,
+                        config,
+                        messages,
+                        temperature,
+                        top_p,
+                        thinking_level,
+                        start_time,
+                    ):
+                        yield evt
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    yield {"error": BRIDGE_SAFE_ERROR}
+            else:
+                # 桥接关闭时不静默无视用户真实提出的联网请求：注入 system 提示，让
+                # Claude 自己说明"搜索工具会把我换成别的模型，所以现在用不了"。
+                # 但全自主模式会对几乎每条 fast/pro 消息都把 enable_search 强制为
+                # True（模型自决是否搜索）——只有 search_requested 才代表路由/用户
+                # 真的判定这轮需要联网，不能对每条无关消息都提一嘴"我不能联网"。
+                request_messages = (
+                    _inject_claude_search_unavailable_notice(messages)
+                    if search_requested
+                    else messages
+                )
+                async for evt in _stream_via_responses(
+                    client,
+                    model_name,
+                    config,
+                    request_messages,
+                    temperature,
+                    top_p,
+                    thinking_level,
+                    start_time,
+                    conversation_id=conversation_id,
+                    enable_search=False,
+                ):
+                    yield evt
+            return
+
         native_search = enable_search and (not is_gemini_upstream) and bool(config.get("supports_search"))
         fallback_summary = None
         request_messages = messages
@@ -479,8 +1180,13 @@ async def call_openai_stream(
                 enable_search=enable_search,
             ):
                 yield evt
-
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
+        if is_claude and enable_search:
+            # 搜索桥接路径不把网关异常、响应体或 traceback 暴露给用户。
+            yield {"error": BRIDGE_SAFE_ERROR}
+            return
         error_msg = str(e)
         print(f"❌ [OpenAI/{api_kind}] 调用失败: {error_msg}")
         traceback.print_exc()

@@ -1003,7 +1003,7 @@ async def test_responses_grounding_prefix_across_deltas_emits_executed_once(
 ):
     """Antigravity Grounding URL 跨 delta 时也必须且只能上报一次真实搜索。"""
     mock_get_config.return_value = _model_config(
-        "anthropic/claude-opus-4-6-thinking", supports_search=True
+        "gpt-5.5", supports_search=True
     )
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
@@ -1708,3 +1708,544 @@ async def test_responses_retries_full_history_when_prev_id_invalid(
     assert any(c.get("content") == "retry succeeded" for c in chunks)
     # 重试后存了新的 id
     mock_set_rid.assert_called_with("conv-stale", "resp_retry_ok")
+
+# ------------- Claude function bridge 回归测试 -------------
+
+def _bridge_created(model, input_tokens=2):
+    return _response_event(
+        "response.created",
+        response={"model": model, "usage": {"input_tokens": input_tokens, "output_tokens": 0}},
+    )
+
+
+def _bridge_completed(model, output=None, input_tokens=2, output_tokens=3):
+    return _response_event(
+        "response.completed",
+        response={
+            "model": model,
+            "output": output or [],
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        },
+    )
+
+
+def _bridge_call_events(
+    model="anthropic/claude-sonnet-4-6",
+    query="最新新闻",
+    content_before_call=None,
+):
+    item = {
+        "type": "function_call",
+        "id": "item_search_1",
+        "call_id": "call_search_1",
+        "name": "search_current_web",
+    }
+    events = [_bridge_created(model)]
+    if content_before_call:
+        events.append(_response_event("response.output_text.delta", delta=content_before_call))
+    events.extend([
+        _response_event("response.output_item.added", item=item),
+        _response_event(
+            "response.function_call_arguments.delta",
+            item_id="item_search_1",
+            call_id="call_search_1",
+            delta='{"query":"' + query + '"}',
+        ),
+        # v0.1.168 的 done 事件可能没有 arguments，不能依赖该字段。
+        _response_event(
+            "response.function_call_arguments.done",
+            item_id="item_search_1",
+            call_id="call_search_1",
+        ),
+    ])
+    completed_item = {**item, "arguments": '{"query":"' + query + '"}'}
+    events.append(_bridge_completed(model, output=[completed_item]))
+    return events
+
+
+@pytest.mark.asyncio
+async def test_claude_bridge_searches_once_and_continues_without_tools(monkeypatch):
+    import app.openai_client as oc
+    from app.antigravity_search import SearchEvidence
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    google_search_sentinel = AsyncMock(side_effect=AssertionError("旧 google_search 不应被调用"))
+    monkeypatch.setattr(oc, "google_search", google_search_sentinel)
+    search_mock = AsyncMock(
+        return_value=SearchEvidence(
+            True,
+            summary="新闻事实",
+            sources=("https://example.com/news",),
+            source_titles=("来源",),
+            reason="grounding",
+        )
+    )
+    monkeypatch.setattr(oc, "search_current_web", search_mock)
+
+    first = _make_async_stream(_bridge_call_events(content_before_call="Claude 前缀"))
+    second = _make_async_stream([
+        _bridge_created(model, input_tokens=4),
+        _response_event("response.output_text.delta", delta="Claude 最终回答"),
+        _bridge_completed(model, input_tokens=4, output_tokens=5),
+    ])
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[first, second])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert client.responses.create.await_count == 2
+    first_kwargs = client.responses.create.await_args_list[0].kwargs
+    second_kwargs = client.responses.create.await_args_list[1].kwargs
+    assert first_kwargs["tools"][0]["name"] == "search_current_web"
+    assert "web_search" not in str(first_kwargs["tools"])
+    assert "google_search" not in str(first_kwargs["tools"])
+    assert "tools" not in second_kwargs
+    assert any(item.get("type") == "function_call" for item in second_kwargs["input"])
+    assert any(item.get("type") == "function_call_output" for item in second_kwargs["input"])
+    assert search_mock.await_count == 1
+    google_search_sentinel.assert_not_awaited()
+    assert any(chunk.get("content") == "Claude 前缀" for chunk in chunks)
+    assert any(chunk.get("content") == "Claude 最终回答" for chunk in chunks)
+    assert sum(1 for chunk in chunks if chunk.get("search", {}).get("executed")) == 1
+    usages = [chunk["usage"] for chunk in chunks if "usage" in chunk]
+    assert usages == [{
+        "model": model,
+        "input_tokens": 6,
+        "output_tokens": 8,
+        "cached_tokens": 0,
+        "latency_ms": usages[0]["latency_ms"] if usages else None,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_claude_bridge_no_tool_is_one_request_and_keeps_usage(monkeypatch):
+    import app.openai_client as oc
+
+    model = "claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _bridge_created(model),
+        _response_event("response.output_text.delta", delta="普通回答"),
+        _bridge_completed(model, input_tokens=2, output_tokens=3),
+    ]))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "你好"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    client.responses.create.assert_awaited_once()
+    assert any(chunk.get("content") == "普通回答" for chunk in chunks)
+    assert not any(chunk.get("search", {}).get("executed") for chunk in chunks)
+    assert len([chunk for chunk in chunks if "usage" in chunk]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_model", ["gemini-2.5-flash", "openai/gpt-5.5"])
+async def test_claude_bridge_identity_gate_suppresses_non_claude_output(monkeypatch, bad_model):
+    import app.openai_client as oc
+
+    expected = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(expected, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _bridge_created(bad_model),
+        _response_event("response.output_text.delta", delta="不应可见"),
+        _bridge_completed(bad_model, input_tokens=2, output_tokens=3),
+    ]))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert not any("content" in chunk for chunk in chunks)
+    assert not any("thinking" in chunk for chunk in chunks)
+    assert not any("usage" in chunk for chunk in chunks)
+    assert any(chunk.get("error") == oc.BRIDGE_MODEL_SWAP_ERROR for chunk in chunks)
+    client.responses.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_claude_bridge_missing_identity_fails_closed(monkeypatch):
+    import app.openai_client as oc
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _response_event("response.output_text.delta", delta="没有身份不能发布"),
+        _response_event("response.completed", response={"output": []}),
+    ]))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert not any("content" in chunk or "usage" in chunk for chunk in chunks)
+    assert any(chunk.get("error") == oc.BRIDGE_SAFE_ERROR for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_claude_bridge_continuation_tool_call_is_terminal(monkeypatch):
+    import app.openai_client as oc
+    from app.antigravity_search import SearchEvidence
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    monkeypatch.setattr(oc, "search_current_web", AsyncMock(return_value=SearchEvidence(
+        True, summary="事实", sources=("https://example.com",), source_titles=("来源",)
+    )))
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[
+        _make_async_stream(_bridge_call_events()),
+        _make_async_stream([
+            _bridge_created(model),
+            _response_event(
+                "response.output_item.added",
+                item={
+                    "type": "function_call",
+                    "id": "item_second",
+                    "call_id": "call_second",
+                    "name": "search_current_web",
+                    "arguments": '{"query":"再次搜索"}',
+                },
+            ),
+            _bridge_completed(model),
+        ]),
+    ])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert any(chunk.get("error") == oc.BRIDGE_SAFE_ERROR for chunk in chunks)
+    assert not any("usage" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_claude_bridge_search_cancellation_does_not_continue(monkeypatch):
+    import app.openai_client as oc
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    monkeypatch.setattr(oc, "search_current_web", AsyncMock(side_effect=asyncio.CancelledError()))
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream(_bridge_call_events()))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        ):
+            pass
+    assert client.responses.create.await_count == 1
+
+def test_bridge_safe_id_removes_control_characters():
+    import app.openai_client as oc
+
+    assert oc._bridge_safe_id("call\n\t\x00-1") == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_bridge_unpaired_function_event_fails_closed(monkeypatch):
+    import app.openai_client as oc
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(oc, "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"}))
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _bridge_created(model),
+        _response_event(
+            "response.function_call_arguments.delta",
+            call_id="call_without_item",
+            delta='{"query":"新闻"}',
+        ),
+        _response_event("response.output_text.delta", delta="不应以成功终态发布"),
+        _bridge_completed(model),
+    ]))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert not any("usage" in chunk for chunk in chunks)
+    assert any(chunk.get("error") == oc.BRIDGE_SAFE_ERROR for chunk in chunks)
+@pytest.mark.asyncio
+async def test_claude_bridge_model_conflict_closes_thinking_and_hides_usage(monkeypatch):
+    import app.openai_client as oc
+
+    expected = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(
+        oc,
+        "get_litellm_model_config",
+        lambda _: _model_config(expected, supports_reasoning=True),
+    )
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(
+        oc,
+        "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"})
+    )
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _bridge_created(expected),
+        _response_event(
+            "response.reasoning_summary_text.delta",
+            delta="不应在冲突后继续发布",
+        ),
+        _response_event("response.output_text.delta", delta="前缀"),
+        _response_event(
+            "response.output_text.delta",
+            delta="",
+            response={"model": "gemini-2.5-flash"},
+        ),
+        _bridge_completed("gemini-2.5-flash", input_tokens=2, output_tokens=3),
+    ]))
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    assert any(chunk.get("error") == oc.BRIDGE_MODEL_SWAP_ERROR for chunk in chunks)
+    assert not any("usage" in chunk for chunk in chunks)
+    assert sum(1 for chunk in chunks if chunk.get("thinking_end")) <= 1
+@pytest.mark.asyncio
+async def test_claude_bridge_duplicate_call_id_is_not_executed(monkeypatch):
+    import app.openai_client as oc
+    from app.antigravity_search import SearchEvidence
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(
+        oc,
+        "get_litellm_model_config",
+        lambda _: _model_config(model, supports_reasoning=True),
+    )
+    monkeypatch.setattr(oc, "bridge_ready", lambda: True)
+    monkeypatch.setattr(
+        oc,
+        "ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS", frozenset({"low"})
+    )
+    search_mock = AsyncMock(
+        return_value=SearchEvidence(
+            True,
+            summary="事实",
+            sources=("https://example.com",),
+            source_titles=("来源",),
+        )
+    )
+    monkeypatch.setattr(oc, "search_current_web", search_mock)
+
+    duplicate_one = {
+        "type": "function_call",
+        "id": "item_one",
+        "call_id": "same_call",
+        "name": "search_current_web",
+        "arguments": '{"query":"一"}',
+    }
+    duplicate_two = {
+        "type": "function_call",
+        "id": "item_two",
+        "call_id": "same_call",
+        "name": "search_current_web",
+        "arguments": '{"query":"二"}',
+    }
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[
+        _make_async_stream([
+            _bridge_created(model),
+            _bridge_completed(model, output=[duplicate_one, duplicate_two]),
+        ]),
+        _make_async_stream([
+            _bridge_created(model),
+            _response_event("response.output_text.delta", delta="安全回答"),
+            _bridge_completed(model, output=[]),
+        ]),
+    ])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "查新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+        )
+    ]
+
+    search_mock.assert_not_awaited()
+    assert client.responses.create.await_count == 1
+    assert any(chunk.get("error") == oc.BRIDGE_SAFE_ERROR for chunk in chunks)
+    assert not any(chunk.get("content") == "安全回答" for chunk in chunks)
+
+
+def _bridge_disabled_client(model):
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=_make_async_stream([
+        _bridge_created(model),
+        _response_event("response.output_text.delta", delta="我现在没法联网搜索"),
+        _bridge_completed(model),
+    ]))
+    return client
+
+
+@pytest.mark.asyncio
+async def test_claude_search_disabled_injects_explanation_notice_when_requested(monkeypatch):
+    """CLAUDE_SEARCH_BRIDGE_ENABLED 关闭（生产默认）+ 路由/用户真的要求了搜索
+    （search_requested=True）时，Claude 不再拿到任何搜索工具，而是应该收到一条
+    system 提示，让它自己向用户说明联网搜索为什么用不了。"""
+    import app.openai_client as oc
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: False)
+    client = _bridge_disabled_client(model)
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    stage_b_system = {
+        "role": "system",
+        "content": [{"type": "text", "text": "Stage B 稳定段", "cache_control": {"type": "ephemeral"}}],
+    }
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [stage_b_system, {"role": "user", "content": "帮我查一下今天的新闻"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+            search_requested=True,
+        )
+    ]
+
+    # 没有任何工具挂上去——不会再触发 antigravity 的模型置换
+    kwargs = client.responses.create.call_args.kwargs
+    assert "tools" not in kwargs
+    # 提示走 input[0] 的 role=system 消息（Claude/_supports_store=False 的既有路径，
+    # Soul/persona 已验证能送达），不是未经验证的 instructions 字符串字段
+    system_item = kwargs["input"][0]
+    assert system_item["role"] == "system"
+    blocks = [blk for blk in system_item["content"] if isinstance(blk, dict)]
+    # 提示必须排在 Stage B 稳定段之后，不能顶到最前面破坏 cache 前缀稳定性
+    assert blocks[0]["text"] == "Stage B 稳定段"
+    assert "换成" in blocks[-1].get("text", "")
+    notice_text = "".join(blk.get("text", "") for blk in blocks)
+    assert "换成" in notice_text
+    assert any(chunk.get("content") == "我现在没法联网搜索" for chunk in chunks)
+    assert any(
+        chunk.get("search") == {
+            "requested": True,
+            "native_enabled": False,
+            "bridge_enabled": False,
+            "fallback_injected": False,
+            "reason": "bridge_disabled",
+        }
+        for chunk in chunks
+    )
+
+
+@pytest.mark.asyncio
+async def test_claude_search_autonomous_mount_stays_silent_when_not_requested(monkeypatch):
+    """全自主模式会把 enable_search 强制为 True（fast/pro 无条件挂搜索工具，模型
+    自决），但路由/用户并没有真的要求搜索（search_requested=False）时，不该往每条
+    无关消息里都注入"我不能联网"的说明——否则每条闲聊都会被 Claude 提一嘴搜索。"""
+    import app.openai_client as oc
+
+    model = "anthropic/claude-sonnet-4-6"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    monkeypatch.setattr(oc, "bridge_ready", lambda: False)
+    client = _bridge_disabled_client(model)
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    chunks = [
+        chunk
+        async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "你好"}],
+            target_model="fast",
+            thinking_level="low",
+            enable_search=True,
+            search_requested=False,
+        )
+    ]
+
+    kwargs = client.responses.create.call_args.kwargs
+    assert "tools" not in kwargs
+    # 没有 search_requested，原始消息应该原样透传，不插入任何 system 提示
+    assert kwargs["input"] == [{"role": "user", "content": "你好"}]
+    assert any(
+        chunk.get("search") == {
+            "requested": False,
+            "native_enabled": False,
+            "bridge_enabled": False,
+            "fallback_injected": False,
+            "reason": "bridge_disabled",
+        }
+        for chunk in chunks
+    )

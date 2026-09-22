@@ -19,7 +19,7 @@ def _make_async_stream(events):
 
 def _model_config():
     return {
-        "model": "claude-opus-4-6-thinking",
+        "model": "gpt-5.5",
         "region": "global",
         "supports_reasoning": True,
         "supports_search": True,

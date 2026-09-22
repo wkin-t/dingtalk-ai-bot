@@ -29,7 +29,9 @@ def test_openai_container_uses_openai_backend():
 
 def test_anthropic_container_uses_relay_responses_path():
     """anthropic 容器（2026-08-25 前叫 openrouter）走中转站 Responses（AI_BACKEND=openai）
-    而非 OpenRouter 官方 SDK。BOT_ID 仍须独立防撞键。
+    而非 OpenRouter 官方 SDK。
+    Claude 的联网由应用层 search_current_web function bridge 委托给专用 Gemini 搜索；
+    GPT 路径才保留原生 web_search。BOT_ID 仍须独立防撞键。
     """
     text = _compose_text("docker-compose.anthropic.yml")
     assert "container_name: dingtalk-ai-bot-anthropic" in text
