@@ -18,6 +18,9 @@ def resolve_enable_search(backend: str, target_model: str, requested: bool) -> b
     - openclaw：不支持搜索工具
     - openai 后端的 gemini 上游或 supports_search=False 的模型：强制开会落入
       fallback 注入路径——每条消息真实执行一次 google 搜索，烧 Gemini 配额
+    - openai 后端的 Claude 模型在 CLAUDE_SEARCH_BRIDGE_ENABLED=false 时：桥接
+      关闭后没有工具可挂，强制开只会让 openai_client 白跑一趟判断逻辑，
+      对外毫无意义
     """
     if requested:
         return True
@@ -37,6 +40,11 @@ def resolve_enable_search(backend: str, target_model: str, requested: bool) -> b
     config = cfg.get_litellm_model_config(route_key)
     model_name = str(config.get("model") or "")
     if "gemini" in model_name.lower():
+        return False
+    # 这里只是判断"要不要跳过挂载"，宽松子串匹配在这个方向上天然 fail-safe，
+    # 不需要为此把 app.openai_client（连带 openai/httpx/google.genai）拉进这个
+    # 每条消息都会调用的纯判断函数
+    if "claude" in model_name.lower() and not cfg.CLAUDE_SEARCH_BRIDGE_ENABLED:
         return False
     return bool(config.get("supports_search"))
 

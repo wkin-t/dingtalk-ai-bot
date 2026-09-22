@@ -100,6 +100,26 @@ class TestOpenaiBackend:
         )
         assert resolve_enable_search("openai", "lite", False) is False
 
+    def test_claude_exempt_while_bridge_disabled(self, monkeypatch):
+        # CLAUDE_SEARCH_BRIDGE_ENABLED=false（当前生产默认）时没有工具可挂，
+        # 强制开只会让 openai_client 白跑一趟——必须豁免，否则每条 fast/pro
+        # 消息都会打一条没有意义的"挂载原生搜索工具"日志
+        monkeypatch.setattr(cfg, "CLAUDE_SEARCH_BRIDGE_ENABLED", False)
+        monkeypatch.setitem(
+            cfg.LITELLM_MODEL_CONFIG, "fast",
+            {**cfg.LITELLM_MODEL_CONFIG["fast"], "model": "claude-opus-4-6-thinking", "supports_search": True},
+        )
+        assert resolve_enable_search("openai", "fast", False) is False
+
+    def test_claude_still_forced_on_once_bridge_enabled(self, monkeypatch):
+        # 桥接重新打开后，Claude 应该恢复"模型自决"的全自主挂载行为
+        monkeypatch.setattr(cfg, "CLAUDE_SEARCH_BRIDGE_ENABLED", True)
+        monkeypatch.setitem(
+            cfg.LITELLM_MODEL_CONFIG, "fast",
+            {**cfg.LITELLM_MODEL_CONFIG["fast"], "model": "claude-opus-4-6-thinking", "supports_search": True},
+        )
+        assert resolve_enable_search("openai", "fast", False) is True
+
 
 class TestOpenrouterBackend:
     def test_supports_search_forced_on(self, monkeypatch):
