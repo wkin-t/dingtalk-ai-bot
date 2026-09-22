@@ -199,6 +199,10 @@ python main.py                     # 默认端口 35000
 | `REDIS_*` / `MYSQL_*` | 否 | 不配置时降级到本地文件存储 |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_BUCKET` / `COS_REGION` | 生图 | 腾讯云 COS 图片存储 |
 | `SOUL_ADMIN_IDS` | 否 | 允许修改 Soul 的用户 ID（逗号分隔，留空表示所有人） |
+| `CLAUDE_SEARCH_BRIDGE_ENABLED` | 否 | Claude 搜索桥接总开关，默认 `false`（见上文"Claude 搜索暂时禁用"）。重新打开前需要下面 4 个变量都配齐，否则 `bridge_ready()` 仍为 false |
+| `ANTIGRAVITY_GEMINI_API_BASE` / `ANTIGRAVITY_GEMINI_API_KEY` | 桥接重新启用时 | 独立于 `GEMINI_API_KEY` 的专用凭据，避免共享 Google key 被旁路搜索。`API_BASE` 需为 sub2api 的 `/v1beta` 地址，不能指向 `generativelanguage.googleapis.com` |
+| `ANTIGRAVITY_GEMINI_SEARCH_MODEL` | 桥接重新启用时 | 桥接实际调用的 Gemini 模型名 |
+| `ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS` | 否 | 只在这些 thinking level 下允许桥接生效，默认仅 `low`（逗号分隔） |
 
 **各后端模型默认值**（`app/config.py::_BACKEND_MODEL_DEFAULTS`，生产环境均通过环境变量显式覆盖）：
 
