@@ -4,8 +4,11 @@
 !.env.example
 !.env.*.example
 
-# Claude Code / Continue 配置（.claude 含 SSH 别名、服务器路径等部署信息，整体不入库）
-.claude/
+# Claude Code / Continue 配置
+# .claude 下的本机状态（settings.local.json、worktrees/ 等）不入库；项目级 skills 放行。
+# 注意：skills/deploy*.md 含 SSH 别名与服务器路径，放行后提交前需人工确认。
+.claude/*
+!.claude/skills/
 .continue/
 
 # Demo 目录 (参考代码)
