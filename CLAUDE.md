@@ -168,4 +168,4 @@ Issues 与 PRD 存放于本仓库的 GitHub Issues（通过 `gh` CLI 操作）�
 
 ### Domain docs
 
-单上下文布局——根目录一个 `CONTEXT.md` + `docs/adr/`。详见 `docs/agents/domain.md`。
+单上下文布局——根目录一个 `GLOSSARY.md` + `docs/adr/`。详见 `docs/agents/domain.md`。
