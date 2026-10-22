@@ -350,6 +350,35 @@ class TestAnalyzeComplexity:
 class TestCallGeminiStream:
     """call_gemini_stream 流式生成测试"""
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-3-flash-preview"])
+    @pytest.mark.parametrize(
+        "enabled,level,expected_level,include_thoughts",
+        [(True, "low", "low", True), (True, "medium", "medium", True),
+         (True, "high", "high", True), (True, "minimal", "low", False),
+         (False, "high", "low", False)],
+    )
+    async def test_thinking_config_reaches_sdk(
+        self, model, enabled, level, expected_level, include_thoughts
+    ):
+        from app import gemini_client
+
+        with patch.object(gemini_client, "ENABLE_THINKING", enabled), \
+             patch.object(gemini_client, "client") as mock_client:
+            generate = AsyncMock(return_value=_async_iter([self._make_chunk("答案")]))
+            mock_client.aio.models.generate_content_stream = generate
+            results = [item async for item in gemini_client.call_gemini_stream(
+                messages=[{"role": "user", "content": "你好"}],
+                target_model=model, thinking_level=level,
+            )]
+
+        assert any("content" in item for item in results)
+        generate.assert_awaited_once()
+        thinking = generate.call_args.kwargs["config"].thinking_config
+        assert thinking is not None
+        assert thinking.thinking_level.lower() == expected_level
+        assert thinking.include_thoughts is include_thoughts
+
     def _make_chunk(self, text, is_thought=False, usage=None, finish_reason=None):
         """构造模拟的 Gemini chunk"""
         part = MagicMock()

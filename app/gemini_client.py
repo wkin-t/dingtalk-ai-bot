@@ -545,9 +545,9 @@ async def call_gemini_stream(
         config = types.GenerateContentConfig(**config_kwargs)
         print(f"🌡️ [Gemini] 实际下发 temperature={clamped_temp}, top_p={config_kwargs.get('top_p', 'default(unset)')}")
 
-        # Gemini 3 系列支持 thinking，配置 thinking level
+        # Gemini 3/4 使用 thinking_level；保留旧 thinking 别名的兼容性。
         # thinking_level: minimal (最快) | low | medium | high (最深度)
-        if 'gemini-3' in target_model.lower() or 'thinking' in target_model.lower():
+        if any(name in target_model.lower() for name in ('gemini-3', 'gemini-4', 'thinking')):
             if ENABLE_THINKING and thinking_level != "minimal":
                 config.thinking_config = types.ThinkingConfig(
                     thinking_level=thinking_level,
