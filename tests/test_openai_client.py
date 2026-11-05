@@ -6,9 +6,11 @@ openai_client 单测——覆盖以下回归点：
 3. content_chars 兜底：sub2api Gemini 无 usage 字段时不误判"无返回"
 """
 import asyncio
+import json
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.openai_client import (
@@ -60,6 +62,37 @@ def test_build_client_uses_base_url_for_openai_compatible_gateway(monkeypatch):
     with patch("app.openai_client.AsyncOpenAI") as mock_client:
         _build_client()
     assert mock_client.call_args.kwargs["base_url"] == "http://127.0.0.1:38090/v1"
+
+
+def test_build_client_gateway_bypasses_explicit_and_environment_proxies(monkeypatch):
+    monkeypatch.setattr("app.openai_client.OPENAI_API_BASE", "http://relay.example:38090/v1")
+    monkeypatch.setattr("app.openai_client.OPENAI_API_KEY_CUSTOM", "sk-test")
+    monkeypatch.setattr("app.openai_client.HTTPX_PROXY", "socks5://127.0.0.1:1080")
+    with patch("app.openai_client.httpx.AsyncClient") as transport, patch("app.openai_client.AsyncOpenAI") as client:
+        _build_client()
+    transport.assert_called_once_with(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0))
+    assert client.call_args.kwargs["http_client"] is transport.return_value
+
+
+def test_build_client_gateway_timeout_values_are_numeric(monkeypatch):
+    monkeypatch.setattr("app.openai_client.OPENAI_API_BASE", "http://relay.example:38090/v1")
+    monkeypatch.setattr("app.openai_client.OPENAI_API_KEY_CUSTOM", "sk-test")
+    monkeypatch.setattr("app.openai_client.openai.DEFAULT_TIMEOUT", object())
+    client = _build_client()
+    timeout = client._client.timeout
+    assert timeout.connect == 5.0
+    assert timeout.read == 600.0
+    assert timeout.write == 600.0
+    assert timeout.pool == 600.0
+
+
+def test_build_client_native_openai_retains_proxy(monkeypatch):
+    monkeypatch.setattr("app.openai_client.OPENAI_API_BASE", "")
+    monkeypatch.setattr("app.openai_client.OPENAI_API_KEY_CUSTOM", "sk-test")
+    monkeypatch.setattr("app.openai_client.HTTPX_PROXY", "socks5://127.0.0.1:1080")
+    with patch("app.openai_client.httpx.AsyncClient") as transport, patch("app.openai_client.AsyncOpenAI"):
+        _build_client()
+    transport.assert_called_once_with(proxy="socks5://127.0.0.1:1080")
 
 def test_split_extracts_system_string_to_instructions():
     """system 角色的 string content 应被合并到 instructions"""
@@ -271,6 +304,43 @@ def _model_config(name, supports_reasoning=False, supports_vision=True, supports
         "supports_vision": supports_vision,
         "reasoning_param": "openai_effort",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-6.1-terra", "claude-sonnet-4-6"])
+async def test_responses_real_sdk_serializes_and_parses_sse(monkeypatch, model):
+    import openai
+    import app.openai_client as oc
+
+    requests = []
+
+    async def handle(request):
+        requests.append(json.loads(request.content))
+        response = {"id": "resp_test", "object": "response", "created_at": 1,
+                    "status": "completed", "model": model, "output": []}
+        events = [
+            {"type": "response.created", "response": response},
+            {"type": "response.output_text.delta", "delta": "OK", "item_id": "msg_test",
+             "output_index": 0, "content_index": 0},
+            {"type": "response.completed", "response": response},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False)
+    client = openai.AsyncOpenAI(api_key="test", base_url="http://127.0.0.1:12345/v1", http_client=transport)
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model))
+    try:
+        chunks = [chunk async for chunk in oc.call_openai_stream(
+            [{"role": "user", "content": "hello"}], target_model=model,
+        )]
+    finally:
+        await client.close()
+    assert not any(chunk.get("error") for chunk in chunks)
+    assert "".join(chunk.get("content", "") for chunk in chunks) == "OK"
+    assert requests[0]["model"] == model
+    assert requests[0]["stream"] is True
 
 
 @pytest.mark.asyncio

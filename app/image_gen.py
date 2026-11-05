@@ -47,7 +47,9 @@ def _get_openai_client():
 
         proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
         kwargs = {"timeout": 300.0}
-        if proxy_url:
+        if OPENAI_API_BASE:
+            kwargs["http_client"] = httpx.Client(trust_env=False, timeout=300.0)
+        elif proxy_url:
             kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=300.0)
         if OPENAI_API_BASE:
             kwargs["base_url"] = OPENAI_API_BASE

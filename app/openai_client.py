@@ -911,7 +911,9 @@ def _strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _build_client() -> AsyncOpenAI:
     """构建 AsyncOpenAI 客户端，注入代理与自定义 base_url。"""
     http_client = None
-    if HTTPX_PROXY:
+    if OPENAI_API_BASE:
+        http_client = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(600.0, connect=5.0))
+    elif HTTPX_PROXY:
         http_client = httpx.AsyncClient(proxy=HTTPX_PROXY)
     kwargs: Dict[str, Any] = {
         "api_key": OPENAI_API_KEY_CUSTOM or "dummy",

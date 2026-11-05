@@ -6,6 +6,23 @@ import base64
 from unittest.mock import patch, MagicMock
 
 
+@pytest.mark.parametrize("base, expected_transport", [
+    ("http://relay.example:38090/v1", {"trust_env": False, "timeout": 300.0}),
+    ("", {"proxy": "socks5://127.0.0.1:1080", "timeout": 300.0}),
+])
+def test_openai_image_client_routes_gateway_direct_and_native_through_proxy(monkeypatch, base, expected_transport):
+    import app.image_gen as image_gen
+
+    monkeypatch.setattr(image_gen, "_openai_image_client", None)
+    monkeypatch.setattr(image_gen, "OPENAI_API_BASE", base)
+    monkeypatch.setattr(image_gen, "SOCKS_PROXY", "socks5h://127.0.0.1:1080")
+    monkeypatch.setattr(image_gen, "OPENAI_API_KEY_CUSTOM", "sk-test")
+    with patch("httpx.Client") as transport, patch("openai.OpenAI") as client:
+        image_gen._get_openai_client()
+    transport.assert_called_once_with(**expected_transport)
+    assert client.call_args.kwargs["http_client"] is transport.return_value
+
+
 class TestGenerateImage:
     """generate_image() 统一接口测试"""
 

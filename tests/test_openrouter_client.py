@@ -2,6 +2,47 @@
 import os
 import pytest
 
+
+@pytest.mark.asyncio
+async def test_real_openrouter_sdk_preserves_cache_and_provider_over_http(monkeypatch):
+    import json
+    import httpx
+    from openrouter import OpenRouter
+    import app.openrouter_client as oc
+
+    requests = []
+
+    async def handle(request):
+        requests.append(json.loads(request.content))
+        event = {
+            "id": "gen-test", "object": "chat.completion.chunk", "created": 1,
+            "model": "anthropic/claude-sonnet-4-6",
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            "choices": [{"index": 0, "delta": {"content": "OK"}, "finish_reason": None}],
+        }
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n")
+
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    client = OpenRouter(api_key="test", server_url="http://127.0.0.1:12345/api/v1", async_client=transport)
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+    monkeypatch.setattr(oc, "OPENROUTER_MODEL_CONFIG", {"fast": {
+        "model": "anthropic/claude-sonnet-4-6", "provider_order": ["Anthropic"],
+        "supports_reasoning": False, "supports_vision": True, "supports_search": False,
+    }})
+    blocks = [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}]
+    try:
+        chunks = [chunk async for chunk in oc.call_openrouter_stream(
+            [{"role": "system", "content": blocks}, {"role": "user", "content": "hello"}],
+            target_model="fast",
+        )]
+    finally:
+        await transport.aclose()
+    assert not any(chunk.get("error") for chunk in chunks), chunks
+    assert "".join(chunk.get("content", "") for chunk in chunks) == "OK"
+    assert requests[0]["provider"]["order"] == ["Anthropic"]
+    assert requests[0]["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 os.environ.setdefault("OPENROUTER_API_KEY", "test-dummy-openrouter-key")
 
