@@ -19,6 +19,7 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      - ./data-dws:/app/data-dws
     deploy:
       resources:
         limits:

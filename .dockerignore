@@ -9,8 +9,10 @@ credentials/
 .env
 .env.*
 
-# 数据目录
+# 数据目录（含 dws 登录凭据目录 data-dws/，绝不打进镜像）
 data/
+data-*/
+.agents/
 
 # Git
 .git/

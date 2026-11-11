@@ -9,13 +9,19 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 # 禁用输出缓冲，让日志实时打印
 ENV PYTHONUNBUFFERED=1
-# 设置时区为东八区
-ENV TZ=Asia/Shanghai
+# 设置时区为东八区，并指定 dws 持久化配置与加密凭据目录（通过 ./data-dws:/app/data-dws 跨容器共享）
+ENV TZ=Asia/Shanghai \
+    DWS_CONFIG_DIR=/app/data-dws/config \
+    DWS_KEYCHAIN_DIR=/app/data-dws/keychain
 
-# 安装系统依赖和时区数据
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata && \
+# 安装系统依赖、CA 根证书（供 Go 二进制访问钉钉 HTTPS 接口）和时区数据
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && \
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     rm -rf /var/lib/apt/lists/*
+
+# 安装官方 DingTalk Workspace CLI (dws v1.0.67，带 SHA256 强校验，前置以命中 Docker 层缓存)
+COPY scripts/install_dws.py /tmp/install_dws.py
+RUN python /tmp/install_dws.py && rm -f /tmp/install_dws.py
 
 # 复制依赖文件
 COPY requirements.txt .

@@ -269,3 +269,117 @@ async def test_dingtalk_consumer_embeds_bqb_in_card_and_sanitizes_history():
     saved_assistant_msg = mock_update_history.call_args.kwargs["assistant_msg"]
     assert "[[bqb:金馆长熊猫 这么刺激吗]]" in saved_assistant_msg
     assert "@lALP_FAKE_BQB_123" not in saved_assistant_msg
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_group_quote_injects_context_into_router_and_llm_prompt():
+    """群聊 @机器人 引用回复问号 '?' 时，路由与主模型均收到被引用上下文与非@群聊历史。"""
+    from app.dws_context import DwsContextBundle, DwsQuoteInfo
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-quote")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+
+    incoming_message = SimpleNamespace(
+        message_id="msg_q_1",
+        sender_id="sender-zeng",
+        sender_nick="我司曾工",
+        conversation_id="cid-group-quote",
+        conversation_type="2",
+    )
+
+    fake_bundle = DwsContextBundle(
+        dws_available=True,
+        merged_history=[
+            {
+                "role": "user",
+                "content": "越脱离群众越好",
+                "timestamp": "2026-11-11 14:10:05",
+                "sender_nick": "杰少",
+            },
+            {
+                "role": "user",
+                "content": "华少其实就是曾工本尊",
+                "timestamp": "2026-11-11 14:12:00",
+                "sender_nick": "杰少",
+            },
+        ],
+        quote_info=DwsQuoteInfo(
+            message_id="m_target",
+            sender="杰少",
+            text="越脱离群众越好",
+            create_time="2026-11-11 14:10:05",
+        ),
+        quote_prompt_block=(
+            "<quoted_context>\n"
+            "[被引用原消息] [2026-11-11 14:10:05] 杰少: 越脱离群众越好\n"
+            "[引用处前后上下文]\n"
+            "- 👉 [2026-11-11 14:10:05] 杰少: 越脱离群众越好\n"
+            "</quoted_context>"
+        ),
+        quote_router_text="[用户正在引用消息（杰少: 越脱离群众越好）]\n用户当前发言: ?",
+        quote_history_prefix="[引用 杰少: 越脱离群众越好] ",
+    )
+
+    route_result = {
+        "model": "fast",
+        "thinking_level": "medium",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在细看引用",
+        "reason": "引用追问",
+    }
+    captured_stream_messages = []
+
+    def fake_create_stream(messages, **_kwargs):
+        captured_stream_messages.extend(messages)
+        return _iter_consumer_chunks(
+            [
+                {"content": "原来曾工是在问杰少这句话！"},
+                {"usage": {"model": "claude-sonnet-4-6", "input_tokens": 20, "output_tokens": 10}},
+            ]
+        )
+
+    mock_router = AsyncMock(return_value=route_result)
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.ENABLE_BQB", False), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", True), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=fake_bundle), \
+         patch("app.dingtalk_bot.get_session_key", return_value="dingtalk_cid-group-quote"), \
+         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot._analyze_with_openai", new=mock_router), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.ai.backend.create_backend_stream", side_effect=fake_create_stream), \
+         patch("app.dingtalk_bot.update_history") as mock_update_history, \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(
+            incoming_message,
+            "?",
+            "cid-group-quote",
+            [],
+            group_info={"name": "测试群"},
+        )
+
+    # 1. 路由预分析收到了带引用上下文的文本，而非裸 '?'
+    router_arg = mock_router.await_args.args[0]
+    assert "越脱离群众越好" in router_arg
+
+    # 2. 主模型收到了群聊非@消息历史与当前轮 <quoted_context>
+    joined_msgs = "\n".join(str(m.get("content", "")) for m in captured_stream_messages if m.get("role") == "user")
+    assert "华少其实就是曾工本尊" in joined_msgs
+    assert "<quoted_context>" in joined_msgs
+    assert "越脱离群众越好" in joined_msgs
+
+    # 3. 历史落盘保留紧凑单行引用摘要
+    saved_user_msg = mock_update_history.call_args.kwargs["user_msg"]
+    assert saved_user_msg == "[引用 杰少: 越脱离群众越好] ?"
+

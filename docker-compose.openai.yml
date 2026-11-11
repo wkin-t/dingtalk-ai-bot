@@ -20,6 +20,7 @@ services:
       - .env.openai
     volumes:
       - ./data-openai:/app/data
+      - ./data-dws:/app/data-dws
       - ${VERTEX_SA_HOST_PATH:-/dev/null}:/run/secrets/gcp-key.json:ro
     deploy:
       resources:

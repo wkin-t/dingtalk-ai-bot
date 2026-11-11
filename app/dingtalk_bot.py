@@ -34,12 +34,15 @@ from app.config import (
     DINGTALK_IMAGE_MSG_PARAM_TEMPLATE,
     STREAM_UPDATE_THROTTLE,
     ENABLE_BQB,
+    ENABLE_DWS_GROUP_CONTEXT,
+    ENABLE_DWS_QUOTE_CONTEXT,
 )
 from app.bqb import (
     strip_bqb_tags_for_streaming,
     resolve_bqb_tags,
     schedule_bqb_index_warmup,
 )
+from app.dws_context import DwsContextBundle, fetch_dws_context_bundle
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.ai.handler import TEMPERATURE_MAP
 from app.ai.router import should_force_search
@@ -972,31 +975,50 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         return last_update_time
 
-    async def handle_ai_stream(self, incoming_message, content, conversation_id, at_user_ids, image_data_list=None, group_info=None):
+    async def handle_ai_stream(
+        self,
+        incoming_message,
+        content,
+        conversation_id,
+        at_user_ids,
+        image_data_list=None,
+        group_info=None,
+        incoming_messages=None,
+        current_message_ids=None,
+    ):
         print(f"🚀 开始处理 AI 请求: {content} (User: {incoming_message.sender_id})")
         print(f"🔍 [调试] handle_ai_stream 接收到的 content 参数: '{content}'")
         if image_data_list:
             print(f"🖼️ 收到图片数量: {len(image_data_list)}")
 
         raw_user_content = content
+        router_content = content
 
         session_key = get_session_key(conversation_id, incoming_message.sender_id)
         use_openclaw_backend = AI_BACKEND == "openclaw"
 
         # 获取完整历史记录
         full_history = get_history(session_key)
-
-        # 智能“历史引用”注入（仅用于本次 AI 请求，不写入历史）
-        if DINGTALK_REFERENCE_AUTO_ENABLED:
-            injected_content, quote = maybe_inject_reference(
-                user_content=raw_user_content,
-                history=full_history,
+        dws_bundle = DwsContextBundle(
+            merged_history=(
+                full_history[-MAX_HISTORY_LENGTH:]
+                if len(full_history) > MAX_HISTORY_LENGTH
+                else list(full_history)
             )
-            if quote:
-                print(f"🧷 [引用] 已注入引用: {quote}")
-            content = injected_content
+        )
 
         if use_openclaw_backend:
+            # 智能“历史引用”注入（仅用于本次 AI 请求，不写入历史）
+            if DINGTALK_REFERENCE_AUTO_ENABLED:
+                injected_content, quote = maybe_inject_reference(
+                    user_content=raw_user_content,
+                    history=full_history,
+                )
+                if quote:
+                    print(f"🧷 [引用] 已注入引用: {quote}")
+                content = injected_content
+                router_content = content
+
             # OpenClaw 模式：仅透传轻量上下文，避免与 Gateway 的 agent/system 策略冲突
             if OPENCLAW_CONTEXT_MESSAGES > 0 and len(full_history) > OPENCLAW_CONTEXT_MESSAGES:
                 history_messages = full_history[-OPENCLAW_CONTEXT_MESSAGES:]
@@ -1067,13 +1089,46 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             print(f"🔍 [OpenClaw] 透传历史条数: {len(messages_raw) - 1}, 当前消息已附加")
         else:
-            # 截取最近的 N 条发送给 Gemini
-            if len(full_history) > MAX_HISTORY_LENGTH:
-                history_messages = full_history[-MAX_HISTORY_LENGTH:]
-            else:
-                history_messages = full_history
-
             from app.ai.system_prompt import build_system_prompt_content
+            from app.ai.history_format import format_history_with_meta
+            from app.clear_cutoff import get_cutoff
+
+            _cutoff_at = get_cutoff(session_key)
+
+            if ENABLE_DWS_GROUP_CONTEXT or ENABLE_DWS_QUOTE_CONTEXT:
+                effective_incoming = (
+                    list(incoming_messages) if incoming_messages else [incoming_message]
+                )
+                if current_message_ids is not None:
+                    effective_msg_ids = list(current_message_ids)
+                else:
+                    mid = getattr(incoming_message, "message_id", None)
+                    effective_msg_ids = [mid] if mid else []
+
+                dws_bundle = await fetch_dws_context_bundle(
+                    conversation_id=conversation_id,
+                    is_group=getattr(incoming_message, "conversation_type", None) == "2",
+                    incoming_messages=effective_incoming,
+                    current_message_ids=effective_msg_ids,
+                    raw_user_content=raw_user_content,
+                    history_messages=full_history,
+                    cutoff_at=_cutoff_at,
+                )
+
+            if dws_bundle.quote_prompt_block:
+                content = f"{dws_bundle.quote_prompt_block}\n{raw_user_content}"
+                router_content = dws_bundle.quote_router_text or content
+                q_sender = dws_bundle.quote_info.sender if dws_bundle.quote_info else "?"
+                print(f"🧷 [引用上下文] 已注入真实引用消息及前后上下文 (sender={q_sender})")
+            elif DINGTALK_REFERENCE_AUTO_ENABLED:
+                injected_content, quote = maybe_inject_reference(
+                    user_content=raw_user_content,
+                    history=dws_bundle.merged_history,
+                )
+                if quote:
+                    print(f"🧷 [引用] 已注入引用: {quote}")
+                content = injected_content
+                router_content = content
 
             if ENABLE_BQB:
                 schedule_bqb_index_warmup()
@@ -1086,11 +1141,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             messages_raw = [{"role": "system", "content": system_content}]
 
-            from app.ai.history_format import format_history_with_meta
-            from app.clear_cutoff import get_cutoff
-            _cutoff_at = get_cutoff(session_key)
-
-            formatted_history = format_history_with_meta(history_messages, BOT_ID, cutoff_at=_cutoff_at)
+            formatted_history = format_history_with_meta(
+                dws_bundle.merged_history, BOT_ID, cutoff_at=_cutoff_at
+            )
 
             if image_data_list:
                 from datetime import datetime, timezone, timedelta
@@ -1162,7 +1215,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         elif AI_BACKEND == "openai":
             print(f"🔄 [路由] OpenAI 模式，使用 GPT 预分析...")
             try:
-                complexity = await _analyze_with_openai(content, has_images, soul_text=soul_text)
+                complexity = await _analyze_with_openai(router_content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except asyncio.CancelledError:
                 raise
@@ -1179,14 +1232,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         elif AI_BACKEND == "openrouter":
             print(f"🔄 [路由] OpenRouter 模式，使用 Haiku 预分析...")
             try:
                 from app.openrouter_client import analyze_complexity_with_openrouter
-                complexity = await analyze_complexity_with_openrouter(content, has_images, soul_text=soul_text)
+                complexity = await analyze_complexity_with_openrouter(router_content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except asyncio.CancelledError:
                 raise
@@ -1203,13 +1256,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
             print(f"🔄 [路由] Gemini 模式，使用 Flash Lite 预分析...")
             try:
-                complexity = await _analyze_with_gemini(content, has_images, soul_text=soul_text)
+                complexity = await _analyze_with_gemini(router_content, has_images, soul_text=soul_text)
                 print(f"🔄 [路由] 预分析返回: {complexity}")
             except asyncio.CancelledError:
                 raise
@@ -1226,7 +1279,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", GEMINI_MODEL_FAST)
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
@@ -1682,6 +1735,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             # 记录历史：现在同时保存用户消息和助手消息
             sender_nick = incoming_message.sender_nick or "User"
             history_content = raw_user_content
+            if dws_bundle.quote_history_prefix and not history_content.startswith("[引用"):
+                history_content = f"{dws_bundle.quote_history_prefix}{history_content}".strip()
             if image_data_list:
                 history_content += f" [图片x{len(image_data_list)}]"
             # Store the cleaned response so we don't persist base64 blobs.
@@ -1799,6 +1854,12 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 content_list = data["content"]
                 image_list = data["images"]
                 incoming_message = data["incoming_message"]
+                incoming_messages = data.get("incoming_messages") or [incoming_message]
+                message_ids = data.get("message_ids") or (
+                    [incoming_message.message_id]
+                    if getattr(incoming_message, "message_id", None)
+                    else []
+                )
                 at_user_ids = data["at_user_ids"]
 
                 full_content = "\n".join(content_list)
@@ -1829,7 +1890,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 # 不再提前保存用户消息，延迟到 AI 回复后保存（避免历史记录中包含当前正在处理的消息）
                 print(f"📥 [DingTalk Stream] 处理合并消息: {history_content} (User: {sender_nick})")
 
-                await self.handle_ai_stream(incoming_message, full_content, incoming_message.conversation_id, at_user_ids, image_list, group_info)
+                await self.handle_ai_stream(
+                    incoming_message,
+                    full_content,
+                    incoming_message.conversation_id,
+                    at_user_ids,
+                    image_list,
+                    group_info,
+                    incoming_messages=incoming_messages,
+                    current_message_ids=message_ids,
+                )
             finally:
                 # 清除正在处理标记
                 processing_sessions.discard(buffer_key)
@@ -2117,6 +2187,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     "content": [],
                     "images": [],
                     "incoming_message": incoming_message,
+                    "incoming_messages": [],
+                    "message_ids": [],
                     "at_user_ids": at_user_ids,
                     "timer": None
                 }
@@ -2127,8 +2199,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             if image_data_list:
                 message_buffer[buffer_key]["images"].extend(image_data_list)
 
-            # 更新元数据 (使用最新消息的上下文)
+            # 更新元数据 (保留整个 2s 窗口内的消息对象与 message_id 列表，防丢失首条消息上的引用标记或漏去重)
             message_buffer[buffer_key]["incoming_message"] = incoming_message
+            message_buffer[buffer_key]["incoming_messages"].append(incoming_message)
+            if message_id and message_id not in message_buffer[buffer_key]["message_ids"]:
+                message_buffer[buffer_key]["message_ids"].append(message_id)
             message_buffer[buffer_key]["at_user_ids"] = at_user_ids
 
             # 启动/重启计时器

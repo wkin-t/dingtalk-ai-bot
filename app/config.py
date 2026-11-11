@@ -433,6 +433,20 @@ BQB_WINDOW_MAX_COUNT = max(1, _get_int("BQB_WINDOW_MAX_COUNT", 2))
 BQB_MAX_DISPLAY_PX = max(0, _get_int("BQB_MAX_DISPLAY_PX", 168))
 BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 580))
 
+# ===== DingTalk Workspace CLI (dws) 只读群聊/引用上下文配置 =====
+# 安全边界：仅允许内部 Python 只读查询群消息与引用消息，严禁开放发送/修改/撤回/下载能力
+ENABLE_DWS_GROUP_CONTEXT = _get_bool("ENABLE_DWS_GROUP_CONTEXT", True)
+ENABLE_DWS_QUOTE_CONTEXT = _get_bool("ENABLE_DWS_QUOTE_CONTEXT", True)
+DWS_BIN = os.getenv("DWS_BIN", "dws").strip() or "dws"
+DWS_CONTEXT_LIMIT = max(5, min(100, _get_int("DWS_CONTEXT_LIMIT", 40)))
+DWS_QUOTE_CONTEXT_BEFORE = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_BEFORE", 5)))
+DWS_QUOTE_CONTEXT_AFTER = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_AFTER", 5)))
+DWS_TIMEOUT_SECONDS = max(1.0, _get_float("DWS_TIMEOUT_SECONDS", 4.0))
+DWS_AUTH_BACKOFF_SECONDS = max(10, _get_int("DWS_AUTH_BACKOFF_SECONDS", 60))
+DWS_IGNORE_SENDERS = frozenset(
+    s.strip() for s in os.getenv("DWS_IGNORE_SENDERS", "").split(",") if s.strip()
+)
+
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing
 GEMINI_PRICING = {

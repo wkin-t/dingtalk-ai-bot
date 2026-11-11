@@ -34,7 +34,7 @@ build/
 venv/
 env/
 
-# 数据目录（各容器独立：data-openai/、data-anthropic/ 等，含 Soul 与对话历史）
+# 数据目录（各容器独立：data-openai/、data-anthropic/、共享只读凭据 data-dws/ 等）
 data/
 data-*/
 
