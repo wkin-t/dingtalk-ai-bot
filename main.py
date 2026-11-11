@@ -74,6 +74,9 @@ def start_dingtalk_stream_async():
         print("⚠️ 未配置 DINGTALK_CLIENT_ID 或 DINGTALK_CLIENT_SECRET，跳过启动钉钉 Stream 客户端")
         return
 
+    from app.dws_context import log_dws_startup_status_sync
+    log_dws_startup_status_sync()
+
     print("🚀 正在启动钉钉 Stream 客户端...")
     credential = dingtalk_stream.Credential(DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET)
     client = dingtalk_stream.DingTalkStreamClient(credential)

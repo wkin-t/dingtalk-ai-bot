@@ -623,3 +623,184 @@ class TestQuoteContextResolution:
         assert len(bundle.merged_history) == 1
         assert bundle.merged_history[0]["content"] == "今晚发版窗口定在九点"
 
+
+class TestEnterpriseCorpValidation:
+    """dws 登录企业与机器人所在企业一致性校验测试（不一致必须阻断读取并显式报错）。"""
+
+    @pytest.mark.asyncio
+    async def test_corp_mismatch_blocks_chat_reads_and_returns_error(self):
+        from app.dws_context import fetch_dws_context_bundle, reset_dws_RuntimeState_for_tests
+
+        reset_dws_RuntimeState_for_tests()
+        calls = []
+
+        async def fake_run_json(args, **_kwargs):
+            calls.append(list(args))
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "success": True,
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding_wrong_company_888",
+                    "corp_name": "其他外部公司",
+                    "user_name": "曾健华",
+                }
+            raise AssertionError(f"企业不一致时严禁调用任何 chat 读取命令: {args}")
+
+        incoming = SimpleNamespace(
+            message_id="m_curr",
+            conversation_id="cid_group_1",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            text=SimpleNamespace(content="大家好", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m_curr"],
+                raw_user_content="大家好",
+                history_messages=[],
+                cutoff_at=None,
+            )
+
+        assert calls == [["auth", "status", "--readonly", "-f", "json"]]
+        assert bundle.dws_available is False
+        assert bundle.corp_mismatch_error
+        assert "不一致" in bundle.corp_mismatch_error
+        assert "其他外部公司" in bundle.corp_mismatch_error
+        assert "ding_wrong_company_888" in bundle.corp_mismatch_error
+        assert "ding42b8b39e5adac00a4ac5d6980864d335" in bundle.corp_mismatch_error
+
+    @pytest.mark.asyncio
+    async def test_corp_match_caches_identity_and_invalidates_when_profile_changes(self, tmp_path):
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+        cfg_dir = tmp_path / "config"
+        key_dir = tmp_path / "keychain" / "dws-cli"
+        cfg_dir.mkdir(parents=True)
+        key_dir.mkdir(parents=True)
+        profiles_file = cfg_dir / "profiles.json"
+        profiles_file.write_text('{"currentProfile":"wrong"}', encoding="utf-8")
+        (key_dir / "session.enc").write_bytes(b"v1")
+
+        current_corp = {"id": "ding_wrong_1", "name": "误选企业"}
+        auth_calls = 0
+
+        async def fake_run_json(args, **_kwargs):
+            nonlocal auth_calls
+            if list(args[:2]) == ["auth", "status"]:
+                auth_calls += 1
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": current_corp["id"],
+                    "corp_name": current_corp["name"],
+                }
+            return {
+                "ok": True,
+                "data": {
+                    "messages": [
+                        {"messageId": "m1", "sender": "杰少", "text": "同企业正常读取", "createTime": "2026-11-11 15:00:00"}
+                    ]
+                },
+            }
+
+        incoming = SimpleNamespace(
+            message_id="m_curr",
+            conversation_id="cid_group_1",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            text=SimpleNamespace(content="测试", extensions={}),
+            extensions={},
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "DWS_CONFIG_DIR": str(cfg_dir),
+                "DWS_KEYCHAIN_DIR": str(tmp_path / "keychain"),
+            },
+            clear=False,
+        ), patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            # 1. 首次为错误企业：报错阻断
+            b1 = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m_curr"],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+            assert b1.corp_mismatch_error
+            assert auth_calls == 1
+
+            # 2. 管理员重新登录切换到正确企业（profiles.json 文件变化）：无需重启，立即解除报错并正常拉取
+            current_corp["id"] = "ding42b8b39e5adac00a4ac5d6980864d335"
+            current_corp["name"] = "Vibe Coding 联盟"
+            profiles_file.write_text('{"currentProfile":"ding42b8b39e5adac00a4ac5d6980864d335:manager1829"}', encoding="utf-8")
+
+            b2 = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m_curr"],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+            assert b2.corp_mismatch_error == ""
+            assert b2.dws_available is True
+            assert len(b2.merged_history) == 1
+            assert auth_calls == 2
+
+            # 3. 凭据未变时再次请求：命中进程内身份缓存，不再重复拉起 auth status 子进程
+            b3 = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m_curr"],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+            assert b3.corp_mismatch_error == ""
+            assert b3.dws_available is True
+            assert auth_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_expected_corp_id_env_also_enforces_match(self):
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding_other_corp",
+                    "corp_name": "别的企业",
+                }
+            raise AssertionError("不应调用 chat")
+
+        with patch.object(dws_ctx.cfg, "DWS_EXPECTED_CORP_ID", "ding42b8b39e5adac00a4ac5d6980864d335", create=True), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[],
+                current_message_ids=[],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+
+        assert bundle.corp_mismatch_error
+        assert "ding_other_corp" in bundle.corp_mismatch_error
+        assert "ding42b8b39e5adac00a4ac5d6980864d335" in bundle.corp_mismatch_error
+
+

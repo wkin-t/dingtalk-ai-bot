@@ -383,3 +383,61 @@ async def test_dingtalk_group_quote_injects_context_into_router_and_llm_prompt()
     saved_user_msg = mock_update_history.call_args.kwargs["user_msg"]
     assert saved_user_msg == "[引用 杰少: 越脱离群众越好] ?"
 
+
+@pytest.mark.asyncio
+async def test_dingtalk_bot_reports_error_when_dws_corp_mismatches_bot_corp():
+    """当 dws 登录企业与机器人所在企业不一致时，机器人必须直接向钉钉回复报错并中止后续调用。"""
+    from app.dws_context import DwsContextBundle
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-never")
+    handler.reply_markdown = MagicMock()
+
+    incoming_message = SimpleNamespace(
+        message_id="msg_corp_err_1",
+        sender_id="sender-zeng",
+        sender_nick="我司曾工",
+        conversation_id="cid-group-1",
+        conversation_type="2",
+        chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+    )
+
+    mismatch_bundle = DwsContextBundle(
+        dws_available=False,
+        corp_mismatch_error=(
+            "❌ **dws 登录企业与当前机器人所在企业不一致**\n\n"
+            "- **dws 当前登录企业**：其他外部公司 (`ding_wrong_company_888`)\n"
+            "- **机器人所在企业**：`ding42b8b39e5adac00a4ac5d6980864d335`"
+        ),
+    )
+
+    mock_router = AsyncMock()
+    mock_stream = MagicMock()
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "gemini"), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=mismatch_bundle), \
+         patch("app.dingtalk_bot.get_session_key", return_value="dingtalk_cid-group-1"), \
+         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._analyze_with_gemini", new=mock_router), \
+         patch("app.ai.backend.create_backend_stream", new=mock_stream):
+        await handler.handle_ai_stream(
+            incoming_message,
+            "看看群里刚才聊了啥",
+            "cid-group-1",
+            [],
+            group_info={"name": "测试群"},
+        )
+
+    handler.reply_markdown.assert_called_once()
+    title_arg, text_arg, _msg_arg = handler.reply_markdown.call_args.args
+    assert "企业不一致" in title_arg
+    assert "ding_wrong_company_888" in text_arg
+    assert "ding42b8b39e5adac00a4ac5d6980864d335" in text_arg
+    mock_router.assert_not_awaited()
+    handler.card_helper.create_and_deliver.assert_not_awaited()
+    mock_stream.assert_not_called()
+
+

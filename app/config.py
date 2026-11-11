@@ -438,6 +438,12 @@ BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 580))
 ENABLE_DWS_GROUP_CONTEXT = _get_bool("ENABLE_DWS_GROUP_CONTEXT", True)
 ENABLE_DWS_QUOTE_CONTEXT = _get_bool("ENABLE_DWS_QUOTE_CONTEXT", True)
 DWS_BIN = os.getenv("DWS_BIN", "dws").strip() or "dws"
+# 可选显式绑定期望企业 CorpId（与 DINGTALK_CORP_ID 分离，避免触发 dingtalk_card 的第三方应用取 token 分支；
+# 未设置时自动使用钉钉 Stream 消息自带的 incoming_message.chatbot_corp_id 进行逐请求校验）
+DWS_EXPECTED_CORP_ID = (
+    os.getenv("DWS_EXPECTED_CORP_ID") or os.getenv("DINGTALK_CORP_ID") or ""
+).strip()
+DWS_AUTH_STATUS_TTL_SECONDS = max(10, _get_int("DWS_AUTH_STATUS_TTL_SECONDS", 300))
 DWS_CONTEXT_LIMIT = max(5, min(100, _get_int("DWS_CONTEXT_LIMIT", 40)))
 DWS_QUOTE_CONTEXT_BEFORE = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_BEFORE", 5)))
 DWS_QUOTE_CONTEXT_AFTER = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_AFTER", 5)))

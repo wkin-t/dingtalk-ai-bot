@@ -77,6 +77,24 @@ _BOT_DISPLAY_MAP = {
 
 _backoff_until: float = 0.0
 _backoff_keychain_marker: tuple[tuple[str, int, int], ...] | None = None
+_cached_identity: DwsAuthIdentity | None = None
+_cached_identity_until: float = 0.0
+_cached_identity_marker: tuple[tuple[str, int, int], ...] | None = None
+
+_AUTH_CONFIG_WATCH_FILES = ("profiles.json", "token.json", "identity.json")
+
+
+@dataclass(frozen=True)
+class DwsAuthIdentity:
+    """dws 当前登录账号的企业与用户摘要（不含任何 token/密钥）。"""
+
+    authenticated: bool = False
+    token_valid: bool = False
+    refresh_token_valid: bool = False
+    corp_id: str = ""
+    corp_name: str = ""
+    user_id: str = ""
+    user_name: str = ""
 
 
 @dataclass
@@ -102,33 +120,181 @@ class DwsContextBundle:
     quote_prompt_block: str = ""
     quote_router_text: str = ""
     quote_history_prefix: str = ""
+    corp_mismatch_error: str = ""
 
 
 def reset_dws_RuntimeState_for_tests() -> None:
-    """重置进程内负缓存状态（仅供单测隔离使用）。"""
+    """重置进程内负缓存与企业身份缓存状态（仅供单测隔离使用）。"""
     global _backoff_until, _backoff_keychain_marker
+    global _cached_identity, _cached_identity_until, _cached_identity_marker
     _backoff_until = 0.0
     _backoff_keychain_marker = None
+    _cached_identity = None
+    _cached_identity_until = 0.0
+    _cached_identity_marker = None
 
 
 def _get_keychain_marker() -> tuple[tuple[str, int, int], ...]:
-    """仅读取凭据目录的文件元数据，用于在管理员完成 dws auth login 后立即解除退避。"""
-    keychain_dir = os.getenv("DWS_KEYCHAIN_DIR", "").strip()
-    if not keychain_dir or not os.path.isdir(keychain_dir):
-        return ()
+    """仅读取凭据与 profile 目录文件元数据，在登录/切企业后毫秒级失效旧缓存。"""
     entries: list[tuple[str, int, int]] = []
-    try:
-        with os.scandir(keychain_dir) as it:
-            for entry in it:
-                try:
-                    st = entry.stat()
-                    entries.append((entry.name, int(st.st_mtime_ns), int(st.st_size)))
-                except OSError:
-                    continue
-    except OSError:
-        return ()
+
+    keychain_dir = os.getenv("DWS_KEYCHAIN_DIR", "").strip()
+    if keychain_dir and os.path.isdir(keychain_dir):
+        try:
+            with os.scandir(keychain_dir) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            with os.scandir(entry.path) as sub_it:
+                                for sub_entry in sub_it:
+                                    try:
+                                        st = sub_entry.stat()
+                                        entries.append(
+                                            (
+                                                f"k:{entry.name}/{sub_entry.name}",
+                                                int(st.st_mtime_ns),
+                                                int(st.st_size),
+                                            )
+                                        )
+                                    except OSError:
+                                        continue
+                        else:
+                            st = entry.stat()
+                            entries.append((f"k:{entry.name}", int(st.st_mtime_ns), int(st.st_size)))
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+
+    config_dir = os.getenv("DWS_CONFIG_DIR", "").strip()
+    if config_dir and os.path.isdir(config_dir):
+        for fname in _AUTH_CONFIG_WATCH_FILES:
+            fpath = os.path.join(config_dir, fname)
+            try:
+                st = os.stat(fpath)
+                entries.append((f"c:{fname}", int(st.st_mtime_ns), int(st.st_size)))
+            except OSError:
+                continue
+
     entries.sort()
     return tuple(entries)
+
+
+def parse_dws_auth_status(payload: Any) -> DwsAuthIdentity | None:
+    """解析 dws auth status --readonly -f json 的企业与登录态信息。"""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("ok") is False:
+        return DwsAuthIdentity(authenticated=False)
+
+    src = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    return DwsAuthIdentity(
+        authenticated=bool(src.get("authenticated")),
+        token_valid=bool(src.get("token_valid", src.get("tokenValid", False))),
+        refresh_token_valid=bool(
+            src.get("refresh_token_valid", src.get("refreshTokenValid", False))
+        ),
+        corp_id=str(src.get("corp_id") or src.get("corpId") or "").strip(),
+        corp_name=str(src.get("corp_name") or src.get("corpName") or "").strip(),
+        user_id=str(src.get("user_id") or src.get("userId") or "").strip(),
+        user_name=str(src.get("user_name") or src.get("userName") or "").strip(),
+    )
+
+
+async def get_dws_auth_identity(*, force_refresh: bool = False) -> DwsAuthIdentity | None:
+    """只读查询当前 dws 登录企业身份；凭据文件未变化时复用内存缓存。"""
+    global _cached_identity, _cached_identity_until, _cached_identity_marker
+
+    now = time.monotonic()
+    current_marker = _get_keychain_marker()
+    if (
+        not force_refresh
+        and _cached_identity is not None
+        and now < _cached_identity_until
+        and _cached_identity_marker == current_marker
+    ):
+        return _cached_identity
+
+    payload = await run_dws_readonly_json(["auth", "status", "--readonly", "-f", "json"])
+    if payload is None:
+        return None
+
+    identity = parse_dws_auth_status(payload)
+    if identity is not None:
+        _cached_identity = identity
+        _cached_identity_marker = _get_keychain_marker()
+        _cached_identity_until = time.monotonic() + cfg.DWS_AUTH_STATUS_TTL_SECONDS
+    return identity
+
+
+async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
+    """校验 dws 登录企业是否与机器人所属企业一致；不一致时返回显式中文报错文案。"""
+    clean_expected: list[str] = []
+    for raw_cid in expected_corp_ids:
+        cid = str(raw_cid or "").strip()
+        if cid and cid not in clean_expected:
+            clean_expected.append(cid)
+
+    if not clean_expected:
+        return ""
+
+    identity = await get_dws_auth_identity()
+    if identity is None:
+        return ""
+
+    has_login = bool(
+        identity.authenticated
+        or identity.token_valid
+        or identity.refresh_token_valid
+        or identity.corp_id
+    )
+    if not has_login:
+        return ""
+
+    if identity.corp_id and all(identity.corp_id == exp for exp in clean_expected):
+        return ""
+
+    dws_corp_label = (
+        f"{identity.corp_name} (`{identity.corp_id}`)"
+        if identity.corp_name and identity.corp_id
+        else f"`{identity.corp_id or '未知企业'}`"
+    )
+    bot_corp_label = " / ".join(f"`{cid}`" for cid in clean_expected)
+    err_msg = (
+        "❌ **dws 登录企业与当前机器人所在企业不一致**\n\n"
+        f"- **dws 当前登录企业**：{dws_corp_label}\n"
+        f"- **机器人所在企业**：{bot_corp_label}\n\n"
+        "为防止跨企业串读数据，已拒绝拉取群聊上下文与引用消息。\n"
+        "请管理员在服务器重新执行设备码登录，并选择机器人所在企业授权：\n"
+        "`docker exec -it dingtalk-ai-bot-gemini dws auth login --device`"
+    )
+    print(
+        f"❌ [dws] 登录企业与机器人所在企业不一致: "
+        f"dws={identity.corp_name}({identity.corp_id}) != bot={clean_expected}，已阻断读取并报错"
+    )
+    return err_msg
+
+
+def log_dws_startup_status_sync() -> None:
+    """容器启动时只读自检 dws 登录状态与（可选配置的）期望企业一致性。"""
+    if not (cfg.ENABLE_DWS_GROUP_CONTEXT or cfg.ENABLE_DWS_QUOTE_CONTEXT):
+        return
+    try:
+        expected = getattr(cfg, "DWS_EXPECTED_CORP_ID", "")
+        if expected:
+            err = asyncio.run(verify_dws_corp_match(expected_corp_ids=[expected]))
+            if err:
+                return
+        identity = asyncio.run(get_dws_auth_identity(force_refresh=True))
+        if identity and (identity.authenticated or identity.corp_id):
+            print(
+                f"✅ [dws] 登录态就绪: 企业={identity.corp_name or '-'} ({identity.corp_id or '-'}), "
+                f"用户={identity.user_name or '-'}（每次收到钉钉消息时将自动校验机器人归属企业）"
+            )
+        else:
+            print("ℹ️ [dws] 当前未登录，群聊非@上下文增强暂未启用（可执行 dws auth login --device 登录）")
+    except Exception as exc:
+        print(f"⚠️ [dws] 启动状态自检跳过: {exc}")
 
 
 def validate_readonly_dws_args(args: Sequence[str]) -> list[str]:
@@ -1082,15 +1248,39 @@ async def fetch_dws_context_bundle(
     before_val = quote_before if quote_before is not None else cfg.DWS_QUOTE_CONTEXT_BEFORE
     after_val = quote_after if quote_after is not None else cfg.DWS_QUOTE_CONTEXT_AFTER
 
-    # 1. 先提取钉钉 Stream 自带的引用线索（零网络开销）
+    # 1. 先提取钉钉 Stream 自带的引用线索与机器人归属企业 CorpId（零网络开销）
     stream_quote: DwsQuoteInfo | None = None
     chatbot_user_id = ""
+    expected_corp_ids: list[str] = []
+    cfg_expected_corp = str(getattr(cfg, "DWS_EXPECTED_CORP_ID", "") or "").strip()
+    if cfg_expected_corp:
+        expected_corp_ids.append(cfg_expected_corp)
+
     for msg_obj in incoming_messages:
         if not chatbot_user_id:
             chatbot_user_id = str(getattr(msg_obj, "chatbot_user_id", "") or "").strip()
+        msg_bot_corp = str(getattr(msg_obj, "chatbot_corp_id", "") or "").strip()
+        if msg_bot_corp and msg_bot_corp not in expected_corp_ids:
+            expected_corp_ids.append(msg_bot_corp)
         hint = extract_stream_quote_hint(msg_obj)
         if hint is not None:
             stream_quote = _merge_quote_infos(stream_quote, hint)
+
+    if len(history_messages) > cfg.MAX_HISTORY_LENGTH:
+        fallback_history = list(history_messages[-cfg.MAX_HISTORY_LENGTH :])
+    else:
+        fallback_history = list(history_messages)
+
+    # 1.5 企业一致性门禁：若 dws 登录的企业与当前机器人归属企业不一致，严禁拉取任何消息并立即报错
+    need_dws = (is_group and bool(conversation_id) and cfg.ENABLE_DWS_GROUP_CONTEXT) or cfg.ENABLE_DWS_QUOTE_CONTEXT
+    if need_dws and expected_corp_ids:
+        corp_mismatch_error = await verify_dws_corp_match(expected_corp_ids=expected_corp_ids)
+        if corp_mismatch_error:
+            return DwsContextBundle(
+                dws_available=False,
+                merged_history=fallback_history,
+                corp_mismatch_error=corp_mismatch_error,
+            )
 
     recent_dws_items: list[dict[str, Any]] = []
     dws_available = False

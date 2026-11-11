@@ -1114,6 +1114,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     history_messages=full_history,
                     cutoff_at=_cutoff_at,
                 )
+                if dws_bundle.corp_mismatch_error:
+                    self.reply_markdown(
+                        "dws 企业不一致错误",
+                        dws_bundle.corp_mismatch_error,
+                        incoming_message,
+                    )
+                    return
 
             if dws_bundle.quote_prompt_block:
                 content = f"{dws_bundle.quote_prompt_block}\n{raw_user_content}"
