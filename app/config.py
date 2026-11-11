@@ -101,8 +101,8 @@ WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", WECOM_BOT_ENCODING_
 PLATFORM = os.getenv("PLATFORM", "dingtalk")
 
 # 代理设置 (优先读取环境变量)
-# 默认假设 v2rayA 的 SOCKS5 端口是 1080
-DEFAULT_PROXY_HOST = "172.16.0.8"
+# 默认假设本机 SOCKS5 代理端口是 1080
+DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_SOCKS_PORT = "1080"
 
 # 如果环境变量里配了 SOCKS_PROXY，读取它
