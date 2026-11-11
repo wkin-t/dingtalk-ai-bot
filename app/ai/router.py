@@ -44,6 +44,11 @@ FORCE_SEARCH_KEYWORDS = [
     "最新", "今天", "现在", "当前", "实时", "新闻", "股价", "天气",
 ]
 
+# 各后端路由 prompt 共享的表情包免误触生图提示，避免多处硬编码漂移
+ROUTER_IMAGE_GEN_FALSE_HINT = (
+    '注意：讨要现成表情包、梗图或斗图如"来张表情包"、"发个熊猫头/鲁迅梗图"属于聊天配图，必须设为 false'
+)
+
 
 def should_force_search(content: str) -> bool:
     """判断用户是否显式要求或明显需要实时搜索。"""

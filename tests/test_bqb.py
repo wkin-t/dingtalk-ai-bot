@@ -199,6 +199,10 @@ class TestExplicitIntentDetection:
             "斗图！看招",
             "给我发个滑稽",
             "再来点沙雕图",
+            "再来一张",
+            "换一张",
+            "发个罗翔",
+            "来张阿尼亚",
         ],
     )
     def test_explicit_request_true(self, msg):
@@ -210,6 +214,11 @@ class TestExplicitIntentDetection:
             "帮我画一张赛博朋克城市壁纸",
             "今天加班好累啊",
             "这段 Python 报错怎么修",
+            "来张系统架构图",
+            "给我发个流程图",
+            "来张时序图分析一下",
+            "生成一张思维导图",
+            "发个产品原型图看看",
         ],
     )
     def test_non_bqb_or_draw_request_false(self, msg):
@@ -267,6 +276,117 @@ class TestCachingAndUpload:
         monkeypatch.setattr(bqb, "_http_fetch_bytes", _fake_html_fetch)
         with pytest.raises(ValueError, match="合法"):
             await bqb.fetch_bqb_image_bytes(entries[0])
+
+    @pytest.mark.asyncio
+    async def test_corrupt_media_id_cache_and_bad_uploaded_at_recover_cleanly(self, tmp_path):
+        entries = bqb.parse_raw_catalog(_sample_catalog_raw())
+        entry = entries[0]
+        media_dir = tmp_path / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        (media_dir / f"{entry.sha256}.{entry.ext}").write_bytes(PNG_1X1)
+
+        helper = SimpleNamespace(
+            client_id="app-corrupt-test",
+            upload_media=AsyncMock(return_value="@lALP_RECOVERED_1"),
+        )
+        scope = bqb._safe_client_scope(helper)
+        cache_file = bqb._media_id_cache_file(scope)
+
+        # 1. 损坏的 JSON 文件不会阻断上传
+        with open(cache_file, "w", encoding="utf-8") as f:
+            f.write("{corrupt-json")
+        bqb._media_id_mem_cache.clear()
+        mid1 = await bqb.get_or_upload_media_id(entry, helper)
+        assert mid1 == "@lALP_RECOVERED_1"
+
+        # 2. uploaded_at 为非法字符串时不会抛 ValueError，而是安全视作过期重传
+        with open(cache_file, "r", encoding="utf-8") as f:
+            saved_map = json.load(f)
+        for k in saved_map:
+            saved_map[k]["uploaded_at"] = "not-a-number"
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(saved_map, f)
+        bqb._media_id_mem_cache.clear()
+        helper.upload_media = AsyncMock(return_value="@lALP_RECOVERED_2")
+        mid2 = await bqb.get_or_upload_media_id(entry, helper)
+        assert mid2 == "@lALP_RECOVERED_2"
+
+    @pytest.mark.asyncio
+    async def test_http_fetch_disables_trust_env_and_blocks_ssrf_redirects(self, monkeypatch):
+        monkeypatch.setattr(cfg, "HTTPX_PROXY", "")
+        monkeypatch.setattr("app.http_safe._verify_resolved_public_ips", AsyncMock(return_value="93.184.216.34"))
+        seen_trust_env = []
+
+        class _FakeStreamResp:
+            def __init__(self, status_code, headers, body=b""):
+                self.status_code = status_code
+                self.headers = headers
+                self._body = body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            async def aiter_bytes(self, chunk_size=65536):
+                if self._body:
+                    yield self._body
+
+        class _FakeAsyncClient:
+            def __init__(self, **kwargs):
+                seen_trust_env.append(kwargs.get("trust_env"))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def stream(self, _method, url, **_kwargs):
+                if "93.184.216.34" in url:
+                    return _FakeStreamResp(302, {"Location": "http://127.0.0.1:8080/secret"})
+                return _FakeStreamResp(200, {}, b"secret")
+
+        monkeypatch.setattr("app.http_safe.httpx.AsyncClient", _FakeAsyncClient, raising=False)
+        with pytest.raises(RuntimeError, match="内网|私有|重定向|SSRF|禁止"):
+            await bqb._http_fetch_bytes(
+                "https://example.com/bqb.png", max_bytes=1024, timeout_seconds=2.0
+            )
+        assert seen_trust_env and all(v is False for v in seen_trust_env)
+
+    @pytest.mark.asyncio
+    async def test_http_fetch_pins_public_dns_for_direct_and_proxy(self, monkeypatch):
+        from app import http_safe
+        seen = []
+        async def resolve(url):
+            return "93.184.216.34"
+        class Response:
+            status_code = 200
+            headers = {}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+            def raise_for_status(self): pass
+            async def aiter_bytes(self, chunk_size=65536): yield b"ok"
+        class Client:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+            def stream(self, method, url, **kwargs):
+                seen.append((str(url), kwargs))
+                return Response()
+        monkeypatch.setattr(http_safe, "_verify_resolved_public_ips", resolve)
+        monkeypatch.setattr(http_safe.httpx, "AsyncClient", Client)
+        for proxy in (None, "socks5://proxy.example:1080"):
+            assert await http_safe.fetch_public_bytes("https://example.com/path?a=1", max_bytes=100, timeout_seconds=2, proxy_url=proxy) == b"ok"
+        for url, kwargs in seen:
+            assert "93.184.216.34" in url
+            assert kwargs["headers"]["Host"] == "example.com"
+            assert kwargs["extensions"]["sni_hostname"] == "example.com"
 
 
 class TestPacingAndResolution:
@@ -472,3 +592,96 @@ class TestDisplayResizing:
         m2 = await bqb.get_or_upload_media_id(entry, helper)
         assert m2 == "@lALP_SIZE_2"
         assert uploaded_sizes[-1] == (580, 168)
+
+    def test_tall_portrait_meme_keeps_readable_width_and_proportional_canvas(self):
+        import io
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 800), color=(240, 240, 240)).save(buf, format="PNG")
+        out_bytes, out_ext, _ = bqb.resize_bqb_for_display(
+            buf.getvalue(), "png", "image/png", 168, canvas_width_px=480
+        )
+        assert out_ext == "png"
+        with Image.open(io.BytesIO(out_bytes)) as im:
+            canvas_w, canvas_h = im.size
+            rgba = im.convert("RGBA")
+            # 找出非透明主体宽度
+            non_transparent_xs = [x for x in range(canvas_w) if rgba.getpixel((x, canvas_h // 2))[3] > 0]
+            fg_w = max(non_transparent_xs) + 1
+            assert fg_w >= 95
+            # 画布宽度受比例上限约束，避免窄长图只占画布 7% 导致移动端缩成细线
+            assert canvas_w <= round(fg_w * 3.5) + 1
+            assert fg_w / float(canvas_w) >= 0.27
+
+    def test_long_gif_over_120_frames_subsamples_uniformly_preserving_tail_and_duration(self):
+        import io
+        from PIL import Image, ImageSequence
+
+        frames = []
+        for i in range(180):
+            if i < 179:
+                color = (120 + (i % 90), 20 + ((i * 7) % 60), 30 if i < 90 else 210)
+            else:
+                color = (20, 230, 40)  # 最后一帧为纯绿结局帧
+            frames.append(Image.new("RGB", (200, 200), color=color))
+        buf = io.BytesIO()
+        frames[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=[50] * 180,
+            loop=0,
+        )
+
+        out_bytes, out_ext, _ = bqb.resize_bqb_for_display(
+            buf.getvalue(), "gif", "image/gif", 168, canvas_width_px=0
+        )
+        assert out_ext == "gif"
+        with Image.open(io.BytesIO(out_bytes)) as anim:
+            n_out = getattr(anim, "n_frames", 1)
+            assert 2 < n_out <= 120
+            frame_durations = []
+            last_rgb = (0, 0, 0)
+            for fr in ImageSequence.Iterator(anim):
+                frame_durations.append(int(fr.info.get("duration") or 0))
+                last_rgb = fr.convert("RGBA").getpixel((50, 50))[:3]
+            total_dur = sum(frame_durations)
+            # 总时长保持接近原 9000ms（180 * 50ms），且最后一帧结局颜色未被腰斩丢弃
+            assert 8500 <= total_dur <= 9500
+            assert last_rgb[1] > 180 and last_rgb[0] < 80
+
+    def test_gif_mixed_opaque_and_transparent_frames_without_padding_preserves_opaque_frame_colors(self):
+        import io
+        from PIL import Image, ImageSequence
+
+        # 第 0 帧塞满 256 种不透明颜色，第 1 帧含透明区域，且 canvas_width_px=0 不补画布
+        f0 = Image.new("RGBA", (200, 200), (0, 0, 0, 255))
+        for idx in range(256):
+            r = (idx * 37) % 256
+            g = (idx * 73) % 256
+            b = (idx * 109) % 256
+            x0 = (idx % 16) * 12
+            y0 = (idx // 16) * 12
+            for dx in range(12):
+                for dy in range(12):
+                    f0.putpixel((x0 + dx, y0 + dy), (r, g, b, 255))
+
+        f1 = Image.new("RGBA", (200, 200), (255, 0, 0, 0))
+        for x in range(60):
+            for y in range(60):
+                f1.putpixel((x, y), (255, 0, 0, 255))
+
+        buf = io.BytesIO()
+        f0.save(buf, format="GIF", save_all=True, append_images=[f1], duration=[80, 80], loop=0)
+
+        out_bytes, out_ext, _ = bqb.resize_bqb_for_display(
+            buf.getvalue(), "gif", "image/gif", 168, canvas_width_px=0
+        )
+        assert out_ext == "gif"
+        with Image.open(io.BytesIO(out_bytes)) as anim:
+            out_f0 = next(ImageSequence.Iterator(anim)).convert("RGBA")
+            # 第 0 帧原本完全不透明，缩放后任一像素都不应被全局 transparency=255 误伤变透明
+            alphas = [out_f0.getpixel((x, y))[3] for x in range(0, out_f0.width, 4) for y in range(0, out_f0.height, 4)]
+            assert min(alphas) == 255

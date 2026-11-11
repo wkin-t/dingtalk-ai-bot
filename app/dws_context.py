@@ -4,7 +4,8 @@
 安全红线：
 1. 本模块绝不暴露给大模型工具调用（MCP / Function Calling），仅由服务端内部在接收消息前拉取只读上下文。
 2. 所有子进程调用必须先通过 validate_readonly_dws_args 正向白名单校验，且一律使用
-   asyncio.create_subprocess_exec（禁用 shell=True），从根源阻断发送、回复、撤回、改群、上传、下载等写操作。
+   asyncio.create_subprocess_exec（禁用 shell=True），从根源阻断发送、回复、撤回、改群、上传等写操作。
+3. 企业归属校验严格遵循 fail-closed：缺少期望 CorpId、auth status 超时/异常或企业不一致时，一律阻断后续读取。
 """
 from __future__ import annotations
 
@@ -12,12 +13,15 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Collection, Sequence
 
 from app import config as cfg
+from app.ai.history_format import get_bot_source_name
+from app.dws_files import QuotedDocExtract, fetch_quoted_media_and_docs
 
 _SHANGHAI_TZ = timezone(timedelta(hours=8))
 
@@ -27,6 +31,7 @@ _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
         "value_flags": {"-f", "--format"},
         "bool_flags": {"--readonly"},
         "required_bool_flags": set(),
+        "required_value_flags": set(),
     },
     ("chat", "message", "list"): {
         "value_flags": {
@@ -39,11 +44,51 @@ _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
         },
         "bool_flags": set(),
         "required_bool_flags": set(),
+        "required_value_flags": set(),
     },
     ("chat", "+messages-mget"): {
         "value_flags": {"--msg-ids", "-f", "--format"},
         "bool_flags": {"--no-reactions", "--no-threads"},
         "required_bool_flags": {"--no-reactions", "--no-threads"},
+        "required_value_flags": {"--msg-ids"},
+    },
+    ("chat", "message", "download-media"): {
+        "value_flags": {
+            "--conversation-id",
+            "--message-id",
+            "--resource-id",
+            "--type",
+            "--output",
+            "-f",
+            "--format",
+        },
+        "bool_flags": set(),
+        "required_bool_flags": set(),
+        "required_value_flags": {
+            "--conversation-id",
+            "--message-id",
+            "--resource-id",
+            "--type",
+            "--output",
+        },
+    },
+    ("doc", "info"): {
+        "value_flags": {"--node", "-f", "--format"},
+        "bool_flags": set(),
+        "required_bool_flags": set(),
+        "required_value_flags": {"--node"},
+    },
+    ("doc", "read"): {
+        "value_flags": {"--node", "-f", "--format"},
+        "bool_flags": set(),
+        "required_bool_flags": set(),
+        "required_value_flags": {"--node"},
+    },
+    ("drive", "download"): {
+        "value_flags": {"--node", "-f", "--format"},
+        "bool_flags": {"--url-only"},
+        "required_bool_flags": {"--url-only"},
+        "required_value_flags": {"--node"},
     },
 }
 
@@ -67,13 +112,7 @@ _PROXY_ENV_KEYS = (
     "all_proxy",
 )
 
-_BOT_DISPLAY_MAP = {
-    "gemini": "Gem",
-    "openai": "小G",
-    "anthropic": "小克",
-    "openrouter": "小克",
-    "openclaw": "Claw",
-}
+_AT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9._%+-])@([^\s@]+)")
 
 _backoff_until: float = 0.0
 _backoff_keychain_marker: tuple[tuple[str, int, int], ...] | None = None
@@ -97,6 +136,15 @@ class DwsAuthIdentity:
     user_name: str = ""
 
 
+@dataclass(frozen=True)
+class DwsCorpCheckResult:
+    """企业一致性门禁结果（fail-closed：仅 allowed=True 时允许执行后续 dws 读取）。"""
+
+    allowed: bool = False
+    corp_mismatch_error: str = ""
+    identity: DwsAuthIdentity | None = None
+
+
 @dataclass
 class DwsQuoteInfo:
     """被引用消息的结构化摘要。"""
@@ -108,15 +156,33 @@ class DwsQuoteInfo:
     text: str = ""
     create_time: str = ""
     message_type: str = ""
+    resources: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True, order=True)
+class QuoteTimelineRow:
+    """引用时间线排序行（消除裸下标元组操作）。"""
+
+    timestamp: str
+    role_rank: int
+    seq: int
+    message_id: str = field(compare=False, default="")
+    sender: str = field(compare=False, default="")
+    text: str = field(compare=False, default="")
 
 
 @dataclass
 class DwsContextBundle:
-    """单次请求由 dws 与 Stream 解析出的群聊历史与引用上下文包。"""
+    """单次请求由 dws 与 Stream 解析出的群聊历史、引用上下文、媒体文档与还原文本包。"""
 
     dws_available: bool = False
     merged_history: list[dict[str, Any]] = field(default_factory=list)
+    persistable_messages: list[dict[str, Any]] = field(default_factory=list)
+    restored_user_content: str = ""
     quote_info: DwsQuoteInfo | None = None
+    quotes: list[DwsQuoteInfo] = field(default_factory=list)
+    quoted_images: list[bytes] = field(default_factory=list)
+    quoted_documents: list[QuotedDocExtract] = field(default_factory=list)
     quote_prompt_block: str = ""
     quote_router_text: str = ""
     quote_history_prefix: str = ""
@@ -138,7 +204,7 @@ def _get_keychain_marker() -> tuple[tuple[str, int, int], ...]:
     """仅读取凭据与 profile 目录文件元数据，在登录/切企业后毫秒级失效旧缓存。"""
     entries: list[tuple[str, int, int]] = []
 
-    keychain_dir = os.getenv("DWS_KEYCHAIN_DIR", "").strip()
+    keychain_dir = cfg.get_dws_keychain_dir()
     if keychain_dir and os.path.isdir(keychain_dir):
         try:
             with os.scandir(keychain_dir) as it:
@@ -166,7 +232,7 @@ def _get_keychain_marker() -> tuple[tuple[str, int, int], ...]:
         except OSError:
             pass
 
-    config_dir = os.getenv("DWS_CONFIG_DIR", "").strip()
+    config_dir = cfg.get_dws_config_dir()
     if config_dir and os.path.isdir(config_dir):
         for fname in _AUTH_CONFIG_WATCH_FILES:
             fpath = os.path.join(config_dir, fname)
@@ -227,8 +293,8 @@ async def get_dws_auth_identity(*, force_refresh: bool = False) -> DwsAuthIdenti
     return identity
 
 
-async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
-    """校验 dws 登录企业是否与机器人所属企业一致；不一致时返回显式中文报错文案。"""
+async def check_dws_corp_access(*, expected_corp_ids: Sequence[str]) -> DwsCorpCheckResult:
+    """执行 fail-closed 企业归属校验：仅当已登录且企业精确一致时返回 allowed=True。"""
     clean_expected: list[str] = []
     for raw_cid in expected_corp_ids:
         cid = str(raw_cid or "").strip()
@@ -236,11 +302,12 @@ async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
             clean_expected.append(cid)
 
     if not clean_expected:
-        return ""
+        print("⚠️ [dws] 缺少机器人归属企业标识 (chatbot_corp_id / DWS_EXPECTED_CORP_ID)，按 fail-closed 跳过读取")
+        return DwsCorpCheckResult(allowed=False, corp_mismatch_error="")
 
     identity = await get_dws_auth_identity()
     if identity is None:
-        return ""
+        return DwsCorpCheckResult(allowed=False, corp_mismatch_error="")
 
     has_login = bool(
         identity.authenticated
@@ -249,10 +316,10 @@ async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
         or identity.corp_id
     )
     if not has_login:
-        return ""
+        return DwsCorpCheckResult(allowed=False, corp_mismatch_error="", identity=identity)
 
     if identity.corp_id and all(identity.corp_id == exp for exp in clean_expected):
-        return ""
+        return DwsCorpCheckResult(allowed=True, corp_mismatch_error="", identity=identity)
 
     dws_corp_label = (
         f"{identity.corp_name} (`{identity.corp_id}`)"
@@ -272,7 +339,13 @@ async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
         f"❌ [dws] 登录企业与机器人所在企业不一致: "
         f"dws={identity.corp_name}({identity.corp_id}) != bot={clean_expected}，已阻断读取并报错"
     )
-    return err_msg
+    return DwsCorpCheckResult(allowed=False, corp_mismatch_error=err_msg, identity=identity)
+
+
+async def verify_dws_corp_match(*, expected_corp_ids: Sequence[str]) -> str:
+    """兼容包装：若 dws 已登录且企业不一致，返回中文报错文案。"""
+    res = await check_dws_corp_access(expected_corp_ids=expected_corp_ids)
+    return res.corp_mismatch_error
 
 
 def log_dws_startup_status_sync() -> None:
@@ -325,8 +398,10 @@ def validate_readonly_dws_args(args: Sequence[str]) -> list[str]:
     value_flags = spec["value_flags"]
     bool_flags = spec["bool_flags"]
     required_bool_flags = spec["required_bool_flags"]
+    required_value_flags = spec.get("required_value_flags", set())
 
     seen_bool_flags: set[str] = set()
+    seen_value_flags: set[str] = set()
     output_format: str | None = None
 
     rest = normalized[len(matched_prefix) :]
@@ -340,7 +415,8 @@ def validate_readonly_dws_args(args: Sequence[str]) -> list[str]:
             flag, val = token.split("=", 1)
             if flag not in value_flags or not val:
                 raise PermissionError(f"禁止使用未授权的 dws 参数: {token}")
-            _validate_flag_value(flag, val)
+            _validate_flag_value(matched_prefix, flag, val)
+            seen_value_flags.add(flag)
             if flag in {"-f", "--format"}:
                 output_format = val
             idx += 1
@@ -352,7 +428,8 @@ def validate_readonly_dws_args(args: Sequence[str]) -> list[str]:
             val = rest[idx + 1]
             if not val or val.startswith("-"):
                 raise PermissionError(f"dws 参数值非法: {token}={val}")
-            _validate_flag_value(token, val)
+            _validate_flag_value(matched_prefix, token, val)
+            seen_value_flags.add(token)
             if token in {"-f", "--format"}:
                 output_format = val
             idx += 2
@@ -369,13 +446,17 @@ def validate_readonly_dws_args(args: Sequence[str]) -> list[str]:
         missing = sorted(required_bool_flags - seen_bool_flags)
         raise PermissionError(f"dws 只读命令缺少必选安全参数: {missing}")
 
+    if not required_value_flags.issubset(seen_value_flags):
+        missing_v = sorted(required_value_flags - seen_value_flags)
+        raise PermissionError(f"dws 只读命令缺少必选参数: {missing_v}")
+
     if output_format != "json":
         raise PermissionError("dws 只读调用必须显式指定 -f json / --format json")
 
     return normalized
 
 
-def _validate_flag_value(flag: str, val: str) -> None:
+def _validate_flag_value(matched_prefix: tuple[str, ...], flag: str, val: str) -> None:
     if flag in {"-f", "--format"} and val != "json":
         raise PermissionError(f"仅允许 json 输出格式，实际收到: {val}")
     if flag == "--direction" and val not in {"older", "newer"}:
@@ -387,6 +468,20 @@ def _validate_flag_value(flag: str, val: str) -> None:
             raise PermissionError(f"--limit 必须为整数: {val}") from exc
         if n < 1 or n > 100:
             raise PermissionError(f"--limit 超出安全范围 [1, 100]: {n}")
+    if matched_prefix == ("chat", "message", "download-media"):
+        if flag == "--type" and val != "mediaId":
+            raise PermissionError(f"download-media 仅允许 --type mediaId，拒绝: {val}")
+        if flag == "--output":
+            real_out = os.path.realpath(val)
+            real_tmp = os.path.realpath(tempfile.gettempdir())
+            base = os.path.basename(real_out)
+            if (
+                real_out == real_tmp
+                or not real_out.startswith(real_tmp + os.sep)
+                or not base.startswith("dws_ro_media_")
+                or not os.path.isdir(real_out)
+            ):
+                raise PermissionError(f"download-media 仅允许写入受控只读临时目录，拒绝: {val}")
 
 
 def normalize_dws_timestamp(raw_ts: Any) -> str:
@@ -470,6 +565,13 @@ def extract_messages_from_payload(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_resources_from_dict(src: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_res = src.get("resources")
+    if isinstance(raw_res, list):
+        return [dict(r) for r in raw_res if isinstance(r, dict)]
+    return []
+
+
 def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
     if not isinstance(q, dict):
         return None
@@ -481,6 +583,7 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         q.get("createTime") or q.get("createdAt") or q.get("sendTime")
     )
     msg_type = str(q.get("messageType") or q.get("msgType") or "").strip()
+    resources = _extract_resources_from_dict(q)
 
     text = ""
     if isinstance(q.get("text"), str) and q["text"].strip():
@@ -489,7 +592,7 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         raw_content = q.get("content")
         text = _extract_text_from_stream_content(raw_content, msg_type=msg_type)
 
-    if not msg_id and not text:
+    if not msg_id and not text and not resources:
         return None
 
     return DwsQuoteInfo(
@@ -500,6 +603,7 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         text=text,
         create_time=create_time,
         message_type=msg_type,
+        resources=resources,
     )
 
 
@@ -562,8 +666,8 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
     timestamp = normalize_dws_timestamp(
         item.get("createTime") or item.get("createdAt") or item.get("sendTime")
     )
+    resources = _extract_resources_from_dict(item)
 
-    # dws projectChatMessageItem 将清洗后的可读正文放在 text，content 可能仍是原始 JSON/密文
     raw_text = ""
     if isinstance(item.get("text"), str):
         raw_text = item["text"].strip()
@@ -581,7 +685,11 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         or "<font color='#808080'" in raw_text
     )
 
-    quoted_info = _parse_quote_dict(item["quotedMessage"]) if isinstance(item.get("quotedMessage"), dict) else None
+    quoted_info = (
+        _parse_quote_dict(item["quotedMessage"])
+        if isinstance(item.get("quotedMessage"), dict)
+        else None
+    )
 
     forwarded_parts: list[str] = []
     if isinstance(item.get("forwarded"), list):
@@ -613,6 +721,7 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "is_noise": is_noise,
         "is_bot_like": is_bot_like,
         "quoted": quoted_info,
+        "resources": resources,
     }
 
 
@@ -667,7 +776,6 @@ async def run_dws_readonly_json(
     if now < _backoff_until:
         current_marker = _get_keychain_marker()
         if _backoff_keychain_marker is not None and current_marker != _backoff_keychain_marker:
-            # 管理员刚完成设备码登录写入凭据，立即解除退避
             _backoff_until = 0.0
             _backoff_keychain_marker = None
         else:
@@ -703,7 +811,9 @@ async def run_dws_readonly_json(
             await proc.wait()
         except Exception:
             pass
-        print(f"⚠️ [dws] 只读查询超时 ({timeout:.1f}s): {validated_args[:3]}，降级使用本地历史")
+        _backoff_keychain_marker = _get_keychain_marker()
+        _backoff_until = time.monotonic() + min(10.0, float(cfg.DWS_AUTH_BACKOFF_SECONDS))
+        print(f"⚠️ [dws] 只读查询超时 ({timeout:.1f}s): {validated_args[:3]}，短期退避并降级使用本地历史")
         return None
 
     raw_out = (stdout_bytes or b"").decode("utf-8", errors="replace").strip()
@@ -755,10 +865,82 @@ def _normalize_for_dedup(text: str) -> str:
     """归一化消息文本用于匹配同一条 @机器人 消息（剥离引用头、@提及、图片计数与空白）。"""
     s = str(text or "").strip()
     s = re.sub(r"^\[引用[^\]]*\]\s*", "", s)
-    s = re.sub(r"@[^\s@]+", "", s)
-    s = re.sub(r"\[图片x\d+\]", "", s)
+    s = _AT_TOKEN_RE.sub("", s)
+    s = re.sub(r"\[(?:引用)?图片x\d+\]", "", s)
     s = re.sub(r"\s+", "", s)
     return s.lower()
+
+
+def _is_self_bot_mention_name(mention_name: str, *, bot_id: str = "", bot_name: str = "") -> bool:
+    """判断 @提及词是否指向当前容器自身的机器人（保留对人类同事或其他机器人的 @提及）。"""
+    cleaned = mention_name.strip().rstrip("，,。！!？?：:；;)")
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+
+    explicit_names = {
+        str(bot_name or "").strip().lower(),
+        str(cfg.get_bot_display_name() or "").strip().lower(),
+    }
+    explicit_names.discard("")
+    if lower in explicit_names:
+        return True
+
+    bid = (bot_id or cfg.BOT_ID or "").strip().lower()
+    if bid == "gemini":
+        return lower == "gem" or lower.startswith("gemini") or ("gemini" in lower and ("助手" in lower or "机器人" in lower or "bot" in lower))
+    if bid in {"anthropic", "openrouter"}:
+        return lower in {"小克", "小克助手"} or "claude" in lower
+    if bid == "openai":
+        return lower in {"小g", "小g助手"} or "gpt" in lower or "openai" in lower
+    if bid == "openclaw":
+        return "claw" in lower
+    return False
+
+
+def restore_at_mentions_from_dws_text(
+    stream_text: str,
+    dws_text: str,
+    *,
+    bot_id: str = "",
+    bot_name: str = "",
+) -> str:
+    """利用 dws 完整文本还原被钉钉 Stream 剥除的 @人类同事 提及，同时剔除 @当前机器人。"""
+    raw_dws = (dws_text or "").strip()
+    if not raw_dws or "@" not in raw_dws:
+        return stream_text
+
+    stream_mentions = {m.group(1) for m in _AT_TOKEN_RE.finditer(stream_text or "")}
+    dws_mentions = [m.group(1) for m in _AT_TOKEN_RE.finditer(raw_dws)]
+    if not dws_mentions:
+        return stream_text
+
+    def _replace_at(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if _is_self_bot_mention_name(name, bot_id=bot_id, bot_name=bot_name):
+            return ""
+        return match.group(0)
+
+    cleaned = _AT_TOKEN_RE.sub(_replace_at, raw_dws)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    remaining_mentions = {m.group(1) for m in _AT_TOKEN_RE.finditer(cleaned)}
+    if remaining_mentions - stream_mentions:
+        return cleaned
+    return stream_text
+
+
+def _has_non_bot_at_users(incoming_messages: Sequence[Any], chatbot_user_id: str) -> bool:
+    for msg in incoming_messages:
+        at_list = getattr(msg, "at_users", None) or []
+        for entry in at_list:
+            uid = ""
+            if isinstance(entry, dict):
+                uid = str(entry.get("dingtalkId") or entry.get("staffId") or "").strip()
+            else:
+                uid = str(getattr(entry, "dingtalk_id", "") or getattr(entry, "staff_id", "") or "").strip()
+            if uid and (not chatbot_user_id or uid != chatbot_user_id):
+                return True
+    return False
 
 
 def _format_inline_dws_user_content(item: dict[str, Any]) -> str:
@@ -774,6 +956,43 @@ def _format_inline_dws_user_content(item: dict[str, Any]) -> str:
         if not body.startswith("[引用"):
             return f"{prefix} {body}".strip()
     return body
+
+
+def extract_persistable_dws_messages(
+    dws_items: Sequence[dict[str, Any]],
+    *,
+    current_message_ids: Collection[str] = (),
+    chatbot_user_id: str = "",
+    ignore_senders: Collection[str] = (),
+) -> list[dict[str, Any]]:
+    """提取可持久化写入数据库/文件的群聊人类消息（不受单 bot /clear cutoff 影响，排除本轮未完结消息）。"""
+    excluded_ids = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
+    ignored_nicks = {str(s).strip() for s in ignore_senders if str(s).strip()}
+    out: list[dict[str, Any]] = []
+
+    for item in dws_items:
+        mid = str(item.get("message_id") or "").strip()
+        ts = str(item.get("timestamp") or "").strip()
+        if not mid or not ts or mid in excluded_ids:
+            continue
+        if item.get("is_noise") or item.get("is_bot_like"):
+            continue
+        if chatbot_user_id and item.get("sender_id") == chatbot_user_id:
+            continue
+        if item.get("sender") and item["sender"] in ignored_nicks:
+            continue
+        content = _format_inline_dws_user_content(item).strip()
+        if not content:
+            continue
+        out.append(
+            {
+                "external_msg_id": mid,
+                "content": content,
+                "sender_nick": item.get("sender") or "User",
+                "timestamp": ts,
+            }
+        )
+    return out
 
 
 def merge_dws_group_messages_with_history(
@@ -796,12 +1015,12 @@ def merge_dws_group_messages_with_history(
             continue
         filtered_history.append(msg)
 
-    assistant_norm_texts = {
-        _normalize_for_dedup(m.get("content", ""))
+    # 仅针对长文本且落在相近时间窗内的非标记 webhook 机器人复读做去重，绝不误杀人类短回复（如「收到」「🙂」）
+    assistant_timed_norms: list[tuple[float | None, str]] = [
+        (_parse_ts_epoch(str(m.get("timestamp") or "")), _normalize_for_dedup(m.get("content", "")))
         for m in filtered_history
         if m.get("role") == "assistant" and m.get("content")
-    }
-    assistant_norm_texts.discard("")
+    ]
 
     human_dws: list[dict[str, Any]] = []
     for item in dws_items:
@@ -820,24 +1039,76 @@ def merge_dws_group_messages_with_history(
         display_text = item.get("display_text", "").strip()
         if not display_text:
             continue
+
         norm = _normalize_for_dedup(display_text)
-        if norm and norm in assistant_norm_texts:
-            continue
+        if norm and len(norm) >= 16:
+            d_ep = _parse_ts_epoch(ts)
+            if any(
+                a_norm == norm
+                and (d_ep is None or a_ep is None or -15.0 <= (a_ep - d_ep) <= 180.0)
+                for a_ep, a_norm in assistant_timed_norms
+            ):
+                continue
+
         human_dws.append(item)
 
-    # 匹配机器人历史中的 user 消息与 dws 中的同一条发言（机器人历史在流式结束才保存，时间戳滞后数秒至两分钟）
     matched_history_user_indices: set[int] = set()
     used_dws_indices: set[int] = set()
+    skipped_dws_indices: set[int] = set()
     dws_override_content: dict[int, str] = {}
 
     for h_idx, h_msg in enumerate(filtered_history):
         if h_msg.get("role") != "user":
             continue
         h_content = str(h_msg.get("content") or "")
+        h_ext_id = str(h_msg.get("external_msg_id") or "").strip()
         h_norm = _normalize_for_dedup(h_content)
+        h_norm_lines = [
+            _normalize_for_dedup(line)
+            for line in h_content.splitlines()
+            if _normalize_for_dedup(line)
+        ]
         h_sender = str(h_msg.get("sender_nick") or "").strip()
         h_epoch = _parse_ts_epoch(str(h_msg.get("timestamp") or ""))
 
+        # 1. 多行 2s 缓冲消息（A\nB）：匹配同一发送者在相近时间窗内的各拆分单条消息
+        if len(h_norm_lines) > 1:
+            line_matches: list[int] = []
+            remaining_lines = list(h_norm_lines)
+            for d_idx, d_item in enumerate(human_dws):
+                if d_idx in used_dws_indices:
+                    continue
+                d_mid = str(d_item.get("message_id") or "").strip()
+                if h_ext_id and d_mid == h_ext_id:
+                    line_matches.append(d_idx)
+                    d_norm = _normalize_for_dedup(d_item.get("raw_text") or d_item.get("display_text", ""))
+                    if d_norm in remaining_lines:
+                        remaining_lines.remove(d_norm)
+                    continue
+                d_sender = d_item.get("sender", "")
+                if h_sender and d_sender and h_sender != d_sender:
+                    continue
+                d_epoch = _parse_ts_epoch(d_item.get("timestamp", ""))
+                if h_epoch is not None and d_epoch is not None:
+                    delta = h_epoch - d_epoch
+                    if delta < -20 or delta > 300:
+                        continue
+                d_norm = _normalize_for_dedup(d_item.get("raw_text") or d_item.get("display_text", ""))
+                if d_norm and d_norm in remaining_lines:
+                    remaining_lines.remove(d_norm)
+                    line_matches.append(d_idx)
+
+            if line_matches:
+                used_dws_indices.update(line_matches)
+                if not remaining_lines:
+                    # 全部拆分行均在 dws 窗口中：保留带精确时间与 @提及 的 dws 行，移除合并副本
+                    matched_history_user_indices.add(h_idx)
+                else:
+                    # 仅部分行落在窗口边界：隐藏部分 dws 行，保留完整历史合并消息防丢字
+                    skipped_dws_indices.update(line_matches)
+                continue
+
+        # 2. 单行消息匹配（优先按 external_msg_id，其次按发送者+时间窗+归一化文本）
         best_d_idx: int | None = None
         best_score: float = float("inf")
         best_is_image_only = False
@@ -845,6 +1116,14 @@ def merge_dws_group_messages_with_history(
         for d_idx, d_item in enumerate(human_dws):
             if d_idx in used_dws_indices:
                 continue
+            d_mid = str(d_item.get("message_id") or "").strip()
+            if h_ext_id and d_mid == h_ext_id:
+                best_d_idx = d_idx
+                best_is_image_only = (
+                    d_item.get("display_text") == "[图片]" and "[图片" in h_content
+                )
+                break
+
             d_sender = d_item.get("sender", "")
             if h_sender and d_sender and h_sender != d_sender:
                 continue
@@ -877,22 +1156,20 @@ def merge_dws_group_messages_with_history(
     seq = 0
 
     for d_idx, d_item in enumerate(human_dws):
+        if d_idx in skipped_dws_indices:
+            continue
         seq += 1
         content_val = dws_override_content.get(d_idx) or _format_inline_dws_user_content(d_item)
         ts_val = d_item.get("timestamp", "")
-        combined_entries.append(
-            (
-                ts_val,
-                0,
-                seq,
-                {
-                    "role": "user",
-                    "content": content_val,
-                    "timestamp": ts_val,
-                    "sender_nick": d_item.get("sender") or "User",
-                },
-            )
-        )
+        entry_dict: dict[str, Any] = {
+            "role": "user",
+            "content": content_val,
+            "timestamp": ts_val,
+            "sender_nick": d_item.get("sender") or "User",
+        }
+        if d_item.get("message_id"):
+            entry_dict["external_msg_id"] = d_item["message_id"]
+        combined_entries.append((ts_val, 0, seq, entry_dict))
 
     for h_idx, h_msg in enumerate(filtered_history):
         role = h_msg.get("role", "user")
@@ -910,15 +1187,21 @@ def merge_dws_group_messages_with_history(
     return merged
 
 
-def _merge_quote_infos(primary: DwsQuoteInfo | None, secondary: DwsQuoteInfo | None) -> DwsQuoteInfo | None:
-    if primary is None:
-        return secondary
-    if secondary is None:
-        return primary
-
+def _merge_same_quote_info(primary: DwsQuoteInfo, secondary: DwsQuoteInfo) -> DwsQuoteInfo:
+    """仅在同一被引用消息内部补齐缺失字段与资源，绝不跨不同引用消息混拼。"""
     p_text = primary.text if primary.text not in _NOISE_TEXTS else ""
     s_text = secondary.text if secondary.text not in _NOISE_TEXTS else ""
     chosen_text = p_text or s_text or primary.text or secondary.text
+
+    merged_res: list[dict[str, Any]] = []
+    seen_res: set[str] = set()
+    for res in [*(primary.resources or []), *(secondary.resources or [])]:
+        if not isinstance(res, dict):
+            continue
+        rk = str(res.get("resourceId") or res.get("url") or json.dumps(res, sort_keys=True))
+        if rk not in seen_res:
+            seen_res.add(rk)
+            merged_res.append(res)
 
     return DwsQuoteInfo(
         message_id=primary.message_id or secondary.message_id,
@@ -928,6 +1211,64 @@ def _merge_quote_infos(primary: DwsQuoteInfo | None, secondary: DwsQuoteInfo | N
         text=chosen_text,
         create_time=primary.create_time or secondary.create_time,
         message_type=primary.message_type or secondary.message_type,
+        resources=merged_res,
+    )
+
+
+def _append_or_merge_quote(quotes: list[DwsQuoteInfo], candidate: DwsQuoteInfo | None) -> None:
+    if candidate is None:
+        return
+    for idx, existing in enumerate(quotes):
+        same_id = bool(
+            existing.message_id
+            and candidate.message_id
+            and existing.message_id == candidate.message_id
+        )
+        same_idless_text = bool(
+            (not existing.message_id or not candidate.message_id)
+            and existing.text
+            and candidate.text
+            and _normalize_for_dedup(existing.text) == _normalize_for_dedup(candidate.text)
+        )
+        if same_id or same_idless_text:
+            quotes[idx] = _merge_same_quote_info(existing, candidate)
+            return
+    quotes.append(candidate)
+
+
+def _quote_needs_mget_hydration(quote: DwsQuoteInfo) -> bool:
+    if not quote.message_id:
+        return False
+    if (
+        not quote.create_time
+        or not quote.sender
+        or not quote.text
+        or quote.text in _NOISE_TEXTS
+    ):
+        return True
+    if not quote.resources:
+        q_type = quote.message_type.lower()
+        if (
+            q_type in {"picture", "image", "photo", "file", "richtext"}
+            or quote.text == "[图片]"
+            or "[图片]" in quote.text
+            or quote.text.startswith("[文件]")
+            or "fileId:" in quote.text
+        ):
+            return True
+    return False
+
+
+def _item_to_quote_info(item: dict[str, Any]) -> DwsQuoteInfo:
+    return DwsQuoteInfo(
+        message_id=item.get("message_id", ""),
+        conversation_id=item.get("conversation_id", ""),
+        sender=item.get("sender", ""),
+        sender_id=item.get("sender_id", ""),
+        text=item.get("display_text", ""),
+        create_time=item.get("timestamp", ""),
+        message_type=item.get("message_type", ""),
+        resources=list(item.get("resources") or []),
     )
 
 
@@ -955,7 +1296,6 @@ def _enrich_quote_from_history(
         m_epoch = _parse_ts_epoch(str(msg.get("timestamp") or ""))
         if m_epoch is None:
             continue
-        # 卡片在流式开始前创建（q_epoch），历史在流式结束后落盘（m_epoch），通常 m_epoch >= q_epoch
         delta = m_epoch - q_epoch
         if -15.0 <= delta <= 240.0 and abs(delta) < best_distance:
             best_distance = abs(delta)
@@ -963,7 +1303,7 @@ def _enrich_quote_from_history(
 
     if best_match is not None:
         bot_id = str(best_match.get("bot_id") or "")
-        recovered_sender = quote.sender or _BOT_DISPLAY_MAP.get(bot_id, "AI助手")
+        recovered_sender = quote.sender or (get_bot_source_name(bot_id) if bot_id else "AI助手")
         return DwsQuoteInfo(
             message_id=quote.message_id,
             conversation_id=quote.conversation_id,
@@ -972,6 +1312,7 @@ def _enrich_quote_from_history(
             text=str(best_match["content"]).strip(),
             create_time=quote.create_time,
             message_type=quote.message_type,
+            resources=list(quote.resources),
         )
 
     return quote
@@ -987,9 +1328,9 @@ def _build_quote_neighbor_lines(
 ) -> list[str]:
     """在引用消息所处时间点附近组装前后上下文行（含同时间段的机器人历史回复）。"""
     excluded = {str(x).strip() for x in current_message_ids if str(x).strip()}
-    timeline: list[tuple[str, int, str, str, str]] = []
-    # 元素: (timestamp, rank, message_id, sender, text)
+    timeline: list[QuoteTimelineRow] = []
     seen_ids: set[str] = set()
+    seq = 0
 
     for item in neighbor_items:
         mid = item.get("message_id", "")
@@ -998,17 +1339,18 @@ def _build_quote_neighbor_lines(
         if mid:
             seen_ids.add(mid)
 
-        # 若该条正是被引用的目标消息，允许使用已恢复的 quote.text
         if quote.message_id and mid == quote.message_id:
             q_text = (quote.text or item.get("display_text") or "").strip()
             if q_text and q_text not in _NOISE_TEXTS:
+                seq += 1
                 timeline.append(
-                    (
-                        quote.create_time or item.get("timestamp", ""),
-                        0,
-                        mid,
-                        quote.sender or item.get("sender") or "群成员",
-                        q_text,
+                    QuoteTimelineRow(
+                        timestamp=quote.create_time or item.get("timestamp", ""),
+                        role_rank=0,
+                        seq=seq,
+                        message_id=mid,
+                        sender=quote.sender or item.get("sender") or "群成员",
+                        text=q_text,
                     )
                 )
             continue
@@ -1018,31 +1360,33 @@ def _build_quote_neighbor_lines(
         text = item.get("display_text", "").strip()
         if not text:
             continue
+        seq += 1
         timeline.append(
-            (
-                item.get("timestamp", ""),
-                0,
-                mid,
-                item.get("sender") or "群成员",
-                text,
+            QuoteTimelineRow(
+                timestamp=item.get("timestamp", ""),
+                role_rank=0,
+                seq=seq,
+                message_id=mid,
+                sender=item.get("sender") or "群成员",
+                text=text,
             )
         )
 
-    # 若目标引用消息不在 neighbor_items（例如引用的是一张已被过滤的 AI 卡片），补入锚点
-    has_target = any(quote.message_id and row[2] == quote.message_id for row in timeline)
+    has_target = any(quote.message_id and row.message_id == quote.message_id for row in timeline)
     if not has_target and quote.text and quote.text not in _NOISE_TEXTS:
+        seq += 1
         timeline.append(
-            (
-                quote.create_time,
-                0,
-                quote.message_id or "__quoted_target__",
-                quote.sender or "群成员",
-                quote.text,
+            QuoteTimelineRow(
+                timestamp=quote.create_time,
+                role_rank=0,
+                seq=seq,
+                message_id=quote.message_id or "__quoted_target__",
+                sender=quote.sender or "群成员",
+                text=quote.text,
             )
         )
 
-    # 将引用窗口时间段内的机器人历史回复也穿插进来，还原完整对话脉络
-    epochs = [e for row in timeline if (e := _parse_ts_epoch(row[0])) is not None]
+    epochs = [e for row in timeline if (e := _parse_ts_epoch(row.timestamp)) is not None]
     if epochs:
         min_ep, max_ep = min(epochs) - 15.0, max(epochs) + 180.0
         for h_msg in history_messages:
@@ -1055,20 +1399,31 @@ def _build_quote_neighbor_lines(
             h_text = str(h_msg.get("content") or "").strip()
             if not h_text or h_text == quote.text:
                 continue
-            bot_name = _BOT_DISPLAY_MAP.get(str(h_msg.get("bot_id") or ""), "AI助手")
-            timeline.append((h_ts, 1, "", bot_name, h_text))
+            bot_id = str(h_msg.get("bot_id") or "")
+            bot_name = get_bot_source_name(bot_id) if bot_id else "AI助手"
+            seq += 1
+            timeline.append(
+                QuoteTimelineRow(
+                    timestamp=h_ts,
+                    role_rank=1,
+                    seq=seq,
+                    message_id="",
+                    sender=bot_name,
+                    text=h_text,
+                )
+            )
 
-    timeline.sort(key=lambda r: (r[0], r[1]))
+    timeline.sort()
 
     target_idx = -1
     for idx, row in enumerate(timeline):
-        if quote.message_id and row[2] == quote.message_id:
+        if quote.message_id and row.message_id == quote.message_id:
             target_idx = idx
             break
-        if row[2] == "__quoted_target__":
+        if row.message_id == "__quoted_target__":
             target_idx = idx
             break
-        if quote.text and row[4] == quote.text:
+        if quote.text and row.text == quote.text:
             target_idx = idx
             break
 
@@ -1082,59 +1437,92 @@ def _build_quote_neighbor_lines(
         rel_target = -1
 
     lines: list[str] = []
-    for i, (ts, _rk, _mid, sender, text) in enumerate(sliced):
-        compact = text.replace("\n", " ").strip()
+    for i, row in enumerate(sliced):
+        compact = row.text.replace("\n", " ").strip()
         if len(compact) > 220:
             compact = compact[:220] + "…"
-        ts_part = f"[{ts}] " if ts else ""
+        ts_part = f"[{row.timestamp}] " if row.timestamp else ""
         marker = "👉 " if i == rel_target else ""
-        lines.append(f"- {marker}{ts_part}{sender}: {compact}")
+        lines.append(f"- {marker}{ts_part}{row.sender}: {compact}")
     return lines
 
 
-def _format_quote_outputs(
-    quote: DwsQuoteInfo,
-    neighbor_lines: Sequence[str],
+def _format_multi_quote_outputs(
+    quotes_with_neighbors: Sequence[tuple[DwsQuoteInfo, Sequence[str]]],
+    quoted_documents: Sequence[QuotedDocExtract],
+    quoted_images_count: int,
     raw_user_content: str,
 ) -> tuple[str, str, str]:
-    """生成：(1) 主模型 <quoted_context> 块；(2) 路由预分析增强文本；(3) 历史落盘短前缀。"""
-    q_sender = quote.sender or "群成员"
-    q_time_part = f"[{quote.create_time}] " if quote.create_time else ""
-    q_body = (quote.text or "[引用消息]").strip()
-    if len(q_body) > 800:
-        q_body = q_body[:800] + "…"
+    """生成支持单/多引用、引用图片与引用文档正文的统一输出块。"""
+    block_lines = ["<quoted_context>"]
+    router_summaries: list[str] = []
+    history_prefixes: list[str] = []
 
-    block_lines = [
-        "<quoted_context>",
-        f"[被引用原消息] {q_time_part}{q_sender}: {q_body}",
-    ]
-    if len(neighbor_lines) > 1:
-        block_lines.append("[引用处前后上下文]")
-        block_lines.extend(neighbor_lines)
+    multi = len(quotes_with_neighbors) > 1
+    for idx, (quote, neighbor_lines) in enumerate(quotes_with_neighbors, start=1):
+        q_sender = quote.sender or "群成员"
+        q_time_part = f"[{quote.create_time}] " if quote.create_time else ""
+        q_body = (quote.text or "[引用消息]").strip()
+        if len(q_body) > 800:
+            q_body = q_body[:800] + "…"
+
+        label = f"[被引用原消息 #{idx}]" if multi else "[被引用原消息]"
+        block_lines.append(f"{label} {q_time_part}{q_sender}: {q_body}")
+        if len(neighbor_lines) > 1:
+            ctx_label = f"[引用 #{idx} 处前后上下文]" if multi else "[引用处前后上下文]"
+            block_lines.append(ctx_label)
+            block_lines.extend(neighbor_lines)
+
+        router_q = q_body.replace("\n", " ")
+        if len(router_q) > 240:
+            router_q = router_q[:240] + "…"
+        router_neighbors = " / ".join(line.lstrip("- ") for line in neighbor_lines[:5])
+        if router_neighbors:
+            router_summaries.append(f"{q_sender}: {router_q}（上下文：{router_neighbors}）")
+        else:
+            router_summaries.append(f"{q_sender}: {router_q}")
+
+        short_q = q_body.replace("\n", " ").strip()
+        if len(short_q) > 50:
+            short_q = short_q[:50] + "…"
+        history_prefixes.append(f"[引用 {q_sender}: {short_q}]")
+
+    if quoted_images_count > 0:
+        block_lines.append(f"[被引用图片] 已提取 {quoted_images_count} 张原图并附带至多模态视觉输入。")
+
+    doc_router_names: list[str] = []
+    for doc in quoted_documents:
+        doc_router_names.append(f"{doc.name}({doc.extension})")
+        header = f"[被引用文档正文: {doc.name} ({doc.extension})]"
+        if doc.content:
+            block_lines.append(header)
+            block_lines.append(doc.content)
+        elif doc.note:
+            block_lines.append(f"{header} {doc.note}")
+
     block_lines.append("</quoted_context>")
     prompt_block = "\n".join(block_lines)
 
-    router_q = q_body.replace("\n", " ")
-    if len(router_q) > 300:
-        router_q = router_q[:300] + "…"
-    router_neighbors = " / ".join(line.lstrip("- ") for line in neighbor_lines[:6])
-    if router_neighbors:
-        router_text = (
-            f"[用户正在引用消息（{q_sender}: {router_q}）；引用处上下文：{router_neighbors}]\n"
-            f"用户当前发言: {raw_user_content}"
-        )
-    else:
-        router_text = (
-            f"[用户正在引用消息（{q_sender}: {router_q}）]\n"
-            f"用户当前发言: {raw_user_content}"
-        )
-
-    short_q = q_body.replace("\n", " ").strip()
-    if len(short_q) > 60:
-        short_q = short_q[:60] + "…"
-    history_prefix = f"[引用 {q_sender}: {short_q}] "
-
+    doc_part = f"；附带引用文档：{', '.join(doc_router_names)}" if doc_router_names else ""
+    img_part = f"；附带引用图片 {quoted_images_count} 张" if quoted_images_count > 0 else ""
+    router_text = (
+        f"[用户正在引用消息（{' | '.join(router_summaries)}{doc_part}{img_part}）]\n"
+        f"用户当前发言: {raw_user_content}"
+    )
+    history_prefix = " ".join(history_prefixes) + " "
     return prompt_block, router_text, history_prefix
+
+
+def _extract_single_incoming_stream_text(msg_obj: Any, fallback_text: str = "") -> str:
+    text_attr = getattr(msg_obj, "text", None)
+    if text_attr is not None and isinstance(getattr(text_attr, "content", None), str):
+        return text_attr.content.strip()
+    if callable(getattr(msg_obj, "get_text_list", None)):
+        try:
+            return "".join(msg_obj.get_text_list() or []).strip()
+        except Exception:
+            pass
+    return fallback_text
 
 
 def _identify_current_dws_items(
@@ -1162,19 +1550,10 @@ def _identify_current_dws_items(
         m_sender = str(getattr(msg_obj, "sender_nick", "") or "").strip()
         m_ts = normalize_dws_timestamp(getattr(msg_obj, "create_at", None))
         m_epoch = _parse_ts_epoch(m_ts)
-
-        part_text = ""
-        text_attr = getattr(msg_obj, "text", None)
-        if text_attr is not None and isinstance(getattr(text_attr, "content", None), str):
-            part_text = text_attr.content
-        elif callable(getattr(msg_obj, "get_text_list", None)):
-            try:
-                part_text = "".join(msg_obj.get_text_list() or [])
-            except Exception:
-                part_text = ""
-        if not part_text and len(incoming_messages) == 1:
-            part_text = raw_user_content
-
+        part_text = _extract_single_incoming_stream_text(
+            msg_obj,
+            fallback_text=raw_user_content if len(incoming_messages) == 1 else "",
+        )
         m_norm = _normalize_for_dedup(part_text)
 
         for idx in range(len(recent_dws_items) - 1, -1, -1):
@@ -1205,6 +1584,55 @@ def _identify_current_dws_items(
                 break
 
     return matched_items, effective_ids
+
+
+def _build_restored_user_content(
+    incoming_messages: Sequence[Any],
+    matched_incoming_items: Sequence[dict[str, Any]],
+    raw_user_content: str,
+) -> str:
+    """将匹配到的当前轮 dws 原文中的 @人类同事 提及还原回用户本轮输入。"""
+    if not matched_incoming_items or not raw_user_content:
+        return ""
+
+    by_id = {
+        str(it.get("message_id") or "").strip(): it
+        for it in matched_incoming_items
+        if it.get("message_id")
+    }
+
+    if len(incoming_messages) <= 1:
+        item = matched_incoming_items[0]
+        cand = restore_at_mentions_from_dws_text(
+            raw_user_content,
+            item.get("raw_text") or item.get("display_text", ""),
+            bot_id=cfg.BOT_ID,
+            bot_name=cfg.BOT_NAME,
+        )
+        return cand if cand != raw_user_content else ""
+
+    restored_parts: list[str] = []
+    changed = False
+    fallback_iter = iter(matched_incoming_items)
+    for msg_obj in incoming_messages:
+        stream_part = _extract_single_incoming_stream_text(msg_obj)
+        mid = str(getattr(msg_obj, "message_id", "") or "").strip()
+        dws_it = by_id.get(mid) or next(fallback_iter, None)
+        if dws_it and stream_part:
+            restored_p = restore_at_mentions_from_dws_text(
+                stream_part,
+                dws_it.get("raw_text") or dws_it.get("display_text", ""),
+                bot_id=cfg.BOT_ID,
+                bot_name=cfg.BOT_NAME,
+            )
+            if restored_p != stream_part:
+                changed = True
+            restored_parts.append(restored_p)
+        elif stream_part:
+            restored_parts.append(stream_part)
+
+    joined = "\n".join(p for p in restored_parts if p)
+    return joined if (changed and joined) else ""
 
 
 def _find_quote_target_in_items(
@@ -1243,13 +1671,13 @@ async def fetch_dws_context_bundle(
     quote_before: int | None = None,
     quote_after: int | None = None,
 ) -> DwsContextBundle:
-    """拉取只读群聊近期消息并解析引用消息及引用处上下文。"""
+    """拉取只读群聊近期消息、还原 @提及、并解析引用消息/上下文/图片/文档。"""
     limit_val = context_limit if context_limit is not None else cfg.DWS_CONTEXT_LIMIT
     before_val = quote_before if quote_before is not None else cfg.DWS_QUOTE_CONTEXT_BEFORE
     after_val = quote_after if quote_after is not None else cfg.DWS_QUOTE_CONTEXT_AFTER
 
-    # 1. 先提取钉钉 Stream 自带的引用线索与机器人归属企业 CorpId（零网络开销）
-    stream_quote: DwsQuoteInfo | None = None
+    # 1. 提取钉钉 Stream 自带的引用线索（支持 2s 窗口多条引用独立保存）与机器人归属企业 CorpId
+    quotes: list[DwsQuoteInfo] = []
     chatbot_user_id = ""
     expected_corp_ids: list[str] = []
     cfg_expected_corp = str(getattr(cfg, "DWS_EXPECTED_CORP_ID", "") or "").strip()
@@ -1263,30 +1691,31 @@ async def fetch_dws_context_bundle(
         if msg_bot_corp and msg_bot_corp not in expected_corp_ids:
             expected_corp_ids.append(msg_bot_corp)
         hint = extract_stream_quote_hint(msg_obj)
-        if hint is not None:
-            stream_quote = _merge_quote_infos(stream_quote, hint)
+        _append_or_merge_quote(quotes, hint)
 
     if len(history_messages) > cfg.MAX_HISTORY_LENGTH:
         fallback_history = list(history_messages[-cfg.MAX_HISTORY_LENGTH :])
     else:
         fallback_history = list(history_messages)
 
-    # 1.5 企业一致性门禁：若 dws 登录的企业与当前机器人归属企业不一致，严禁拉取任何消息并立即报错
+    # 1.5 企业一致性门禁（严格 fail-closed）
     need_dws = (is_group and bool(conversation_id) and cfg.ENABLE_DWS_GROUP_CONTEXT) or cfg.ENABLE_DWS_QUOTE_CONTEXT
-    if need_dws and expected_corp_ids:
-        corp_mismatch_error = await verify_dws_corp_match(expected_corp_ids=expected_corp_ids)
-        if corp_mismatch_error:
+    dws_ready = False
+    if need_dws:
+        corp_check = await check_dws_corp_access(expected_corp_ids=expected_corp_ids)
+        if corp_check.corp_mismatch_error:
             return DwsContextBundle(
                 dws_available=False,
                 merged_history=fallback_history,
-                corp_mismatch_error=corp_mismatch_error,
+                corp_mismatch_error=corp_check.corp_mismatch_error,
             )
+        dws_ready = corp_check.allowed
 
     recent_dws_items: list[dict[str, Any]] = []
     dws_available = False
 
-    # 2. 群聊开启时拉取近期群聊消息（不传 --time 时 dws 默认以当前时间为锚点向 older 拉最新 N 条）
-    if is_group and conversation_id and cfg.ENABLE_DWS_GROUP_CONTEXT:
+    # 2. 群聊开启且通过企业门禁时拉取近期群聊消息
+    if dws_ready and is_group and conversation_id and cfg.ENABLE_DWS_GROUP_CONTEXT:
         payload = await run_dws_readonly_json(
             [
                 "chat",
@@ -1302,110 +1731,96 @@ async def fetch_dws_context_bundle(
         )
         if payload is not None:
             dws_available = True
-            raw_msgs = extract_messages_from_payload(payload)
-            for raw_item in raw_msgs:
+            for raw_item in extract_messages_from_payload(payload):
                 cleaned = extract_clean_dws_item(raw_item)
                 if cleaned is not None:
                     recent_dws_items.append(cleaned)
             recent_dws_items.sort(key=lambda x: x.get("timestamp", ""))
 
-    # 3. 识别本次触发消息是否带有引用（合并 recent_dws_items、Stream 线索与必要的 +messages-mget 兜底）
-    quote_info: DwsQuoteInfo | None = stream_quote
+    # 3. 识别本次触发消息对应的 dws 记录（同时服务引用发现与 @他人 还原）
     raw_curr_id_set = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
     matched_incoming_items, curr_id_set = _identify_current_dws_items(
         recent_dws_items, incoming_messages, raw_curr_id_set, raw_user_content
     )
+    has_other_ats = _has_non_bot_at_users(incoming_messages, chatbot_user_id)
+
+    if (
+        dws_ready
+        and not matched_incoming_items
+        and raw_curr_id_set
+        and ((cfg.ENABLE_DWS_QUOTE_CONTEXT and not quotes) or has_other_ats)
+    ):
+        mget_payload = await run_dws_readonly_json(
+            [
+                "chat",
+                "+messages-mget",
+                "--msg-ids",
+                ",".join(sorted(raw_curr_id_set)),
+                "--no-reactions",
+                "--no-threads",
+                "-f",
+                "json",
+            ]
+        )
+        if mget_payload is not None:
+            dws_available = True
+            mget_cleaned = [
+                cleaned
+                for raw_item in extract_messages_from_payload(mget_payload)
+                if (cleaned := extract_clean_dws_item(raw_item)) is not None
+            ]
+            mget_matched, curr_id_set = _identify_current_dws_items(
+                mget_cleaned, incoming_messages, curr_id_set, raw_user_content
+            )
+            matched_incoming_items.extend(mget_matched)
 
     if cfg.ENABLE_DWS_QUOTE_CONTEXT:
         for item in matched_incoming_items:
             if item.get("quoted") is not None:
-                quote_info = _merge_quote_infos(item["quoted"], quote_info)
+                _append_or_merge_quote(quotes, item["quoted"])
 
-        # 若近期列表尚未索引到刚发出的当前消息（或单聊未拉群列表），用 +messages-mget 只读查询当前消息元数据
-        if (
-            quote_info is None
-            and not matched_incoming_items
-            and raw_curr_id_set
-            and (dws_available or not is_group)
-        ):
-            mget_payload = await run_dws_readonly_json(
+    restored_user_content = _build_restored_user_content(
+        incoming_messages=incoming_messages,
+        matched_incoming_items=matched_incoming_items,
+        raw_user_content=raw_user_content,
+    )
+    effective_user_content = restored_user_content or raw_user_content
+
+    # 3.5 补全每条被引用消息的完整正文、时间戳与媒体/文件资源元数据
+    if cfg.ENABLE_DWS_QUOTE_CONTEXT and quotes:
+        missing_q_ids: list[str] = []
+        for idx, q in enumerate(quotes):
+            _t_idx, target_it = _find_quote_target_in_items(recent_dws_items, q)
+            if target_it is not None:
+                quotes[idx] = _merge_same_quote_info(q, _item_to_quote_info(target_it))
+            elif dws_ready and _quote_needs_mget_hydration(q) and q.message_id not in missing_q_ids:
+                missing_q_ids.append(q.message_id)
+
+        if dws_ready and missing_q_ids:
+            q_mget = await run_dws_readonly_json(
                 [
                     "chat",
                     "+messages-mget",
                     "--msg-ids",
-                    ",".join(sorted(raw_curr_id_set)),
+                    ",".join(missing_q_ids),
                     "--no-reactions",
                     "--no-threads",
                     "-f",
                     "json",
                 ]
             )
-            if mget_payload is not None:
+            if q_mget is not None:
                 dws_available = True
-                for raw_item in extract_messages_from_payload(mget_payload):
-                    cleaned = extract_clean_dws_item(raw_item)
-                    if cleaned and cleaned.get("quoted") is not None:
-                        quote_info = _merge_quote_infos(cleaned["quoted"], quote_info)
-
-        if quote_info is not None:
-            # 先尝试在已拉取的 recent_dws_items 中补全被引用消息的发送者/时间/正文
-            _t_idx, target_it = _find_quote_target_in_items(recent_dws_items, quote_info)
-            if target_it is not None:
-                quote_info = _merge_quote_infos(
-                    quote_info,
-                    DwsQuoteInfo(
-                        message_id=target_it["message_id"],
-                        conversation_id=target_it["conversation_id"],
-                        sender=target_it["sender"],
-                        sender_id=target_it["sender_id"],
-                        text=target_it["display_text"],
-                        create_time=target_it["timestamp"],
-                        message_type=target_it["message_type"],
-                    ),
-                )
-            elif (
-                quote_info.message_id
-                and dws_available
-                and (
-                    not quote_info.create_time
-                    or not quote_info.sender
-                    or not quote_info.text
-                    or quote_info.text in _NOISE_TEXTS
-                )
-            ):
-                # 被引用消息不在近期窗口且缺少时间/正文，单查一次 +messages-mget 拿到精确 createTime 与正文
-                q_mget = await run_dws_readonly_json(
-                    [
-                        "chat",
-                        "+messages-mget",
-                        "--msg-ids",
-                        quote_info.message_id,
-                        "--no-reactions",
-                        "--no-threads",
-                        "-f",
-                        "json",
-                    ]
-                )
                 for raw_q in extract_messages_from_payload(q_mget):
                     cleaned_q = extract_clean_dws_item(raw_q)
-                    if cleaned_q:
-                        quote_info = _merge_quote_infos(
-                            quote_info,
-                            DwsQuoteInfo(
-                                message_id=cleaned_q["message_id"],
-                                conversation_id=cleaned_q["conversation_id"],
-                                sender=cleaned_q["sender"],
-                                sender_id=cleaned_q["sender_id"],
-                                text=cleaned_q["display_text"],
-                                create_time=cleaned_q["timestamp"],
-                                message_type=cleaned_q["message_type"],
-                            ),
-                        )
+                    if cleaned_q is not None:
+                        _append_or_merge_quote(quotes, _item_to_quote_info(cleaned_q))
 
-            # 若引用的是机器人自己的 AI 卡片，从 full_history 恢复完整正文
-            quote_info = _enrich_quote_from_history(quote_info, history_messages)
+        for idx, q in enumerate(quotes):
+            quotes[idx] = _enrich_quote_from_history(q, history_messages)
 
-    # 4. 合并群聊近期历史与本地机器人问答历史
+    # 4. 合并群聊近期历史与本地机器人问答历史，并提取可持久化的人类群消息
+    persistable_messages: list[dict[str, Any]] = []
     if is_group and dws_available and recent_dws_items:
         merged_history = merge_dws_group_messages_with_history(
             dws_items=recent_dws_items,
@@ -1416,90 +1831,119 @@ async def fetch_dws_context_bundle(
             chatbot_user_id=chatbot_user_id,
             ignore_senders=cfg.DWS_IGNORE_SENDERS,
         )
+        if cfg.DWS_PERSIST_GROUP_MESSAGES:
+            persistable_messages = extract_persistable_dws_messages(
+                recent_dws_items,
+                current_message_ids=curr_id_set,
+                chatbot_user_id=chatbot_user_id,
+                ignore_senders=cfg.DWS_IGNORE_SENDERS,
+            )
     else:
-        if len(history_messages) > cfg.MAX_HISTORY_LENGTH:
-            merged_history = list(history_messages[-cfg.MAX_HISTORY_LENGTH :])
-        else:
-            merged_history = list(history_messages)
+        merged_history = fallback_history
 
-    # 5. 若存在引用消息，提取或跨时间窗口查询引用处前后的上下文消息
+    # 5. 若存在引用消息（含单聊与群聊），提取前后邻居上下文、只读图片字节与只读文档正文
     quote_prompt_block = ""
     quote_router_text = ""
     quote_history_prefix = ""
+    quoted_images: list[bytes] = []
+    quoted_documents: list[QuotedDocExtract] = []
 
-    if cfg.ENABLE_DWS_QUOTE_CONTEXT and quote_info is not None and (quote_info.text or quote_info.message_id):
-        neighbor_source_items = recent_dws_items
-        if is_group and dws_available and conversation_id and quote_info.create_time:
-            target_idx_in_recent, _ = _find_quote_target_in_items(recent_dws_items, quote_info)
-            has_enough_in_window = target_idx_in_recent >= 0 and (
-                target_idx_in_recent >= before_val or len(recent_dws_items) < limit_val
-            )
-            if not has_enough_in_window:
-                older_limit = min(50, before_val + 4)
-                newer_limit = min(50, after_val + 4)
-                older_res, newer_res = await asyncio.gather(
-                    run_dws_readonly_json(
-                        [
-                            "chat",
-                            "message",
-                            "list",
-                            "--conversation-id",
-                            conversation_id,
-                            "--time",
-                            quote_info.create_time,
-                            "--direction",
-                            "older",
-                            "--limit",
-                            str(older_limit),
-                            "-f",
-                            "json",
-                        ]
-                    ),
-                    run_dws_readonly_json(
-                        [
-                            "chat",
-                            "message",
-                            "list",
-                            "--conversation-id",
-                            conversation_id,
-                            "--time",
-                            quote_info.create_time,
-                            "--direction",
-                            "newer",
-                            "--limit",
-                            str(newer_limit),
-                            "-f",
-                            "json",
-                        ]
-                    ),
+    valid_quotes = [q for q in quotes if q.text or q.message_id or q.resources]
+    if cfg.ENABLE_DWS_QUOTE_CONTEXT and valid_quotes:
+        quotes_with_neighbors: list[tuple[DwsQuoteInfo, list[str]]] = []
+        for q in valid_quotes:
+            neighbor_source_items = recent_dws_items
+            target_conv = q.conversation_id or conversation_id
+            if dws_ready and target_conv and q.create_time:
+                target_idx_in_recent, _ = _find_quote_target_in_items(recent_dws_items, q)
+                has_enough_in_window = target_idx_in_recent >= 0 and (
+                    target_idx_in_recent >= before_val or len(recent_dws_items) < limit_val
                 )
-                around_items: list[dict[str, Any]] = []
-                for sub_payload in (older_res, newer_res):
-                    for raw_m in extract_messages_from_payload(sub_payload):
-                        cleaned_m = extract_clean_dws_item(raw_m)
-                        if cleaned_m is not None:
-                            around_items.append(cleaned_m)
-                if around_items:
-                    neighbor_source_items = around_items
+                if not has_enough_in_window:
+                    older_limit = min(50, before_val + 4)
+                    newer_limit = min(50, after_val + 4)
+                    older_res, newer_res = await asyncio.gather(
+                        run_dws_readonly_json(
+                            [
+                                "chat",
+                                "message",
+                                "list",
+                                "--conversation-id",
+                                target_conv,
+                                "--time",
+                                q.create_time,
+                                "--direction",
+                                "older",
+                                "--limit",
+                                str(older_limit),
+                                "-f",
+                                "json",
+                            ]
+                        ),
+                        run_dws_readonly_json(
+                            [
+                                "chat",
+                                "message",
+                                "list",
+                                "--conversation-id",
+                                target_conv,
+                                "--time",
+                                q.create_time,
+                                "--direction",
+                                "newer",
+                                "--limit",
+                                str(newer_limit),
+                                "-f",
+                                "json",
+                            ]
+                        ),
+                    )
+                    around_items: list[dict[str, Any]] = []
+                    for sub_payload in (older_res, newer_res):
+                        if sub_payload is not None:
+                            dws_available = True
+                        for raw_m in extract_messages_from_payload(sub_payload):
+                            cleaned_m = extract_clean_dws_item(raw_m)
+                            if cleaned_m is not None:
+                                around_items.append(cleaned_m)
+                    if around_items:
+                        neighbor_source_items = around_items
 
-        neighbor_lines = _build_quote_neighbor_lines(
-            neighbor_items=neighbor_source_items,
-            history_messages=history_messages,
-            quote=quote_info,
-            current_message_ids=curr_id_set,
-            before_count=before_val,
-            after_count=after_val,
+            n_lines = _build_quote_neighbor_lines(
+                neighbor_items=neighbor_source_items,
+                history_messages=history_messages,
+                quote=q,
+                current_message_ids=curr_id_set,
+                before_count=before_val,
+                after_count=after_val,
+            )
+            quotes_with_neighbors.append((q, n_lines))
+
+        media_docs = await fetch_quoted_media_and_docs(
+            quotes=valid_quotes,
+            conversation_id=conversation_id,
+            dws_ready=dws_ready,
+            run_dws_fn=run_dws_readonly_json,
         )
-        quote_prompt_block, quote_router_text, quote_history_prefix = _format_quote_outputs(
-            quote=quote_info,
-            neighbor_lines=neighbor_lines,
-            raw_user_content=raw_user_content,
+        quoted_images = media_docs.images
+        quoted_documents = media_docs.documents
+
+        quote_prompt_block, quote_router_text, quote_history_prefix = _format_multi_quote_outputs(
+            quotes_with_neighbors=quotes_with_neighbors,
+            quoted_documents=quoted_documents,
+            quoted_images_count=len(quoted_images),
+            raw_user_content=effective_user_content,
         )
 
     return DwsContextBundle(
         dws_available=dws_available,
         merged_history=merged_history,
-        quote_info=quote_info,
+        persistable_messages=persistable_messages,
+        restored_user_content=restored_user_content,
+        quote_info=valid_quotes[0] if valid_quotes else None,
+        quotes=valid_quotes,
+        quoted_images=quoted_images,
+        quoted_documents=quoted_documents,
         quote_prompt_block=quote_prompt_block,
         quote_router_text=quote_router_text,
         quote_history_prefix=quote_history_prefix,

@@ -12,6 +12,18 @@ _BOT_SOURCE_NAMES = {
     "anthropic": "小克",
 }
 
+BOT_SOURCE_NAMES = _BOT_SOURCE_NAMES
+
+
+def get_bot_source_name(bot_id: Optional[str], default: Optional[str] = None) -> str:
+    """将内部 bot_id 映射为可读显示名；空值或未知值按 default / 原值兜底。"""
+    cleaned = str(bot_id or "").strip()
+    if not cleaned:
+        return default if default is not None else "AI助手"
+    if cleaned in _BOT_SOURCE_NAMES:
+        return _BOT_SOURCE_NAMES[cleaned]
+    return default if default is not None else cleaned
+
 
 def format_history_with_meta(
     history_messages: List[Dict],

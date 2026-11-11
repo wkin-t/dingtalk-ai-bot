@@ -565,3 +565,237 @@ class TestHistoryFormatting:
         assert msg["role"] == "user"
         formatted = f"[{msg['timestamp']}] {msg['sender_nick']}: {msg['content']}"
         assert formatted == "[2026-02-01 10:00:00] 张三: 用户消息"
+
+
+# ─── 非 @ 群聊消息持久化与跨容器幂等去重测试 ──────────────────────────
+
+
+class TestPersistExternalMessagesFileFallback:
+    """文件降级路径下 persist_external_messages 的幂等性、原始时间戳排序与缓冲去重测试。"""
+
+    @pytest.fixture(autouse=True)
+    def setup_teardown(self, tmp_path):
+        self.data_dir = str(tmp_path / "history")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.patches = [
+            patch("app.memory.USE_DATABASE", False),
+            patch("app.memory.DATA_DIR", self.data_dir),
+            patch("app.memory.BOT_ID", "gemini"),
+        ]
+        for p in self.patches:
+            p.start()
+        yield
+        for p in self.patches:
+            p.stop()
+
+    def test_persists_chronologically_and_deduplicates_across_repeated_windows(self):
+        from app.memory import get_history, persist_external_messages, update_history
+
+        session_key = "dingtalk_cid_persist_1"
+        # 先有一轮较晚落盘的问答（含 2s 缓冲合并的两条 message_id）
+        update_history(
+            session_key,
+            user_msg="第一句\n第二句",
+            assistant_msg="收到两句！",
+            sender_nick="曾工",
+            user_msg_id="m_buf_1",
+            extra_user_msg_ids=["m_buf_2"],
+        )
+
+        batch = [
+            {
+                "external_msg_id": "m_early_1",
+                "content": "大家早上好，今天发版",
+                "sender_nick": "杰少",
+                "timestamp": "2026-01-01 09:00:00",
+            },
+            {
+                "external_msg_id": "m_buf_1",
+                "content": "第一句",
+                "sender_nick": "曾工",
+                "timestamp": "2026-01-01 09:05:00",
+            },
+            {
+                "external_msg_id": "m_buf_2",
+                "content": "第二句",
+                "sender_nick": "曾工",
+                "timestamp": "2026-01-01 09:05:01",
+            },
+        ]
+        inserted_first = persist_external_messages(session_key, batch)
+        assert inserted_first == 1
+
+        # 模拟另一容器或下一轮重叠窗口再次写入同一批 dws 消息：必须 0 新增
+        inserted_second = persist_external_messages(session_key, batch)
+        assert inserted_second == 0
+
+        history = get_history(session_key)
+        assert len(history) == 3
+        # m_early_1 按原始时间戳排在最前
+        assert history[0]["content"] == "大家早上好，今天发版"
+        assert history[0]["external_msg_id"] == "m_early_1"
+        assert history[1]["content"] == "第一句\n第二句"
+        assert history[2]["role"] == "assistant"
+
+
+class TestHistoryStorageExternalUpsertMySQL:
+    """MySQL + Redis 路径下 HistoryStorage.upsert_external_messages 与 external_msg_id 去重测试。"""
+
+    def test_upsert_external_messages_inserts_once_and_refreshes_redis_chronologically(self):
+        from datetime import datetime
+        from app.database import HistoryStorage
+
+        fake_redis = MagicMock()
+        storage = object.__new__(HistoryStorage)
+        storage.redis = fake_redis
+
+        # 模拟数据库中已有一条无 external_msg_id 的旧 @bot 消息（流式结束滞后 12 秒落库）
+        existing_rows = [
+            {
+                "id": 10,
+                "role": "user",
+                "content": "来张符合华少气质的图",
+                "sender_nick": "我司曾工",
+                "bot_id": "gemini",
+                "external_msg_id": None,
+                "created_at": datetime(2026, 11, 11, 14, 10, 30),
+                "thinking_blocks": None,
+            }
+        ]
+        reloaded_rows = [
+            {
+                "id": 11,
+                "role": "user",
+                "content": "华少其实就是曾工本尊",
+                "sender_nick": "杰少",
+                "bot_id": None,
+                "external_msg_id": "m_non_at_2",
+                "created_at": datetime(2026, 11, 11, 14, 12, 0),
+                "thinking_blocks": None,
+            },
+            {
+                "id": 10,
+                "role": "user",
+                "content": "来张符合华少气质的图",
+                "sender_nick": "我司曾工",
+                "bot_id": "gemini",
+                "external_msg_id": "m_at_1",
+                "created_at": datetime(2026, 11, 11, 14, 10, 30),
+                "thinking_blocks": None,
+            },
+            {
+                "id": 12,
+                "role": "user",
+                "content": "越脱离群众越好",
+                "sender_nick": "杰少",
+                "bot_id": None,
+                "external_msg_id": "m_non_at_1",
+                "created_at": datetime(2026, 11, 11, 14, 10, 5),
+                "thinking_blocks": None,
+            },
+        ]
+
+        executed_sqls = []
+        fake_cursor = MagicMock()
+
+        def _exec_side_effect(sql, params=None):
+            executed_sqls.append((sql, params))
+            if "SELECT id, content" in sql:
+                fake_cursor.fetchall.return_value = existing_rows
+            elif "SELECT role, content" in sql:
+                fake_cursor.fetchall.return_value = reloaded_rows
+            elif "INSERT IGNORE" in sql:
+                fake_cursor.rowcount = 1
+            else:
+                fake_cursor.rowcount = 1
+
+        fake_cursor.execute.side_effect = _exec_side_effect
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+        fake_redis.smembers.return_value = set()
+
+        with patch("app.database.MySQLClient.get_connection") as mock_get_conn:
+            mock_get_conn.return_value.__enter__.return_value = fake_conn
+            inserted = storage.upsert_external_messages(
+                "dingtalk_cid_group",
+                [
+                    {
+                        "external_msg_id": "m_non_at_1",
+                        "content": "越脱离群众越好",
+                        "sender_nick": "杰少",
+                        "timestamp": "2026-11-11 14:10:05",
+                    },
+                    {
+                        "external_msg_id": "m_at_1",
+                        "content": "@Gemini小助手 来张符合华少气质的图",
+                        "sender_nick": "我司曾工",
+                        "timestamp": "2026-11-11 14:10:18",
+                    },
+                    {
+                        "external_msg_id": "m_non_at_2",
+                        "content": "华少其实就是曾工本尊",
+                        "sender_nick": "杰少",
+                        "timestamp": "2026-11-11 14:12:00",
+                    },
+                ],
+            )
+
+        # m_at_1 命中已有 @bot 记录并回填 external_msg_id，仅 m_non_at_1 与 m_non_at_2 执行 INSERT IGNORE
+        assert inserted == 2
+        insert_calls = [p for sql, p in executed_sqls if "INSERT IGNORE" in sql]
+        assert len(insert_calls) == 2
+        backfill_calls = [p for sql, p in executed_sqls if "UPDATE conversation_history" in sql]
+        assert len(backfill_calls) == 1
+        assert backfill_calls[0][0] == "m_at_1"
+
+        # Redis 缓存按时间正序回填（14:10:05 -> 14:10:30 -> 14:12:00）
+        fake_redis.set.assert_called()
+        cached_json = fake_redis.set.call_args.args[1]
+        cached_list = json.loads(cached_json)
+        assert [m["content"] for m in cached_list] == [
+            "越脱离群众越好",
+            "来张符合华少气质的图",
+            "华少其实就是曾工本尊",
+        ]
+
+    def test_external_distinct_ids_with_same_text_are_preserved(self):
+        from app.database import HistoryStorage
+        storage = object.__new__(HistoryStorage)
+        storage.redis = None
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [{"id": 1, "content": "收到", "sender_nick": "甲", "external_msg_id": "old", "created_at": "2026-11-11 14:00:00"}]
+        cursor.rowcount = 1
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        with patch("app.database.MySQLClient.get_connection") as get_conn:
+            get_conn.return_value.__enter__.return_value = conn
+            storage.upsert_external_messages("session", [{"external_msg_id": "new", "content": "收到", "sender_nick": "甲", "timestamp": "2026-11-11 14:00:01"}])
+        assert any("INSERT IGNORE" in call.args[0] for call in cursor.execute.call_args_list)
+
+    def test_add_message_deduplicates_by_external_msg_id_across_containers_beyond_5s(self):
+        from app.database import HistoryStorage
+
+        storage = object.__new__(HistoryStorage)
+        storage.redis = None
+
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = {"id": 99, "bot_id": "gemini"}
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+
+        with patch("app.database.MySQLClient.get_connection") as mock_get_conn:
+            mock_get_conn.return_value.__enter__.return_value = fake_conn
+            storage.add_message(
+                "dingtalk_cid_group",
+                "user",
+                "帮我看看这个方案",
+                "曾工",
+                bot_id="anthropic",
+                external_msg_id="msg_shared_001",
+            )
+
+        # 命中 external_msg_id 后只合并 bot_id，绝不重复 INSERT
+        sqls = [c.args[0] for c in fake_cursor.execute.call_args_list]
+        assert any("external_msg_id = %s" in s for s in sqls)
+        assert any("UPDATE conversation_history" in s for s in sqls)
+        assert not any("INSERT INTO conversation_history" in s for s in sqls)

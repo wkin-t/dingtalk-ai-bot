@@ -56,6 +56,39 @@ class TestReadonlySecurityGate:
             ]
         )
 
+        assert validate_readonly_dws_args(
+            ["doc", "info", "--node", "QBnd5ExVEv9jBrqgFaplzLB2JyeZqMmz", "-f", "json"]
+        )
+        assert validate_readonly_dws_args(
+            ["doc", "read", "--node", "QBnd5ExVEv9jBrqgFaplzLB2JyeZqMmz", "-f", "json"]
+        )
+        assert validate_readonly_dws_args(
+            ["drive", "download", "--node", "QBnd5ExVEv9jBrqgFaplzLB2JyeZqMmz", "--url-only", "-f", "json"]
+        )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="dws_ro_media_") as ro_tmp:
+            assert validate_readonly_dws_args(
+                [
+                    "chat",
+                    "message",
+                    "download-media",
+                    "--conversation-id",
+                    "cid123==",
+                    "--message-id",
+                    "msg_1",
+                    "--resource-id",
+                    "$iwEl_test",
+                    "--type",
+                    "mediaId",
+                    "--output",
+                    ro_tmp,
+                    "-f",
+                    "json",
+                ]
+            )
+
     @pytest.mark.parametrize(
         "forbidden_args",
         [
@@ -90,6 +123,49 @@ class TestReadonlySecurityGate:
             ["chat", "message", "list", "--conversation-id", "cid123", "-f", "table"],
             ["chat", "message", "list", "--conversation-id", "cid123\nrm", "-f", "json"],
             ["chat", "message", "list", "extra_positional", "--conversation-id", "cid123", "-f", "json"],
+            # 文档/网盘只读红线：禁止写操作、禁止缺 --url-only、禁止携带 -o/--output 落盘
+            ["doc", "create", "--title", "hack", "-f", "json"],
+            ["doc", "write", "--node", "n1", "--content", "x", "-f", "json"],
+            ["doc", "delete", "--node", "n1", "-f", "json"],
+            ["doc", "read", "--node", "n1", "-o", "/tmp/doc.md", "-f", "json"],
+            ["drive", "download", "--node", "n1", "-f", "json"],
+            ["drive", "download", "--node", "n1", "--url-only", "-o", "/tmp/a.docx", "-f", "json"],
+            ["drive", "upload", "--file", "/etc/hosts", "-f", "json"],
+            # download-media 仅允许写入受控临时目录且仅限 mediaId
+            [
+                "chat",
+                "message",
+                "download-media",
+                "--conversation-id",
+                "cid123",
+                "--message-id",
+                "m1",
+                "--resource-id",
+                "r1",
+                "--type",
+                "mediaId",
+                "--output",
+                "/tmp/not_allowed_dir",
+                "-f",
+                "json",
+            ],
+            [
+                "chat",
+                "message",
+                "download-media",
+                "--conversation-id",
+                "cid123",
+                "--message-id",
+                "m1",
+                "--resource-id",
+                "r1",
+                "--type",
+                "fileId",
+                "--output",
+                "/tmp/dws_ro_media_fake",
+                "-f",
+                "json",
+            ],
         ],
     )
     def test_rejects_all_write_download_or_unapproved_args(self, forbidden_args):
@@ -390,6 +466,13 @@ class TestQuoteContextResolution:
         calls = []
 
         async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding42b8b39e5adac00a4ac5d6980864d335",
+                    "corp_name": "Vibe Coding 联盟",
+                }
             calls.append(list(args))
             return recent_payload
 
@@ -398,6 +481,7 @@ class TestQuoteContextResolution:
             conversation_id="cid_group_1",
             conversation_type="2",
             chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
             text=SimpleNamespace(content="?", extensions={}),
             extensions={},
         )
@@ -475,6 +559,13 @@ class TestQuoteContextResolution:
         calls = []
 
         async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding42b8b39e5adac00a4ac5d6980864d335",
+                    "corp_name": "Vibe Coding 联盟",
+                }
             calls.append(list(args))
             if "--direction" in args:
                 idx = args.index("--direction")
@@ -487,6 +578,7 @@ class TestQuoteContextResolution:
             conversation_id="cid_group_1",
             conversation_type="2",
             chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
             text=SimpleNamespace(content="这个方案现在还能用吗？", extensions={}),
             extensions={},
         )
@@ -602,11 +694,22 @@ class TestQuoteContextResolution:
             conversation_id="cid_group_1",
             conversation_type="2",
             chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
             text=SimpleNamespace(content="?", extensions={}),
             extensions={},
         )
 
-        with patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value=recent_payload):
+        async def fake_run_json_hetero(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding42b8b39e5adac00a4ac5d6980864d335",
+                    "corp_name": "Vibe Coding 联盟",
+                }
+            return recent_payload
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json_hetero):
             bundle = await fetch_dws_context_bundle(
                 conversation_id="cid_group_1",
                 is_group=True,
@@ -803,4 +906,588 @@ class TestEnterpriseCorpValidation:
         assert "ding_other_corp" in bundle.corp_mismatch_error
         assert "ding42b8b39e5adac00a4ac5d6980864d335" in bundle.corp_mismatch_error
 
+    @pytest.mark.asyncio
+    async def test_fail_closed_when_auth_status_returns_none_or_missing_expected_corp(self):
+        """Standards #1 & Spec #4：auth status 超时/异常或缺少机器人归属企业 ID 时必须 fail-closed，严禁继续拉取群消息。"""
+        import app.dws_context as dws_ctx
 
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+        chat_called = False
+
+        async def fake_run_none(args, **_kwargs):
+            nonlocal chat_called
+            if list(args[:2]) == ["auth", "status"]:
+                return None
+            chat_called = True
+            return {"ok": True, "data": {"messages": []}}
+
+        incoming_with_corp = SimpleNamespace(
+            message_id="m_curr",
+            conversation_id="cid_group_1",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            text=SimpleNamespace(content="测试", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_none):
+            b_timeout = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming_with_corp],
+                current_message_ids=["m_curr"],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+        assert chat_called is False
+        assert b_timeout.dws_available is False
+
+        # 回调缺失 chatbot_corp_id 且未配 DWS_EXPECTED_CORP_ID：同样必须 fail-closed
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+        any_called = False
+
+        async def fake_should_not_call(args, **_kwargs):
+            nonlocal any_called
+            any_called = True
+            return None
+
+        incoming_no_corp = SimpleNamespace(
+            message_id="m_curr",
+            conversation_id="cid_group_1",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            text=SimpleNamespace(content="测试", extensions={}),
+            extensions={},
+        )
+        with patch.object(dws_ctx.cfg, "DWS_EXPECTED_CORP_ID", ""), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_should_not_call):
+            b_no_corp = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_group_1",
+                is_group=True,
+                incoming_messages=[incoming_no_corp],
+                current_message_ids=["m_curr"],
+                raw_user_content="测试",
+                history_messages=[],
+            )
+        assert any_called is False
+        assert b_no_corp.dws_available is False
+
+    @pytest.mark.asyncio
+    async def test_corp_mismatch_persists_across_cached_calls_within_ttl(self):
+        """Spec #4：缓存有效期内重复触发企业不一致时，每次都必须返回显式报错而非静默吞掉。"""
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding_wrong_999",
+                    "corp_name": "串号公司",
+                }
+            raise AssertionError("不应调用 chat")
+
+        incoming = SimpleNamespace(
+            message_id="m1",
+            conversation_id="cid_1",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            text=SimpleNamespace(content="你好", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            b1 = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m1"],
+                raw_user_content="你好",
+                history_messages=[],
+            )
+            b2 = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_1",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["m1"],
+                raw_user_content="你好",
+                history_messages=[],
+            )
+        assert "串号公司" in b1.corp_mismatch_error
+        assert "串号公司" in b2.corp_mismatch_error
+
+
+class TestSpec6MergeAndPersistenceFixes:
+    """Spec #6 + F1：保留与助手同文的人类短回复、2s 缓冲多行去重、生成 persistable_messages。"""
+
+    def test_human_short_reply_matching_assistant_text_is_never_dropped_and_multiline_dedupes(self):
+        from app.dws_context import extract_clean_dws_item, merge_dws_group_messages_with_history
+
+        history_messages = [
+            {
+                "role": "assistant",
+                "content": "收到",
+                "timestamp": "2026-11-11 10:00:00",
+                "bot_id": "gemini",
+            },
+            {
+                "role": "user",
+                "content": "第一条补充\n第二条补充",
+                "timestamp": "2026-11-11 14:05:15",
+                "sender_nick": "曾工",
+            },
+        ]
+        raw_dws = [
+            {
+                "messageId": "m_human_ack",
+                "sender": "杰少",
+                "senderId": "u_jie",
+                "createTime": "2026-11-11 14:04:00",
+                "text": "收到",
+            },
+            {
+                "messageId": "m_buf_a",
+                "sender": "曾工",
+                "senderId": "u_zeng",
+                "createTime": "2026-11-11 14:05:01",
+                "text": "@Gemini小助手 第一条补充",
+            },
+            {
+                "messageId": "m_buf_b",
+                "sender": "曾工",
+                "senderId": "u_zeng",
+                "createTime": "2026-11-11 14:05:02",
+                "text": "第二条补充",
+            },
+        ]
+        dws_items = [x for item in raw_dws if (x := extract_clean_dws_item(item)) is not None]
+        merged = merge_dws_group_messages_with_history(
+            dws_items=dws_items,
+            history_messages=history_messages,
+            current_message_ids=set(),
+            chatbot_user_id="bot_gem",
+        )
+        user_contents = [m["content"] for m in merged if m["role"] == "user"]
+        # 杰少的「收到」被完整保留，且曾工缓冲合并的两行不会与历史「第一条补充\n第二条补充」重复成 4 条
+        assert "收到" in user_contents
+        assert len(user_contents) == 3
+        assert "第一条补充\n第二条补充" not in user_contents
+
+
+class TestSingleChatQuoteMultiQuoteAndAtMentionRestore:
+    """Spec #2/#5 + F2：单聊引用拉上下文、2s 多引用隔离不串字段、还原被 Stream 剥离的 @他人。"""
+
+    @pytest.mark.asyncio
+    async def test_single_chat_quote_with_only_msg_id_hydrates_and_fetches_neighbors(self):
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding42b8b39e5adac00a4ac5d6980864d335",
+                    "corp_name": "Vibe Coding 联盟",
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "m_dm_quote",
+                                "conversationId": "cid_dm_1",
+                                "sender": "曾工",
+                                "text": "单聊里昨天发的预算表密码是 8848",
+                                "createTime": "2026-11-10 18:00:00",
+                            }
+                        ]
+                    },
+                }
+            if "--direction" in args:
+                direction = args[args.index("--direction") + 1]
+                if direction == "older":
+                    return {
+                        "ok": True,
+                        "data": {
+                            "messages": [
+                                {"messageId": "m_dm_prev", "sender": "曾工", "text": "给你发一下密码", "createTime": "2026-11-10 17:59:50"},
+                                {"messageId": "m_dm_quote", "sender": "曾工", "text": "单聊里昨天发的预算表密码是 8848", "createTime": "2026-11-10 18:00:00"},
+                            ]
+                        },
+                    }
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {"messageId": "m_dm_quote", "sender": "曾工", "text": "单聊里昨天发的预算表密码是 8848", "createTime": "2026-11-10 18:00:00"},
+                            {"messageId": "m_dm_next", "sender": "曾工", "text": "别发到大群里", "createTime": "2026-11-10 18:00:10"},
+                        ]
+                    },
+                }
+            raise AssertionError(f"unexpected args: {args}")
+
+        incoming_dm = SimpleNamespace(
+            message_id="m_dm_curr",
+            conversation_id="cid_dm_1",
+            conversation_type="1",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            text=SimpleNamespace(content="这个密码改了吗？", extensions={"originalMsgId": "m_dm_quote"}),
+            extensions={},
+        )
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_GROUP_CONTEXT", False), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_dm_1",
+                is_group=False,
+                incoming_messages=[incoming_dm],
+                current_message_ids=["m_dm_curr"],
+                raw_user_content="这个密码改了吗？",
+                history_messages=[],
+            )
+
+        assert bundle.quote_info is not None
+        assert "8848" in bundle.quote_prompt_block
+        assert "给你发一下密码" in bundle.quote_prompt_block
+        assert "别发到大群里" in bundle.quote_prompt_block
+
+    @pytest.mark.asyncio
+    async def test_buffered_multiple_quotes_preserve_both_without_field_mixing_and_restore_at_mentions(self):
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+        recent_payload = {
+            "ok": True,
+            "data": {
+                "messages": [
+                    {"messageId": "q1", "sender": "杰少", "text": "接口超时设成 5 秒", "createTime": "2026-11-11 14:00:00"},
+                    {"messageId": "q2", "sender": "阿强", "text": "重试次数最多 2 次", "createTime": "2026-11-11 14:01:00"},
+                    {
+                        "messageId": "m_c1",
+                        "sender": "曾工",
+                        "text": "@Gemini小助手 结合这两条帮我通知 @曾健华(我司曾工) 改网关配置",
+                        "createTime": "2026-11-11 14:02:00",
+                        "quotedMessage": {"messageId": "q1", "sender": "杰少", "text": "接口超时设成 5 秒", "createTime": "2026-11-11 14:00:00"},
+                    },
+                    {
+                        "messageId": "m_c2",
+                        "sender": "曾工",
+                        "text": "还有这一条也看下",
+                        "createTime": "2026-11-11 14:02:01",
+                        "quotedMessage": {"messageId": "q2", "sender": "阿强", "text": "重试次数最多 2 次", "createTime": "2026-11-11 14:01:00"},
+                    },
+                ]
+            },
+        }
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {
+                    "authenticated": True,
+                    "token_valid": True,
+                    "corp_id": "ding42b8b39e5adac00a4ac5d6980864d335",
+                }
+            return recent_payload
+
+        inc1 = SimpleNamespace(
+            message_id="m_c1",
+            sender_nick="曾工",
+            conversation_id="cid_g",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            at_users=[SimpleNamespace(dingtalk_id="bot_gem"), SimpleNamespace(dingtalk_id="u_zeng")],
+            text=SimpleNamespace(content="结合这两条帮我通知  改网关配置", extensions={}),
+            extensions={},
+        )
+        inc2 = SimpleNamespace(
+            message_id="m_c2",
+            sender_nick="曾工",
+            conversation_id="cid_g",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding42b8b39e5adac00a4ac5d6980864d335",
+            at_users=[SimpleNamespace(dingtalk_id="bot_gem")],
+            text=SimpleNamespace(content="还有这一条也看下", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_g",
+                is_group=True,
+                incoming_messages=[inc1, inc2],
+                current_message_ids=["m_c1", "m_c2"],
+                raw_user_content="结合这两条帮我通知  改网关配置\n还有这一条也看下",
+                history_messages=[],
+            )
+
+        # 两条引用都进入 <quoted_context> 且各自归属不混串
+        assert "杰少: 接口超时设成 5 秒" in bundle.quote_prompt_block
+        assert "阿强: 重试次数最多 2 次" in bundle.quote_prompt_block
+        # F2: 还原被钉钉 Stream 剥除的 @曾健华(我司曾工)，同时剔除 @Gemini小助手
+        assert "@曾健华(我司曾工)" in bundle.restored_user_content
+        assert "@Gemini小助手" not in bundle.restored_user_content
+        # F1: q1 与 q2 进入可持久化外部消息列表，当前触发消息 m_c1/m_c2 不提前落库
+        persisted_ids = [m["external_msg_id"] for m in bundle.persistable_messages]
+        assert persisted_ids == ["q1", "q2"]
+
+
+class TestQuotedImagesAndDocumentsReadonly:
+    """F3 & F4：引用图片（公网 OSS / 内网表情降级）与引用文档（adoc / docx / pdf）内存只读提取测试。"""
+
+    @pytest.mark.asyncio
+    async def test_quoted_public_and_internal_images_extracted_into_memory(self):
+        import io
+        from PIL import Image
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+        png_buf = io.BytesIO()
+        Image.new("RGB", (32, 32), color=(40, 120, 220)).save(png_buf, format="PNG")
+        png_bytes = png_buf.getvalue()
+
+        created_temp_dirs = []
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {"authenticated": True, "token_valid": True, "corp_id": "ding_corp_ok"}
+            if list(args[:3]) == ["chat", "message", "list"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "m_img_pub",
+                                "conversationId": "cid_g",
+                                "sender": "杰少",
+                                "messageType": "picture",
+                                "text": "[图片]",
+                                "createTime": "2026-11-11 15:00:00",
+                                "resources": [
+                                    {
+                                        "resourceId": "@lQLP_pub",
+                                        "resourceIdType": "mediaId",
+                                        "resourceType": "image",
+                                        "url": "https://wukong-file.oss-cn-shenzhen.aliyuncs.com/pub.png",
+                                    }
+                                ],
+                            },
+                            {
+                                "messageId": "m_img_int",
+                                "conversationId": "cid_g",
+                                "sender": "阿强",
+                                "messageType": "picture",
+                                "text": "[图片]",
+                                "createTime": "2026-11-11 15:00:10",
+                                "resources": [
+                                    {
+                                        "resourceId": "$iwEl_internal",
+                                        "resourceIdType": "mediaId",
+                                        "resourceType": "image",
+                                        "url": "http://lippi-space.oss-internal.aliyun-inc.com/emo.png",
+                                    }
+                                ],
+                            },
+                            {
+                                "messageId": "m_curr_1",
+                                "conversationId": "cid_g",
+                                "sender": "曾工",
+                                "text": "@Gemini小助手 这两张图分别是什么？",
+                                "createTime": "2026-11-11 15:01:00",
+                                "quotedMessage": {"messageId": "m_img_pub", "sender": "杰少", "text": "[图片]"},
+                            },
+                            {
+                                "messageId": "m_curr_2",
+                                "conversationId": "cid_g",
+                                "sender": "曾工",
+                                "text": "还有这张",
+                                "createTime": "2026-11-11 15:01:01",
+                                "quotedMessage": {"messageId": "m_img_int", "sender": "阿强", "text": "[图片]"},
+                            },
+                        ]
+                    },
+                }
+            if list(args[:3]) == ["chat", "message", "download-media"]:
+                out_dir = args[args.index("--output") + 1]
+                created_temp_dirs.append(out_dir)
+                out_file = os.path.join(out_dir, "emo.png")
+                with open(out_file, "wb") as f:
+                    f.write(png_bytes)
+                return {"success": True, "path": out_file}
+            raise AssertionError(f"unexpected dws call: {args}")
+
+        inc1 = SimpleNamespace(
+            message_id="m_curr_1",
+            sender_nick="曾工",
+            conversation_id="cid_g",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding_corp_ok",
+            text=SimpleNamespace(content="这两张图分别是什么？", extensions={}),
+            extensions={},
+        )
+        inc2 = SimpleNamespace(
+            message_id="m_curr_2",
+            sender_nick="曾工",
+            conversation_id="cid_g",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding_corp_ok",
+            text=SimpleNamespace(content="还有这张", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_files.fetch_public_bytes", new_callable=AsyncMock, return_value=png_bytes):
+            bundle = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_g",
+                is_group=True,
+                incoming_messages=[inc1, inc2],
+                current_message_ids=["m_curr_1", "m_curr_2"],
+                raw_user_content="这两张图分别是什么？\n还有这张",
+                history_messages=[],
+            )
+
+        assert len(bundle.quoted_images) == 2
+        assert all(img.startswith(b"\x89PNG") for img in bundle.quoted_images)
+        # 临时目录在读取完字节后必须立即被自动销毁，不残留磁盘文件
+        assert len(created_temp_dirs) == 1
+        assert not os.path.exists(created_temp_dirs[0])
+
+    @pytest.mark.asyncio
+    async def test_quoted_adoc_docx_and_pdf_documents_parsed_in_memory(self):
+        import io
+        import zipfile
+        from pypdf import PdfWriter
+        import app.dws_context as dws_ctx
+
+        dws_ctx.reset_dws_RuntimeState_for_tests()
+
+        # 构造内存中的真实最小 .docx（含段落与表格）
+        docx_buf = io.BytesIO()
+        with zipfile.ZipFile(docx_buf, "w") as zf:
+            zf.writestr(
+                "word/document.xml",
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body>"
+                "<w:p><w:r><w:t>发布清单：今晚 21:00 灰度上线</w:t></w:r></w:p>"
+                "<w:tbl><w:tr>"
+                "<w:tc><w:p><w:r><w:t>服务名</w:t></w:r></w:p></w:tc>"
+                "<w:tc><w:p><w:r><w:t>dingtalk-ai-bot</w:t></w:r></w:p></w:tc>"
+                "</w:tr></w:tbl>"
+                "</w:body></w:document>",
+            )
+        docx_bytes = docx_buf.getvalue()
+
+        # 构造内存中的真实最小空白 PDF（同时测试 pypdf 解析调用链）
+        pdf_buf = io.BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        writer.write(pdf_buf)
+        pdf_bytes = pdf_buf.getvalue()
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["auth", "status"]:
+                return {"authenticated": True, "token_valid": True, "corp_id": "ding_corp_ok"}
+            if list(args[:3]) == ["chat", "message", "list"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "m_doc_1",
+                                "conversationId": "cid_g",
+                                "sender": "曾工",
+                                "messageType": "file",
+                                "text": "[文件] 上线方案.docx fileId: NODE_DOCX_1",
+                                "createTime": "2026-11-11 16:00:00",
+                                "resources": [
+                                    {
+                                        "resourceId": "NODE_DOCX_1",
+                                        "resourceIdType": "fileId",
+                                        "resourceType": "file",
+                                        "url": "https://alidocs.dingtalk.com/i/nodes/NODE_DOCX_1",
+                                    }
+                                ],
+                            },
+                            {
+                                "messageId": "m_doc_2",
+                                "conversationId": "cid_g",
+                                "sender": "杰少",
+                                "text": "在线架构文档看这里 https://alidocs.dingtalk.com/i/nodes/NODE_ADOC_2",
+                                "createTime": "2026-11-11 16:01:00",
+                            },
+                            {
+                                "messageId": "m_curr_doc",
+                                "conversationId": "cid_g",
+                                "sender": "阿强",
+                                "text": "@Gemini小助手 总结下这两个文档的核心结论",
+                                "createTime": "2026-11-11 16:02:00",
+                                "quotedMessage": {
+                                    "messageId": "m_doc_1",
+                                    "sender": "曾工",
+                                    "text": "[文件] 上线方案.docx fileId: NODE_DOCX_1 https://alidocs.dingtalk.com/i/nodes/NODE_ADOC_2",
+                                },
+                            },
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["doc", "info"]:
+                node = args[args.index("--node") + 1]
+                if node == "NODE_DOCX_1":
+                    return {"success": True, "nodeId": node, "name": "上线方案.docx", "extension": "docx"}
+                return {"success": True, "nodeId": node, "name": "架构评审纪要", "extension": "adoc"}
+            if list(args[:2]) == ["doc", "read"]:
+                return {"success": True, "markdown": "# 架构评审纪要\n采用 MySQL uk_session_ext_msg 幂等索引。"}
+            if list(args[:2]) == ["drive", "download"]:
+                assert "--url-only" in args
+                return {
+                    "success": True,
+                    "urlOnly": True,
+                    "fileName": "上线方案.docx",
+                    "fileSize": len(docx_bytes),
+                    "downloadUrl": "https://dingtalk-drive.oss-cn-hangzhou.aliyuncs.com/plan.docx",
+                }
+            raise AssertionError(f"unexpected dws call: {args}")
+
+        inc = SimpleNamespace(
+            message_id="m_curr_doc",
+            sender_nick="阿强",
+            conversation_id="cid_g",
+            conversation_type="2",
+            chatbot_user_id="bot_gem",
+            chatbot_corp_id="ding_corp_ok",
+            text=SimpleNamespace(content="总结下这两个文档的核心结论", extensions={}),
+            extensions={},
+        )
+
+        with patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_files.fetch_public_bytes", new_callable=AsyncMock, return_value=docx_bytes):
+            bundle = await dws_ctx.fetch_dws_context_bundle(
+                conversation_id="cid_g",
+                is_group=True,
+                incoming_messages=[inc],
+                current_message_ids=["m_curr_doc"],
+                raw_user_content="总结下这两个文档的核心结论",
+                history_messages=[],
+            )
+
+        assert "发布清单：今晚 21:00 灰度上线" in bundle.quote_prompt_block
+        assert "dingtalk-ai-bot" in bundle.quote_prompt_block
+        assert "采用 MySQL uk_session_ext_msg 幂等索引" in bundle.quote_prompt_block
+        assert "上线方案.docx" in bundle.quote_router_text
+
+        # 同时单独验证 parse_pdf_bytes 对有效 PDF 字节流无异常运行
+        from app.dws_files import parse_pdf_bytes
+
+        assert isinstance(parse_pdf_bytes(pdf_bytes), str)

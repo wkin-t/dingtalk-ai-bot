@@ -21,6 +21,7 @@ from app.config import (
     get_litellm_model_config,
     get_route_key,
 )
+from app.ai.router import ROUTER_IMAGE_GEN_FALSE_HINT
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
 from app.gemini_client import google_search
 from app.error_safety import safe_model_name
@@ -1636,7 +1637,7 @@ async def analyze_complexity_with_openai(
 
 6. need_image_gen:
    - true: 用户明确要求 AI 全新绘制/画画/生成插图（如"画一只穿宇航服的猫"）
-   - false: 默认（注意：讨要现成表情包、梗图或斗图如"来张表情包"、"发个熊猫头/鲁迅梗图"属于聊天配图，必须设为 false）
+   - false: 默认（{ROUTER_IMAGE_GEN_FALSE_HINT}）
 
 7. need_image_edit:
    - true: 有图片(has_images=是) 且用户文字中明确包含修改指令

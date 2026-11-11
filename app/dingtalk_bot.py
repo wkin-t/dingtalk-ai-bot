@@ -4,6 +4,7 @@ import time
 import base64
 import json
 import re
+from dataclasses import dataclass
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 from app.config import (
@@ -36,14 +37,20 @@ from app.config import (
     ENABLE_BQB,
     ENABLE_DWS_GROUP_CONTEXT,
     ENABLE_DWS_QUOTE_CONTEXT,
+    DWS_PERSIST_GROUP_MESSAGES,
+    DWS_CONTEXT_LIMIT,
+    DWS_EXPECTED_CORP_ID,
+    DWS_IGNORE_SENDERS,
 )
 from app.bqb import (
     strip_bqb_tags_for_streaming,
     resolve_bqb_tags,
     schedule_bqb_index_warmup,
 )
-from app.dws_context import DwsContextBundle, fetch_dws_context_bundle
-from app.memory import get_history, update_history, clear_history, get_session_key
+from app.dws_context import (DwsContextBundle, fetch_dws_context_bundle, check_dws_corp_access,
+    run_dws_readonly_json, extract_messages_from_payload, extract_clean_dws_item,
+    extract_persistable_dws_messages)
+from app.memory import get_history, update_history, clear_history, get_session_key, persist_external_messages
 from app.ai.handler import TEMPERATURE_MAP
 from app.ai.router import should_force_search
 from app.ai.sampling_clamp import clamp_temperature
@@ -70,6 +77,14 @@ except Exception as e:
 
 # --- 全局变量定义 ---
 message_buffer = {}
+
+@dataclass
+class BufferedTurnContext:
+    incoming_messages: list
+    current_message_ids: list
+    at_user_ids: list
+    group_info: dict | None
+
 session_locks = {}  # 会话级锁字典
 processing_sessions = set()  # 正在处理的会话集合
 group_info_cache = {}  # 群信息缓存 (conversation_id -> {"name": str, "timestamp": float})
@@ -985,7 +1000,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         group_info=None,
         incoming_messages=None,
         current_message_ids=None,
+        buffered_context=None,
     ):
+        if buffered_context is not None:
+            incoming_messages = buffered_context.incoming_messages
+            current_message_ids = buffered_context.current_message_ids
+            at_user_ids = buffered_context.at_user_ids
+            group_info = buffered_context.group_info
         print(f"🚀 开始处理 AI 请求: {content} (User: {incoming_message.sender_id})")
         print(f"🔍 [调试] handle_ai_stream 接收到的 content 参数: '{content}'")
         if image_data_list:
@@ -993,6 +1014,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         raw_user_content = content
         router_content = content
+        effective_msg_ids = list(current_message_ids) if current_message_ids is not None else ([incoming_message.message_id] if getattr(incoming_message, "message_id", None) else [])
+        user_uploaded_count = len(image_data_list or [])
+        quoted_img_count = 0
+        effective_image_list = list(image_data_list or [])
 
         session_key = get_session_key(conversation_id, incoming_message.sender_id)
         use_openclaw_backend = AI_BACKEND == "openclaw"
@@ -1122,6 +1147,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     )
                     return
 
+                if DWS_PERSIST_GROUP_MESSAGES and dws_bundle.persistable_messages:
+                    persist_external_messages(session_key, dws_bundle.persistable_messages)
+                if dws_bundle.restored_user_content:
+                    raw_user_content = dws_bundle.restored_user_content
+                    content = router_content = raw_user_content
+                quoted_img_count = len(dws_bundle.quoted_images or [])
+                effective_image_list = list(dws_bundle.quoted_images or []) + list(image_data_list or [])
+
             if dws_bundle.quote_prompt_block:
                 content = f"{dws_bundle.quote_prompt_block}\n{raw_user_content}"
                 router_content = dws_bundle.quote_router_text or content
@@ -1152,7 +1185,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 dws_bundle.merged_history, BOT_ID, cutoff_at=_cutoff_at
             )
 
-            if image_data_list:
+            if getattr(incoming_message, "conversation_type", None) == "2" and not dws_bundle.quote_prompt_block and formatted_history:
+                context_lines = [str(msg.get("content", ""))[:120] for msg in formatted_history[-4:]]
+                router_content = "[近期群聊上下文]\n" + "\n".join(context_lines) + "\n[当前用户消息]\n" + router_content
+
+            if effective_image_list:
                 from datetime import datetime, timezone, timedelta
                 beijing_tz = timezone(timedelta(hours=8))
                 current_timestamp = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -1160,9 +1197,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 sender_nick = incoming_message.sender_nick or "User"
 
                 user_message_content = []
-                user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: [图片x{len(image_data_list)}] {content}"})
+                image_labels = " ".join(([f"[引用图片x{quoted_img_count}]"] if quoted_img_count else []) + ([f"[图片x{user_uploaded_count}]"] if user_uploaded_count else []))
+                user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: {image_labels} {content}"})
 
-                for i, img_data in enumerate(image_data_list):
+                for i, img_data in enumerate(effective_image_list):
                     b64_image = base64.b64encode(img_data).decode('utf-8')
                     # 根据魔数检测实际格式，避免 Bedrock 等严格 provider 校验 MIME 失败
                     if img_data[:8] == b'\x89PNG\r\n\x1a\n':
@@ -1208,7 +1246,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         # 智能路由（提前到卡片创建前，让初始卡片直接显示正确的思考文字）
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
-        has_images = bool(image_data_list)
+        has_images = bool(effective_image_list)
         soul_text = _load_soul(conversation_id)
         complexity = {}
         route_slot = None
@@ -1497,7 +1535,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 conversation_id=conversation_id,
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,
-                image_data_list=image_data_list if image_data_list else None,
+                image_data_list=effective_image_list or None,
             )
 
             async for chunk in stream:
@@ -1744,14 +1782,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             history_content = raw_user_content
             if dws_bundle.quote_history_prefix and not history_content.startswith("[引用"):
                 history_content = f"{dws_bundle.quote_history_prefix}{history_content}".strip()
-            if image_data_list:
-                history_content += f" [图片x{len(image_data_list)}]"
+            if quoted_img_count:
+                history_content += f" [引用图片x{quoted_img_count}]"
+            if user_uploaded_count:
+                history_content += f" [图片x{user_uploaded_count}]"
             # Store the cleaned response so we don't persist base64 blobs.
             update_history(
                 session_key,
                 user_msg=history_content,
                 assistant_msg=history_response,
                 sender_nick=sender_nick,
+                user_msg_id=effective_msg_ids[0] if effective_msg_ids else getattr(incoming_message, "message_id", None),
+                extra_user_msg_ids=effective_msg_ids[1:] or None,
             )
 
             # Soul 自主进化（异步后台，不阻塞响应）
@@ -1904,12 +1946,29 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     at_user_ids,
                     image_list,
                     group_info,
-                    incoming_messages=incoming_messages,
-                    current_message_ids=message_ids,
+                    buffered_context=BufferedTurnContext(incoming_messages, message_ids, at_user_ids, group_info),
                 )
             finally:
                 # 清除正在处理标记
                 processing_sessions.discard(buffer_key)
+
+    async def _sync_dws_for_command(self, incoming_message, conversation_id: str, session_key: str, pull_group_messages: bool = False) -> bool:
+        if not (ENABLE_DWS_GROUP_CONTEXT or ENABLE_DWS_QUOTE_CONTEXT):
+            return True
+        expected = [DWS_EXPECTED_CORP_ID, getattr(incoming_message, "chatbot_corp_id", "")]
+        corp = await check_dws_corp_access(expected_corp_ids=expected)
+        if corp.corp_mismatch_error:
+            self.reply_markdown("dws 企业不一致错误", corp.corp_mismatch_error, incoming_message)
+            return False
+        if (pull_group_messages and corp.allowed and conversation_id
+                and getattr(incoming_message, "conversation_type", None) == "2"
+                and ENABLE_DWS_GROUP_CONTEXT and DWS_PERSIST_GROUP_MESSAGES):
+            payload = await run_dws_readonly_json(["chat", "message", "list", "--conversation-id", conversation_id, "--limit", str(DWS_CONTEXT_LIMIT), "-f", "json"])
+            items = [item for raw in extract_messages_from_payload(payload) if (item := extract_clean_dws_item(raw)) is not None]
+            messages = extract_persistable_dws_messages(items, current_message_ids=[getattr(incoming_message, "message_id", "") or ""], chatbot_user_id=getattr(incoming_message, "chatbot_user_id", "") or "", ignore_senders=DWS_IGNORE_SENDERS)
+            if messages:
+                persist_external_messages(session_key, messages)
+        return True
 
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         try:
@@ -2045,6 +2104,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     at_user_ids.append(user.get('dingtalkId'))
             if sender_id and sender_id not in at_user_ids:
                 at_user_ids.append(sender_id)
+
+            is_guarded_command = (content in {"/since", "/resume", "/clear", "清空上下文", "🧹 清空记忆", "/stats", "📊 统计", "/soul"}
+                                  or content.startswith(("/soul ", "/temp", "/top_p", "/sample")))
+            if is_guarded_command:
+                pull_group_messages = content in {"/since", "/resume", "/soul evolve"}
+                if not await self._sync_dws_for_command(incoming_message, conversation_id, session_key, pull_group_messages=pull_group_messages):
+                    return AckMessage.STATUS_OK, 'OK'
 
             if content == "/help":
                 from app.help_text import render_help

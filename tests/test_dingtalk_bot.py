@@ -13,6 +13,115 @@ async def _iter_consumer_chunks(chunks):
         yield chunk
 
 
+@pytest.mark.asyncio
+async def test_dws_turn_integrates_history_mentions_and_quoted_images():
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test"
+    handler.card_helper = MagicMock()
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    incoming = SimpleNamespace(sender_id="u", sender_nick="甲", conversation_type="2", message_id="m1")
+    png = b"\x89PNG\r\n\x1a\nimage"
+    rows = [{"external_msg_id": "old", "content": "架构报错", "timestamp": "2026-11-11 10:00:00"}]
+    bundle = DwsContextBundle(merged_history=[{"role": "user", "content": "架构报错", "sender_nick": "乙"}], persistable_messages=rows, restored_user_content="@小王 怎么看", quoted_images=[png])
+    route = {"model": "fast", "thinking_level": "medium", "need_search": False, "temperature": "balanced", "thinking_text": "思考", "reason": "test"}
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), \
+         patch("app.dingtalk_bot.DWS_PERSIST_GROUP_MESSAGES", True), patch("app.dingtalk_bot.ENABLE_BQB", False), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), patch("app.dingtalk_bot.get_session_key", return_value="session"), \
+         patch("app.dingtalk_bot.get_history", return_value=[]), patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=bundle), \
+         patch("app.dingtalk_bot.persist_external_messages") as persist, \
+         patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route) as router, \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks([{"content": "回答"}])) as stream, \
+         patch("app.dingtalk_bot.update_history") as update, patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(incoming, "怎么看", "conv", [], current_message_ids=["m1", "m2"])
+
+    persist.assert_called_once_with("session", rows)
+    assert "@小王" in router.await_args.args[0] and "架构报错" in router.await_args.args[0]
+    assert router.await_args.args[1] is True
+    assert stream.call_args.kwargs["image_data_list"] == [png]
+    assert "data:image/png;base64," in str(stream.call_args.args[0])
+    assert "@小王" in str(stream.call_args.args[0])
+    assert update.call_args.kwargs["user_msg"] == "@小王 怎么看 [引用图片x1]"
+    assert update.call_args.kwargs["user_msg_id"] == "m1"
+    assert update.call_args.kwargs["extra_user_msg_ids"] == ["m2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/since", "/resume", "/soul evolve", "/clear", "/stats", "/temp"])
+async def test_command_corp_mismatch_stops_before_execution(command):
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsCorpCheckResult
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.reply_markdown = MagicMock()
+    incoming = SimpleNamespace(message_id=None, message_type="text", text=SimpleNamespace(content=command),
+        conversation_id="conv", conversation_type="2", sender_id="u", sender_staff_id="u", sender_nick="甲", at_users=[], chatbot_corp_id="corp", is_in_at_list=True)
+    with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
+         patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), \
+         patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=False, corp_mismatch_error="企业不一致")), \
+         patch("app.dingtalk_bot.run_dws_readonly_json", new_callable=AsyncMock) as fetch, \
+         patch("app.clear_cutoff.reset_cutoff") as reset, patch("app.clear_cutoff.set_cutoff") as clear:
+        await handler.process(SimpleNamespace(data={}))
+    handler.reply_markdown.assert_called_once_with("dws 企业不一致错误", "企业不一致", incoming)
+    fetch.assert_not_awaited()
+    reset.assert_not_called()
+    clear.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_command_sync_persists_group_messages_before_command():
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsCorpCheckResult
+
+    handler = object.__new__(GeminiBotHandler)
+    incoming = SimpleNamespace(conversation_type="2", chatbot_corp_id="corp", chatbot_user_id="bot")
+    payload = {"messages": [{"messageId": "old", "sender": "乙", "text": "群消息", "createTime": "2026-11-11 14:00:00"}]}
+    with patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), patch("app.dingtalk_bot.DWS_PERSIST_GROUP_MESSAGES", True), \
+         patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+         patch("app.dingtalk_bot.run_dws_readonly_json", new_callable=AsyncMock, return_value=payload), \
+         patch("app.dingtalk_bot.persist_external_messages") as persist:
+        assert await handler._sync_dws_for_command(incoming, "conv", "session", pull_group_messages=True)
+    assert persist.call_args.args[0] == "session"
+    assert persist.call_args.args[1][0]["content"] == "群消息"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/since", "/resume", "/soul evolve"])
+async def test_history_commands_sync_before_execution(command):
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.reply_markdown = MagicMock()
+    incoming = SimpleNamespace(message_id=None, message_type="text", text=SimpleNamespace(content=command),
+        conversation_id="conv", conversation_type="2", sender_id="u", sender_staff_id="u", sender_nick="甲", at_users=[], is_in_at_list=True)
+    events = []
+    async def sync(*args, **kwargs):
+        assert kwargs["pull_group_messages"] is True
+        events.append("sync")
+        return True
+    def command_action(*args, **kwargs):
+        events.append("command")
+        return ""
+    with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
+         patch.object(handler, "_sync_dws_for_command", side_effect=sync), \
+         patch("app.context_inspector.render_since", side_effect=command_action), \
+         patch("app.clear_cutoff.reset_cutoff", side_effect=command_action), \
+         patch("app.agent_history.get_history_for_current_agent", return_value=[]), \
+         patch("app.dingtalk_bot._is_soul_admin", return_value=True), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new_callable=AsyncMock, side_effect=command_action):
+        await handler.process(SimpleNamespace(data={}))
+    assert events == ["sync", "command"]
+
+
 async def _run_dingtalk_consumer(chunks):
     """运行真实 DingTalk handler 收尾逻辑，返回最终卡片全量更新数据。"""
     from app.dingtalk_bot import GeminiBotHandler

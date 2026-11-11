@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 from app import gemini_sse_patch
 gemini_sse_patch.apply()
+from app.ai.router import ROUTER_IMAGE_GEN_FALSE_HINT
 from app.ai.sampling_clamp import clamp_top_p
 from app.error_safety import safe_error_summary, safe_display_text, safe_model_name
 from app.config import (
@@ -238,7 +239,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 
 6. need_image_gen:
    - true: 用户明确要求 AI 全新绘制/画画/插图/生成图片（如"画一只穿宇航服的猫"）
-   - false: 不需要生图（默认；注意：讨要现成表情包、梗图或斗图如"来张表情包"、"发个熊猫头/鲁迅梗图"属于聊天配图，必须设为 false）
+   - false: 不需要生图（默认；{ROUTER_IMAGE_GEN_FALSE_HINT}）
 
 7. image_gen_params (仅当 need_image_gen=true 时):
    - prompt: 提取用户描述的图片内容，转为英文描述（生图模型只支持英文）

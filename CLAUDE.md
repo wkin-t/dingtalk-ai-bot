@@ -49,6 +49,11 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── reference.py         # 历史引用（智能触发）
 │   ├── memory.py            # 对话历史 (Redis+MySQL → 文件降级)
 │   ├── database.py          # 数据层 (Redis 缓存 + MySQL 持久化)
+│   ├── dws_context.py       # dws 只读群聊、引用与企业校验
+│   ├── dws_files.py         # 引用图片、文档抓取与解析
+│   ├── bqb.py               # 表情包索引、匹配与钉钉媒体上传
+│   ├── bqb_image.py         # 表情包缩放、GIF 处理
+│   ├── http_safe.py         # 公网 URL 校验与受限下载
 │   ├── sample_override.py   # Stage D: /temp /top_p /sample 手动覆盖 (sticky 24h, Redis+文件)
 │   ├── ai/
 │   │   ├── handler.py       # AIHandler - 统一 AI 处理层，抽象平台差异
@@ -129,6 +134,9 @@ Feature flags（默认全 `true`，独立可回滚）:
 - `ENABLE_ROLE_REWRITE` — Stage A 消息角色重塑
 - `ENABLE_SAMPLE_OVERRIDE` — Stage D /temp /top_p 手动覆盖
 - `SEARCH_AUTONOMOUS` — 全自主搜索（fast/pro 档强制挂原生搜索工具，模型自决；lite 豁免）
+- `ENABLE_DWS_GROUP_CONTEXT` / `ENABLE_DWS_QUOTE_CONTEXT` — dws 群聊与引用上下文（默认开启）；读取前校验 `DWS_EXPECTED_CORP_ID` 和机器人企业，无法验证时跳过读取，企业不一致时阻断。
+- `DWS_PERSIST_GROUP_MESSAGES` / `DWS_QUOTE_FETCH_MEDIA` — 群消息持久化与引用媒体抓取（默认开启）；`DWS_CONTEXT_LIMIT` 默认 40，文档大小和文本上限分别由 `DWS_MAX_DOC_BYTES`、`DWS_MAX_DOC_CHARS` 控制，引用图片数量由 `DWS_MAX_QUOTE_IMAGES` 控制。
+- `ENABLE_BQB` — ChineseBQB 表情包（默认开启）；`BQB_MAX_DISPLAY_PX` 和 `BQB_CARD_CANVAS_WIDTH_PX` 控制卡片图像尺寸。
 
 所有配置集中在 `app/config.py`，含环境变量读取辅助函数 (`_get_int`, `_get_bool`, `_get_float`)。
 
@@ -151,6 +159,7 @@ Feature flags（默认全 `true`，独立可回滚）:
 
 - 回复和代码注释使用中文
 - 代理配置分层: Gemini SDK 通过 httpx 单独配代理 (`SOCKS_PROXY`)，钉钉国内服务不走代理
+- 三个生产 compose 使用 `network_mode: host`；SOCKS 代理 `127.0.0.1:1080` 指向宿主机本地代理，不要替换成内网中转服务的 IP。模型中转地址另行配置。
 - `socks5h://` → `socks5://` 转换: aiohttp 和 httpx 不支持 `socks5h` 前缀，需要转换
 - 文件操作显式指定 `encoding='utf-8'`
 - 不提交 `.env` 文件或密钥

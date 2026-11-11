@@ -431,13 +431,49 @@ BQB_WINDOW_SIZE = max(1, _get_int("BQB_WINDOW_SIZE", 5))
 BQB_WINDOW_MAX_COUNT = max(1, _get_int("BQB_WINDOW_MAX_COUNT", 2))
 # 表情包主体最大边长像素与卡片透明画布基准宽（抵消钉钉互动卡片 Markdown 图片强制 100% 撑满容器宽度）
 BQB_MAX_DISPLAY_PX = max(0, _get_int("BQB_MAX_DISPLAY_PX", 168))
-BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 580))
+BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 480))
 
 # ===== DingTalk Workspace CLI (dws) 只读群聊/引用上下文配置 =====
-# 安全边界：仅允许内部 Python 只读查询群消息与引用消息，严禁开放发送/修改/撤回/下载能力
+# 安全边界：仅允许内部 Python 只读查询群消息、引用消息与引用文档/图片，严禁开放发送/修改/撤回/上传等写能力
 ENABLE_DWS_GROUP_CONTEXT = _get_bool("ENABLE_DWS_GROUP_CONTEXT", True)
 ENABLE_DWS_QUOTE_CONTEXT = _get_bool("ENABLE_DWS_QUOTE_CONTEXT", True)
+DWS_PERSIST_GROUP_MESSAGES = _get_bool("DWS_PERSIST_GROUP_MESSAGES", True)
+DWS_QUOTE_FETCH_MEDIA = _get_bool("DWS_QUOTE_FETCH_MEDIA", True)
 DWS_BIN = os.getenv("DWS_BIN", "dws").strip() or "dws"
+_REPO_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DWS_CONFIG_DIR = os.getenv("DWS_CONFIG_DIR", "").strip()
+DWS_KEYCHAIN_DIR = os.getenv("DWS_KEYCHAIN_DIR", "").strip()
+
+
+def get_dws_config_dir() -> str:
+    """获取 dws 配置目录（环境变量优先，其次模块配置，最后探测 ./data-dws/config 与 ~/.config/dws）。"""
+    env_val = os.getenv("DWS_CONFIG_DIR", "").strip()
+    if env_val:
+        return env_val
+    if DWS_CONFIG_DIR:
+        return DWS_CONFIG_DIR
+    repo_cfg = os.path.join(_REPO_ROOT_DIR, "data-dws", "config")
+    if os.path.isdir(repo_cfg):
+        return repo_cfg
+    home_cfg = os.path.join(os.path.expanduser("~"), ".config", "dws")
+    if os.path.isdir(home_cfg):
+        return home_cfg
+    return ""
+
+
+def get_dws_keychain_dir() -> str:
+    """获取 dws 凭据目录（环境变量优先，其次模块配置，最后探测 ./data-dws/keychain）。"""
+    env_val = os.getenv("DWS_KEYCHAIN_DIR", "").strip()
+    if env_val:
+        return env_val
+    if DWS_KEYCHAIN_DIR:
+        return DWS_KEYCHAIN_DIR
+    repo_kc = os.path.join(_REPO_ROOT_DIR, "data-dws", "keychain")
+    if os.path.isdir(repo_kc):
+        return repo_kc
+    return ""
+
+
 # 可选显式绑定期望企业 CorpId（与 DINGTALK_CORP_ID 分离，避免触发 dingtalk_card 的第三方应用取 token 分支；
 # 未设置时自动使用钉钉 Stream 消息自带的 incoming_message.chatbot_corp_id 进行逐请求校验）
 DWS_EXPECTED_CORP_ID = (
@@ -449,6 +485,9 @@ DWS_QUOTE_CONTEXT_BEFORE = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_BEFORE", 5
 DWS_QUOTE_CONTEXT_AFTER = max(1, min(20, _get_int("DWS_QUOTE_CONTEXT_AFTER", 5)))
 DWS_TIMEOUT_SECONDS = max(1.0, _get_float("DWS_TIMEOUT_SECONDS", 4.0))
 DWS_AUTH_BACKOFF_SECONDS = max(10, _get_int("DWS_AUTH_BACKOFF_SECONDS", 60))
+DWS_MAX_DOC_BYTES = max(65536, _get_int("DWS_MAX_DOC_BYTES", 10 * 1024 * 1024))
+DWS_MAX_DOC_CHARS = max(500, _get_int("DWS_MAX_DOC_CHARS", 12000))
+DWS_MAX_QUOTE_IMAGES = max(1, min(4, _get_int("DWS_MAX_QUOTE_IMAGES", 4)))
 DWS_IGNORE_SENDERS = frozenset(
     s.strip() for s in os.getenv("DWS_IGNORE_SENDERS", "").split(",") if s.strip()
 )

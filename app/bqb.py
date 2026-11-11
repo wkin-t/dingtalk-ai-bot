@@ -6,7 +6,6 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -17,9 +16,9 @@ import threading
 import time
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
-import httpx
-
+from app.bqb_image import detect_image_format, resize_bqb_for_display
 import app.config as cfg
+from app.http_safe import fetch_public_bytes
 
 BQB_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "bqb"
@@ -47,12 +46,21 @@ _EXPLICIT_BQB_KEYWORDS = (
     "搞笑图",
     "动图",
 )
+_EXPLICIT_FOLLOWUP_RE = re.compile(
+    r"^(?:再来|换)\s*(?:一|几|两)?\s*(?:张|个|发)(?:吧|呗|呀|哈)?[！!。？?\s]*$",
+    re.IGNORECASE,
+)
 _EXPLICIT_BQB_PATTERN = re.compile(
-    r"(?:来|发|给|整|甩|丢|求|换|再来|配)\s*(?:一|几|两|个|张|点|波)?[^，。！？\n]{0,12}(?:表情|梗图|图|滑稽|熊猫头|蘑菇头|猫猫图|狗头)",
+    r"(?:来|发|给|整|甩|丢|求|换|再来|配)\s*(?:一|几|两|个|张|点|波)?[^，。！？\n]{0,12}"
+    r"(?:表情|梗图|图|滑稽|熊猫头|蘑菇头|猫猫|猫咪|狗头|旺柴|修狗|罗翔|张三|阿尼亚|金馆长|汤姆|杰瑞|佩奇|小黄鸭|坤坤|马保国|饮茶)",
+    re.IGNORECASE,
+)
+_NON_BQB_DIAGRAM_RE = re.compile(
+    r"(?:架构图|流程图|时序图|序列图|思维导图|脑图|原型图|拓扑图|类图|状态图|ER\s*图|甘特图|路线图|柱状图|折线图|饼图|热力图|散点图|示意图|设计图|效果图|线框图|蓝图|草图|截图|报错图|全景图|地图|心电图)",
     re.IGNORECASE,
 )
 _IMAGE_DRAW_EXCLUSION_RE = re.compile(
-    r"(?:画一|绘制|AI生图|生成一张.*(?:壁纸|插画|海报|头像|写实|油画|赛博))",
+    r"(?:画一|绘制|AI生图|生成(?:一)?(?:张|个|幅).*(?:壁纸|插画|海报|头像|写实|油画|赛博|图))",
     re.IGNORECASE,
 )
 
@@ -251,21 +259,6 @@ def _clean_item_label(raw_label: str, clean_category: str) -> Tuple[str, bool]:
     return (s if has_meaningful else ""), has_meaningful
 
 
-def detect_image_format(data: bytes) -> Optional[Tuple[str, str]]:
-    """根据文件头魔数检测钉钉 /media/upload 支持的图片格式，拒绝伪装 HTML 或不支持的编码。"""
-    if not data or len(data) < 12:
-        return None
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png", "image/png"
-    if data[:3] == b"\xff\xd8\xff":
-        return "jpg", "image/jpeg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "gif", "image/gif"
-    if data[:2] == b"BM":
-        return "bmp", "image/bmp"
-    return None
-
-
 def normalize_dingtalk_media_id(media_id: str) -> str:
     """钉钉 Markdown 引用 media_id 必须恰好以单个 '@' 开头。"""
     cleaned = (media_id or "").strip()
@@ -285,14 +278,16 @@ def strip_bqb_tags_for_streaming(text: str) -> str:
 
 
 def is_explicit_bqb_request(user_content: str) -> bool:
-    """判断用户当轮消息是否明确讨要表情包/斗图（命中时绕过自发配图冷却）。"""
+    """判断用户当轮消息是否明确讨要表情包/斗图（命中时绕过自发配图冷却，排除工程图表与生图指令）。"""
     text = (user_content or "").strip()
     if not text:
         return False
-    if _IMAGE_DRAW_EXCLUSION_RE.search(text):
-        return False
     lower = text.lower()
     if any(kw in lower for kw in _EXPLICIT_BQB_KEYWORDS):
+        return True
+    if _IMAGE_DRAW_EXCLUSION_RE.search(text) or _NON_BQB_DIAGRAM_RE.search(text):
+        return False
+    if _EXPLICIT_FOLLOWUP_RE.match(text):
         return True
     return bool(_EXPLICIT_BQB_PATTERN.search(text))
 
@@ -411,66 +406,20 @@ _recent_sent_ids: Dict[str, Deque[str]] = {}
 _recent_lock = threading.Lock()
 _RECENT_HISTORY_PER_SESSION = 15
 
-# 若配置的 SOCKS 代理在当前运行环境不可达（如本地开发机无容器代理），短暂跳过代理直连避免每轮空等超时
-_proxy_skip_until: float = 0.0
-
-
 async def _http_fetch_bytes(
     url: str, *, max_bytes: int, timeout_seconds: float
 ) -> bytes:
-    global _proxy_skip_until
-    now = time.time()
-    proxy = (cfg.HTTPX_PROXY or "").strip()
-    attempts: List[Optional[str]] = []
-    if proxy and now >= _proxy_skip_until:
-        attempts.append(proxy)
-    attempts.append(None)
-
-    headers = {
-        "User-Agent": "dingtalk-ai-bot/1.0 (+https://github.com/zhaoolee/ChineseBQB)",
-        "Accept-Encoding": "gzip, deflate",
-    }
-    last_error: Optional[Exception] = None
-
-    for chosen_proxy in attempts:
-        connect_timeout = min(2.0 if chosen_proxy else 3.0, timeout_seconds)
-        timeout_cfg = httpx.Timeout(timeout_seconds, connect=connect_timeout)
-        client_kwargs: Dict[str, Any] = {
-            "follow_redirects": True,
-            "timeout": timeout_cfg,
-            "headers": headers,
-        }
-        if chosen_proxy:
-            client_kwargs["proxy"] = chosen_proxy
-            client_kwargs["trust_env"] = False
-        else:
-            client_kwargs["trust_env"] = True
-
-        try:
-            chunks: List[bytes] = []
-            total = 0
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                async with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    content_len = resp.headers.get("Content-Length")
-                    if content_len and content_len.isdigit() and int(content_len) > max_bytes:
-                        raise ValueError(f"远端文件超过上限 ({content_len} > {max_bytes})")
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        total += len(chunk)
-                        if total > max_bytes:
-                            raise ValueError(f"流式读取超过上限 ({total} > {max_bytes})")
-                        chunks.append(chunk)
-            return b"".join(chunks)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            last_error = exc
-            if chosen_proxy:
-                _proxy_skip_until = time.time() + 60.0
-                continue
-            break
-
-    raise RuntimeError(f"拉取失败 ({url}): {last_error}")
+    return await fetch_public_bytes(
+        url,
+        max_bytes=max_bytes,
+        timeout_seconds=timeout_seconds,
+        headers={
+            "User-Agent": "dingtalk-ai-bot/1.0 (+https://github.com/zhaoolee/ChineseBQB)",
+            "Accept-Encoding": "gzip, deflate",
+        },
+        proxy_url=(cfg.HTTPX_PROXY or "").strip() or None,
+        allow_proxy_fallback=True,
+    )
 
 
 def parse_raw_catalog(
@@ -849,6 +798,13 @@ def _media_id_cache_file(scope: str) -> str:
     return os.path.join(BQB_DATA_DIR, f"media_ids_{scope}.json")
 
 
+def _safe_float_ts(val: Any) -> float:
+    try:
+        return float(val) if val is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _get_cached_media_id(scope: str, sha256: str, now: float) -> Optional[str]:
     ttl = cfg.BQB_MEDIA_ID_TTL_SECONDS
     with _media_id_lock:
@@ -862,7 +818,8 @@ def _get_cached_media_id(scope: str, sha256: str, now: float) -> Optional[str]:
                         loaded = json.load(f)
                     if isinstance(loaded, dict):
                         bucket = loaded
-                except Exception:
+                except Exception as exc:
+                    print(f"⚠️ [BQB] 读取 media_id 缓存文件损坏，已重置 ({path}): {exc}")
                     bucket = {}
             _media_id_mem_cache[scope] = bucket
 
@@ -870,8 +827,8 @@ def _get_cached_media_id(scope: str, sha256: str, now: float) -> Optional[str]:
         if not isinstance(rec, dict):
             return None
         media_id = normalize_dingtalk_media_id(str(rec.get("media_id") or ""))
-        uploaded_at = float(rec.get("uploaded_at") or 0.0)
-        if not media_id or (now - uploaded_at) >= ttl:
+        uploaded_at = _safe_float_ts(rec.get("uploaded_at"))
+        if not media_id or uploaded_at <= 0.0 or (now - uploaded_at) >= ttl:
             bucket.pop(sha256, None)
             return None
         return media_id
@@ -884,7 +841,9 @@ def _save_cached_media_id(scope: str, sha256: str, media_id: str, now: float) ->
         expired = [
             k
             for k, v in bucket.items()
-            if not isinstance(v, dict) or (now - float(v.get("uploaded_at") or 0.0)) >= ttl
+            if not isinstance(v, dict)
+            or _safe_float_ts(v.get("uploaded_at")) <= 0.0
+            or (now - _safe_float_ts(v.get("uploaded_at"))) >= ttl
         ]
         for k in expired:
             bucket.pop(k, None)
@@ -894,131 +853,6 @@ def _save_cached_media_id(scope: str, sha256: str, media_id: str, now: float) ->
         _atomic_write_json(_media_id_cache_file(scope), snapshot)
     except Exception as exc:
         print(f"⚠️ [BQB] 写入 media_id 缓存失败: {exc}")
-
-
-def resize_bqb_for_display(
-    data: bytes,
-    ext: str,
-    mime_type: str,
-    max_px: int,
-    canvas_width_px: int = 0,
-) -> Tuple[bytes, str, str]:
-    """将表情包主体限制在 max_px 内，并按需左对齐贴入透明基准画布以阻止钉钉卡片 100% 拉伸放大。"""
-    if max_px <= 0 or not data:
-        return data, ext, mime_type
-
-    try:
-        from PIL import Image, ImageOps, ImageSequence
-    except ImportError:
-        return data, ext, mime_type
-
-    try:
-        with Image.open(io.BytesIO(data)) as im:
-            w, h = im.size
-            if w <= 0 or h <= 0:
-                return data, ext, mime_type
-
-            if max(w, h) > max_px:
-                scale = max_px / float(max(w, h))
-                new_w = max(1, round(w * scale))
-                new_h = max(1, round(h * scale))
-            else:
-                new_w, new_h = w, h
-
-            target_canvas_w = max(new_w, canvas_width_px) if canvas_width_px > 0 else new_w
-            need_pad = target_canvas_w > new_w
-            if new_w == w and new_h == h and not need_pad:
-                return data, ext, mime_type
-
-            resample = Image.Resampling.LANCZOS
-            is_anim = bool(getattr(im, "is_animated", False)) and int(getattr(im, "n_frames", 1)) > 1
-
-            if is_anim:
-                frames_out: List[Any] = []
-                durations: List[int] = []
-                default_dur = int(im.info.get("duration") or 80)
-                loop_val = int(im.info.get("loop", 0))
-                any_transparent = False
-
-                for idx, frame in enumerate(ImageSequence.Iterator(im)):
-                    if idx >= 120:
-                        break
-                    fg = frame.convert("RGBA")
-                    if (new_w, new_h) != fg.size:
-                        fg = fg.resize((new_w, new_h), resample)
-
-                    if need_pad:
-                        # 不传 mask 直接原样拷贝 RGBA 四通道，避免 Pillow paste 按非预乘通道混合把半透明边缘染黑
-                        canvas = Image.new("RGBA", (target_canvas_w, new_h), (255, 255, 255, 0))
-                        canvas.paste(fg, (0, 0))
-                    else:
-                        canvas = fg
-
-                    alpha = canvas.getchannel("A")
-                    min_alpha, _ = alpha.getextrema()
-                    if min_alpha < 255:
-                        any_transparent = True
-                        white_bg = Image.new("RGBA", canvas.size, (255, 255, 255, 255))
-                        composited_rgb = Image.alpha_composite(white_bg, canvas).convert("RGB")
-                        rgb_q = composited_rgb.quantize(
-                            colors=255, method=Image.Quantize.FASTOCTREE
-                        )
-                        pal = rgb_q.getpalette() or []
-                        if len(pal) < 768:
-                            pal = pal + [255] * (768 - len(pal))
-                        pal[255 * 3 : 255 * 3 + 3] = [255, 255, 255]
-                        rgb_q.putpalette(pal[:768])
-                        mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
-                        rgb_q.paste(255, mask)
-                        rgb_q.info["transparency"] = 255
-                        frames_out.append(rgb_q)
-                    else:
-                        rgb_q = canvas.convert("RGB").quantize(
-                            colors=256, method=Image.Quantize.MEDIANCUT
-                        )
-                        frames_out.append(rgb_q)
-
-                    dur = int(frame.info.get("duration") or default_dur or 80)
-                    durations.append(max(20, dur))
-
-                if len(frames_out) > 1:
-                    out_buf = io.BytesIO()
-                    save_kwargs: Dict[str, Any] = {
-                        "format": "GIF",
-                        "save_all": True,
-                        "append_images": frames_out[1:],
-                        "duration": durations,
-                        "loop": loop_val,
-                        "disposal": 2,
-                    }
-                    if any_transparent:
-                        save_kwargs["transparency"] = 255
-                    frames_out[0].save(out_buf, **save_kwargs)
-                    return out_buf.getvalue(), "gif", "image/gif"
-
-            transposed = ImageOps.exif_transpose(im)
-            has_alpha = need_pad or transposed.mode in ("RGBA", "LA") or (
-                transposed.mode == "P" and "transparency" in transposed.info
-            )
-            out_buf = io.BytesIO()
-            if has_alpha:
-                fg = transposed.convert("RGBA")
-                if (new_w, new_h) != fg.size:
-                    fg = fg.resize((new_w, new_h), resample)
-                if need_pad:
-                    canvas = Image.new("RGBA", (target_canvas_w, new_h), (255, 255, 255, 0))
-                    canvas.paste(fg, (0, 0))
-                else:
-                    canvas = fg
-                canvas.save(out_buf, format="PNG", optimize=True)
-                return out_buf.getvalue(), "png", "image/png"
-
-            resized = transposed.convert("RGB").resize((new_w, new_h), resample)
-            resized.save(out_buf, format="JPEG", quality=88, optimize=True)
-            return out_buf.getvalue(), "jpg", "image/jpeg"
-    except Exception as exc:
-        print(f"⚠️ [BQB] 缩放表情包失败，回退原图上传: {exc}")
-        return data, ext, mime_type
 
 
 async def get_or_upload_media_id(
@@ -1032,7 +866,7 @@ async def get_or_upload_media_id(
     max_px = max(0, cfg.BQB_MAX_DISPLAY_PX)
     canvas_w = max(0, cfg.BQB_CARD_CANVAS_WIDTH_PX)
     cache_key = (
-        f"{entry.sha256}@px{max_px}w{canvas_w}" if max_px > 0 else entry.sha256
+        f"{entry.sha256}@v2px{max_px}w{canvas_w}" if max_px > 0 else entry.sha256
     )
     now = time.time()
     cached = _get_cached_media_id(scope, cache_key, now)
