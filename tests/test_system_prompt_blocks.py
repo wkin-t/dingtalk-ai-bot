@@ -99,3 +99,23 @@ def test_bot_name_appears_in_stable():
         group_info=None, soul_content=None, bot_name="小克", current_date=_fixed_date()
     )
     assert "小克" in blocks[0]["text"]
+
+
+def test_bqb_section_injected_only_when_enabled():
+    blocks_off = build_system_prompt_blocks(
+        group_info=None,
+        soul_content=None,
+        bot_name="小克",
+        current_date=_fixed_date(),
+    )
+    assert "[[bqb:" not in blocks_off[0]["text"]
+
+    blocks_on = build_system_prompt_blocks(
+        group_info=None,
+        soul_content=None,
+        bot_name="小克",
+        current_date=_fixed_date(),
+        enable_bqb=True,
+    )
+    assert "[[bqb:" in blocks_on[0]["text"]
+    assert blocks_on[0]["cache_control"] == {"type": "ephemeral"}

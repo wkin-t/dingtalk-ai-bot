@@ -410,6 +410,26 @@ COS_REGION = os.getenv("COS_REGION", "ap-guangzhou")
 COS_IMAGE_TTL_HOURS = max(1, _get_int("COS_IMAGE_TTL_HOURS", 24))  # COS 生命周期参考（控制台配置）
 COS_PRESIGN_EXPIRES = max(60, _get_int("COS_PRESIGN_EXPIRES", 600))
 
+# ===== ChineseBQB 表情包库配置 =====
+ENABLE_BQB = _get_bool("ENABLE_BQB", True)
+BQB_BASE_URL = (
+    os.getenv("BQB_BASE_URL", "https://zhaoolee.com/ChineseBQB/").strip().rstrip("/")
+    or "https://zhaoolee.com/ChineseBQB"
+) + "/"
+BQB_INDEX_URL = os.getenv("BQB_INDEX_URL", f"{BQB_BASE_URL}catalog/search.json").strip()
+BQB_INDEX_TTL_SECONDS = max(300, _get_int("BQB_INDEX_TTL_SECONDS", 86400))
+# 钉钉临时媒体有效期通常为 72 小时，本地缓存设 48 小时以防发出过期 media_id 导致原样显示源码
+BQB_MEDIA_ID_TTL_SECONDS = max(600, _get_int("BQB_MEDIA_ID_TTL_SECONDS", 172800))
+BQB_FETCH_TIMEOUT_SECONDS = max(1.0, _get_float("BQB_FETCH_TIMEOUT_SECONDS", 4.0))
+BQB_MAX_IMAGE_BYTES = max(262144, _get_int("BQB_MAX_IMAGE_BYTES", 8 * 1024 * 1024))
+BQB_CACHE_MAX_MB = max(20, _get_int("BQB_CACHE_MAX_MB", 200))
+BQB_MAX_PER_REPLY = max(1, min(3, _get_int("BQB_MAX_PER_REPLY", 1)))
+BQB_BACK_TO_BACK_COOLDOWN_SECONDS = max(
+    0, _get_int("BQB_BACK_TO_BACK_COOLDOWN_SECONDS", 120)
+)
+BQB_WINDOW_SIZE = max(1, _get_int("BQB_WINDOW_SIZE", 5))
+BQB_WINDOW_MAX_COUNT = max(1, _get_int("BQB_WINDOW_MAX_COUNT", 2))
+
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing
 GEMINI_PRICING = {

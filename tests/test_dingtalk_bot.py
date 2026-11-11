@@ -188,3 +188,84 @@ class TestModelStatus:
 
         assert "fallback 模型异常\n\n主模型异常" in rendered
         assert "1. 图片触发安全过滤\n2. 请稍后重试" in rendered
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_consumer_embeds_bqb_in_card_and_sanitizes_history():
+    """流式过程中隐藏 [[bqb:...]] 源码，收尾时卡片内嵌 @media_id 且历史不写入 @media_id。"""
+    from app.bqb import BQBResolveResult
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-bqb")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+
+    incoming_message = SimpleNamespace(
+        sender_id="sender-bqb",
+        sender_nick="测试用户",
+        conversation_id="conv-bqb",
+        conversation_type="1",
+    )
+    route_result = {
+        "model": "fast",
+        "thinking_level": "low",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在回梗",
+        "reason": "test",
+    }
+    chunks = [
+        {"content": "这也太真实了吧 [[bqb:熊猫"},
+        {"content": "头 刺激]]"},
+        {"usage": {"model": "claude-sonnet-4-6", "input_tokens": 10, "output_tokens": 8}},
+    ]
+    fake_resolved = BQBResolveResult(
+        card_text="这也太真实了吧\n\n![这么刺激吗](@lALP_FAKE_BQB_123)",
+        history_text="这也太真实了吧 [[bqb:金馆长熊猫 这么刺激吗]]",
+        sent_count=1,
+    )
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.ENABLE_BQB", True), \
+         patch("app.dingtalk_bot.schedule_bqb_index_warmup"), \
+         patch("app.dingtalk_bot.resolve_bqb_tags", new_callable=AsyncMock, return_value=fake_resolved), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.get_session_key", return_value="session-bqb"), \
+         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks(chunks)), \
+         patch("app.dingtalk_bot.update_history") as mock_update_history, \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(
+            incoming_message,
+            "今天开会差点睡着",
+            "conv-bqb",
+            [],
+        )
+
+    # 流式中间帧（is_finalize=False）绝不暴露未闭合或完整的 [[bqb:... 标记
+    non_final_updates = [
+        call.args[1]
+        for call in handler.card_helper.stream_update.await_args_list
+        if not call.kwargs.get("is_finalize") and call.kwargs.get("content_key") == "msgContent"
+    ]
+    assert non_final_updates
+    assert all("[[bqb" not in text for text in non_final_updates)
+
+    # 最终卡片渲染含 @media_id Markdown 图片
+    final_update = handler.card_helper.update_card.await_args_list[-1].args[1]
+    assert "![这么刺激吗](@lALP_FAKE_BQB_123)" in final_update["msgContent"]
+
+    # 历史持久化仅保留语义标签，不写入短期 @media_id
+    saved_assistant_msg = mock_update_history.call_args.kwargs["assistant_msg"]
+    assert "[[bqb:金馆长熊猫 这么刺激吗]]" in saved_assistant_msg
+    assert "@lALP_FAKE_BQB_123" not in saved_assistant_msg

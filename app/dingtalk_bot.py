@@ -33,6 +33,12 @@ from app.config import (
     DINGTALK_IMAGE_MSG_KEY,
     DINGTALK_IMAGE_MSG_PARAM_TEMPLATE,
     STREAM_UPDATE_THROTTLE,
+    ENABLE_BQB,
+)
+from app.bqb import (
+    strip_bqb_tags_for_streaming,
+    resolve_bqb_tags,
+    schedule_bqb_index_warmup,
 )
 from app.memory import get_history, update_history, clear_history, get_session_key
 from app.ai.handler import TEMPERATURE_MAP
@@ -941,11 +947,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         if response:
             # 过滤摘要
             display_response = response.replace("[AILoading]", "……")
+            if ENABLE_BQB:
+                display_response = strip_bqb_tags_for_streaming(display_response)
             lines = display_response.split('\n')
             filtered_lines = [line for line in lines if not line.strip().startswith("> 📝 概要：")]
             display_response = "\n".join(filtered_lines).strip()
 
-            parts.append(display_response)
+            if display_response:
+                parts.append(display_response)
         # thinking 阶段（response 为空）不再追加占位文案——让副标题的 thinkingText
         # （由路由模型生成的 10 字提示，如"正在思考 💭"）独立承担进度展示，
         # 避免卡片正文被"等待回复生成..."覆盖。
@@ -1066,8 +1075,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             from app.ai.system_prompt import build_system_prompt_content
 
+            if ENABLE_BQB:
+                schedule_bqb_index_warmup()
             soul_content = _load_soul(conversation_id) or None
-            system_content = build_system_prompt_content(group_info=group_info, soul_content=soul_content)
+            system_content = build_system_prompt_content(
+                group_info=group_info,
+                soul_content=soul_content,
+                enable_bqb=ENABLE_BQB,
+            )
 
             messages_raw = [{"role": "system", "content": system_content}]
 
@@ -1479,6 +1494,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
                     # 构造显示内容
                     display_content = self._build_display_content(full_thinking, full_response, is_thinking=False)
+                    if not display_content:
+                        continue
 
                     if is_first_chunk:
                         is_first_chunk = False
@@ -1580,6 +1597,22 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 else:
                     clean_response = (clean_response + f"\n\n[图片发送失败] {image_send_error}").strip()
 
+            card_response = clean_response
+            history_response = clean_response
+            if ENABLE_BQB and not use_openclaw_backend and not image_gen_payload:
+                bqb_res = await resolve_bqb_tags(
+                    clean_response,
+                    user_content=raw_user_content,
+                    card_helper=self.card_helper,
+                    session_key=session_key,
+                )
+                card_response = bqb_res.card_text
+                history_response = bqb_res.history_text
+                if clean_response and not card_response:
+                    # 模型仅输出了表情包标签但被节流或上传失败剥空时给轻量占位，防空白卡片与空历史
+                    card_response = "🙂"
+                    history_response = "🙂"
+
             # 构建状态栏：只有 thinking 时才显示摘要，避免重复显示内容
             status_text = ""
             if full_thinking:
@@ -1644,7 +1677,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 }
             ]
             
-            final_content = at_header + clean_response
+            final_content = at_header + card_response
 
             # 记录历史：现在同时保存用户消息和助手消息
             sender_nick = incoming_message.sender_nick or "User"
@@ -1655,13 +1688,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             update_history(
                 session_key,
                 user_msg=history_content,
-                assistant_msg=clean_response,
+                assistant_msg=history_response,
                 sender_nick=sender_nick,
             )
 
             # Soul 自主进化（异步后台，不阻塞响应）
             try:
-                asyncio.create_task(_maybe_evolve_soul(conversation_id, messages_raw, clean_response))
+                asyncio.create_task(_maybe_evolve_soul(conversation_id, messages_raw, history_response))
             except Exception as error:
                 print(f"⚠️ [Soul进化] 调度失败: {safe_error_summary(error, 'soul')}")
             

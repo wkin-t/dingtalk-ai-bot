@@ -79,3 +79,15 @@ def test_bot_name_derived_from_get_bot_display_name():
          patch("app.config.get_bot_display_name", return_value="独一无二的名字"):
         content = build_system_prompt_content(group_info=None, soul_content=None)
     assert "独一无二的名字" in content
+
+
+def test_enable_bqb_flows_through_build_system_prompt_content():
+    with patch("app.config.ENABLE_CACHE_BLOCKS", False), \
+         patch("app.config.AI_BACKEND", "gemini"), \
+         patch("app.config.get_bot_display_name", return_value="小克"):
+        without_bqb = build_system_prompt_content(group_info=None, soul_content=None)
+        with_bqb = build_system_prompt_content(
+            group_info=None, soul_content=None, enable_bqb=True
+        )
+    assert "[[bqb:" not in without_bqb
+    assert "[[bqb:" in with_bqb
