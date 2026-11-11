@@ -378,3 +378,97 @@ class TestPacingAndResolution:
         )
         assert r6.sent_count == 1
         assert r6.throttled is False
+
+
+class TestDisplayResizing:
+    def test_resizes_large_static_png_and_pads_transparent_canvas(self):
+        import io
+        from PIL import Image
+
+        buf = io.BytesIO()
+        img = Image.new("RGBA", (1000, 800), color=(255, 180, 190, 255))
+        # 右边缘留一列半透明白色抗锯齿像素，验证贴入画布不会染成灰黑边
+        for y in range(800):
+            img.putpixel((999, y), (255, 255, 255, 180))
+        img.save(buf, format="PNG")
+        raw = buf.getvalue()
+
+        out_bytes, out_ext, out_mime = bqb.resize_bqb_for_display(
+            raw, "png", "image/png", 168, canvas_width_px=580
+        )
+        assert out_ext == "png"
+        assert out_mime == "image/png"
+        with Image.open(io.BytesIO(out_bytes)) as resized:
+            assert resized.size == (580, 134)
+            rgba = resized.convert("RGBA")
+            # 左侧主体非透明，右侧补白完全透明，且补白区 RGB 为白色不污染抗锯齿
+            assert rgba.getpixel((10, 10))[3] == 255
+            assert rgba.getpixel((500, 10)) == (255, 255, 255, 0)
+
+    def test_resizes_animated_gif_with_transparent_canvas_preserving_frames(self):
+        import io
+        from PIL import Image, ImageSequence
+
+        f1 = Image.new("RGB", (400, 300), color=(255, 0, 0))
+        f2 = Image.new("RGB", (400, 300), color=(0, 255, 0))
+        buf = io.BytesIO()
+        f1.save(buf, format="GIF", save_all=True, append_images=[f2], duration=[60, 90], loop=0)
+        raw_gif = buf.getvalue()
+
+        out_bytes, out_ext, out_mime = bqb.resize_bqb_for_display(
+            raw_gif, "gif", "image/gif", 168, canvas_width_px=580
+        )
+        assert out_ext == "gif"
+        assert out_mime == "image/gif"
+        with Image.open(io.BytesIO(out_bytes)) as anim:
+            assert anim.size == (580, 126)
+            assert getattr(anim, "is_animated", False) is True
+            assert getattr(anim, "n_frames", 1) == 2
+            frames = [fr.convert("RGBA") for fr in ImageSequence.Iterator(anim)]
+            assert frames[0].getpixel((10, 10))[3] == 255
+            assert frames[0].getpixel((500, 10))[3] == 0
+            assert frames[1].getpixel((10, 10))[3] == 255
+            assert frames[1].getpixel((500, 10))[3] == 0
+
+    def test_small_image_passes_through_when_no_pad_needed(self):
+        out_bytes, out_ext, out_mime = bqb.resize_bqb_for_display(
+            PNG_1X1, "png", "image/png", 168, canvas_width_px=0
+        )
+        assert out_bytes is PNG_1X1
+        assert out_ext == "png"
+        assert out_mime == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_changing_max_display_px_invalidates_media_id_cache(self, tmp_path, monkeypatch):
+        import io
+        from PIL import Image
+
+        entries = bqb.parse_raw_catalog(_sample_catalog_raw())
+        entry = entries[0]
+
+        media_dir = tmp_path / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        buf = io.BytesIO()
+        Image.new("RGB", (1000, 1000), color=(100, 150, 200)).save(buf, format="JPEG")
+        (media_dir / f"{entry.sha256}.{entry.ext}").write_bytes(buf.getvalue())
+
+        uploaded_sizes = []
+
+        async def _fake_upload(img_bytes, **_kwargs):
+            with Image.open(io.BytesIO(img_bytes)) as im:
+                uploaded_sizes.append(im.size)
+            return f"@lALP_SIZE_{len(uploaded_sizes)}"
+
+        helper = SimpleNamespace(client_id="bot-px", upload_media=_fake_upload)
+
+        monkeypatch.setattr(cfg, "BQB_MAX_DISPLAY_PX", 0)
+        monkeypatch.setattr(cfg, "BQB_CARD_CANVAS_WIDTH_PX", 580)
+        m1 = await bqb.get_or_upload_media_id(entry, helper)
+        assert m1 == "@lALP_SIZE_1"
+        assert uploaded_sizes[-1] == (1000, 1000)
+
+        # 切换到 168px + 580px 画布后自动绕过原图缓存，重新压图上传新尺寸 media_id
+        monkeypatch.setattr(cfg, "BQB_MAX_DISPLAY_PX", 168)
+        m2 = await bqb.get_or_upload_media_id(entry, helper)
+        assert m2 == "@lALP_SIZE_2"
+        assert uploaded_sizes[-1] == (580, 168)

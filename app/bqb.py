@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -895,6 +896,131 @@ def _save_cached_media_id(scope: str, sha256: str, media_id: str, now: float) ->
         print(f"⚠️ [BQB] 写入 media_id 缓存失败: {exc}")
 
 
+def resize_bqb_for_display(
+    data: bytes,
+    ext: str,
+    mime_type: str,
+    max_px: int,
+    canvas_width_px: int = 0,
+) -> Tuple[bytes, str, str]:
+    """将表情包主体限制在 max_px 内，并按需左对齐贴入透明基准画布以阻止钉钉卡片 100% 拉伸放大。"""
+    if max_px <= 0 or not data:
+        return data, ext, mime_type
+
+    try:
+        from PIL import Image, ImageOps, ImageSequence
+    except ImportError:
+        return data, ext, mime_type
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            w, h = im.size
+            if w <= 0 or h <= 0:
+                return data, ext, mime_type
+
+            if max(w, h) > max_px:
+                scale = max_px / float(max(w, h))
+                new_w = max(1, round(w * scale))
+                new_h = max(1, round(h * scale))
+            else:
+                new_w, new_h = w, h
+
+            target_canvas_w = max(new_w, canvas_width_px) if canvas_width_px > 0 else new_w
+            need_pad = target_canvas_w > new_w
+            if new_w == w and new_h == h and not need_pad:
+                return data, ext, mime_type
+
+            resample = Image.Resampling.LANCZOS
+            is_anim = bool(getattr(im, "is_animated", False)) and int(getattr(im, "n_frames", 1)) > 1
+
+            if is_anim:
+                frames_out: List[Any] = []
+                durations: List[int] = []
+                default_dur = int(im.info.get("duration") or 80)
+                loop_val = int(im.info.get("loop", 0))
+                any_transparent = False
+
+                for idx, frame in enumerate(ImageSequence.Iterator(im)):
+                    if idx >= 120:
+                        break
+                    fg = frame.convert("RGBA")
+                    if (new_w, new_h) != fg.size:
+                        fg = fg.resize((new_w, new_h), resample)
+
+                    if need_pad:
+                        # 不传 mask 直接原样拷贝 RGBA 四通道，避免 Pillow paste 按非预乘通道混合把半透明边缘染黑
+                        canvas = Image.new("RGBA", (target_canvas_w, new_h), (255, 255, 255, 0))
+                        canvas.paste(fg, (0, 0))
+                    else:
+                        canvas = fg
+
+                    alpha = canvas.getchannel("A")
+                    min_alpha, _ = alpha.getextrema()
+                    if min_alpha < 255:
+                        any_transparent = True
+                        white_bg = Image.new("RGBA", canvas.size, (255, 255, 255, 255))
+                        composited_rgb = Image.alpha_composite(white_bg, canvas).convert("RGB")
+                        rgb_q = composited_rgb.quantize(
+                            colors=255, method=Image.Quantize.FASTOCTREE
+                        )
+                        pal = rgb_q.getpalette() or []
+                        if len(pal) < 768:
+                            pal = pal + [255] * (768 - len(pal))
+                        pal[255 * 3 : 255 * 3 + 3] = [255, 255, 255]
+                        rgb_q.putpalette(pal[:768])
+                        mask = Image.eval(alpha, lambda a: 255 if a < 128 else 0)
+                        rgb_q.paste(255, mask)
+                        rgb_q.info["transparency"] = 255
+                        frames_out.append(rgb_q)
+                    else:
+                        rgb_q = canvas.convert("RGB").quantize(
+                            colors=256, method=Image.Quantize.MEDIANCUT
+                        )
+                        frames_out.append(rgb_q)
+
+                    dur = int(frame.info.get("duration") or default_dur or 80)
+                    durations.append(max(20, dur))
+
+                if len(frames_out) > 1:
+                    out_buf = io.BytesIO()
+                    save_kwargs: Dict[str, Any] = {
+                        "format": "GIF",
+                        "save_all": True,
+                        "append_images": frames_out[1:],
+                        "duration": durations,
+                        "loop": loop_val,
+                        "disposal": 2,
+                    }
+                    if any_transparent:
+                        save_kwargs["transparency"] = 255
+                    frames_out[0].save(out_buf, **save_kwargs)
+                    return out_buf.getvalue(), "gif", "image/gif"
+
+            transposed = ImageOps.exif_transpose(im)
+            has_alpha = need_pad or transposed.mode in ("RGBA", "LA") or (
+                transposed.mode == "P" and "transparency" in transposed.info
+            )
+            out_buf = io.BytesIO()
+            if has_alpha:
+                fg = transposed.convert("RGBA")
+                if (new_w, new_h) != fg.size:
+                    fg = fg.resize((new_w, new_h), resample)
+                if need_pad:
+                    canvas = Image.new("RGBA", (target_canvas_w, new_h), (255, 255, 255, 0))
+                    canvas.paste(fg, (0, 0))
+                else:
+                    canvas = fg
+                canvas.save(out_buf, format="PNG", optimize=True)
+                return out_buf.getvalue(), "png", "image/png"
+
+            resized = transposed.convert("RGB").resize((new_w, new_h), resample)
+            resized.save(out_buf, format="JPEG", quality=88, optimize=True)
+            return out_buf.getvalue(), "jpg", "image/jpeg"
+    except Exception as exc:
+        print(f"⚠️ [BQB] 缩放表情包失败，回退原图上传: {exc}")
+        return data, ext, mime_type
+
+
 async def get_or_upload_media_id(
     entry: BQBEntry,
     card_helper: Any,
@@ -903,13 +1029,21 @@ async def get_or_upload_media_id(
 ) -> Optional[str]:
     """返回钉钉 Markdown 可直接引用的 @media_id，命中 48h 缓存则零上传开销。"""
     scope = _safe_client_scope(card_helper)
+    max_px = max(0, cfg.BQB_MAX_DISPLAY_PX)
+    canvas_w = max(0, cfg.BQB_CARD_CANVAS_WIDTH_PX)
+    cache_key = (
+        f"{entry.sha256}@px{max_px}w{canvas_w}" if max_px > 0 else entry.sha256
+    )
     now = time.time()
-    cached = _get_cached_media_id(scope, entry.sha256, now)
+    cached = _get_cached_media_id(scope, cache_key, now)
     if cached:
         return cached
 
     img_bytes, ext, mime_type = await fetch_bqb_image_bytes(
         entry, timeout_seconds=timeout_seconds
+    )
+    img_bytes, ext, mime_type = resize_bqb_for_display(
+        img_bytes, ext, mime_type, max_px, canvas_width_px=canvas_w
     )
     raw_media_id = await card_helper.upload_media(
         img_bytes,
@@ -920,7 +1054,7 @@ async def get_or_upload_media_id(
     normalized = normalize_dingtalk_media_id(raw_media_id or "")
     if not normalized:
         return None
-    _save_cached_media_id(scope, entry.sha256, normalized, time.time())
+    _save_cached_media_id(scope, cache_key, normalized, time.time())
     return normalized
 
 

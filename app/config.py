@@ -429,6 +429,9 @@ BQB_BACK_TO_BACK_COOLDOWN_SECONDS = max(
 )
 BQB_WINDOW_SIZE = max(1, _get_int("BQB_WINDOW_SIZE", 5))
 BQB_WINDOW_MAX_COUNT = max(1, _get_int("BQB_WINDOW_MAX_COUNT", 2))
+# 表情包主体最大边长像素与卡片透明画布基准宽（抵消钉钉互动卡片 Markdown 图片强制 100% 撑满容器宽度）
+BQB_MAX_DISPLAY_PX = max(0, _get_int("BQB_MAX_DISPLAY_PX", 168))
+BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 580))
 
 # Gemini 定价 (美元/百万 tokens)
 # 参考: https://ai.google.dev/gemini-api/docs/pricing

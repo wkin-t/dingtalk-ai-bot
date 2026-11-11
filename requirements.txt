@@ -39,3 +39,5 @@ openai==3.46.0
 openrouter==1.3.126
 # 腾讯云 COS SDK (生图存储)
 cos-python-sdk-v5==1.9.44
+# 图像处理 (ChineseBQB 表情包静图与 GIF 动图等比缩放)
+Pillow>=10.0.0
