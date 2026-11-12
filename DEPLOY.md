@@ -22,7 +22,8 @@
 |---|---|---|
 | OpenAI 兼容中转站（如自建 sub2api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
 | SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 生图 / 改图始终直连 Google，需要 `SOCKS_PROXY` |
-| Redis / MySQL | 对话历史 | 可选，不可用时降级到容器内 `data/history/` |
+| dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取，定向 @ 发送 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。登录企业须与机器人企业一致 |
+| Redis / MySQL | 统计、采样等应用状态及旧路径存储 | 钉钉会话不再读写此处的历史，也不会回退到 `data/history/` |
 | 腾讯云 COS | 生图存储 | 可选，生图功能需要 |
 
 ## 部署步骤
@@ -67,7 +68,19 @@ curl http://localhost:35001/
 curl http://localhost:35002/
 ```
 
-最后在钉钉里 @ 每个机器人发一条消息做端到端验证。只看到容器启动成功，不代表模型名和上游 key 都可用。
+最后在钉钉里分别验证 `@机器人 + 问题`、纯 `@机器人` 和 `/since`。涉及成员提醒时确认正文完整、@ 可点击；涉及 `/clear` 时确认只改变被指定机器人的可见范围，`/resume` 后仍受其历史条数上限限制。只看到容器启动成功，不代表会话读取、模型调用或客户端展示可用。
+
+### dws 登录与数据目录
+
+先检查现有登录态，避免覆盖正在使用的账号：
+
+```bash
+docker exec dingtalk-ai-bot-anthropic dws auth status --readonly -f json
+```
+
+没有有效登录态时，通过 dws 官方登录流程登录与机器人一致的企业。镜像使用 `/app/data-dws/config` 和 `/app/data-dws/keychain`，三个容器共享同一挂载目录；这些目录含登录凭据，不提交、不打入镜像。`DWS_EXPECTED_CORP_ID` 可显式固定企业，未设置时逐请求使用 Stream 自带的 `chatbot_corp_id` 校验。
+
+各 bot 的 Soul、采样文件和 `/clear` 起点仍位于各自 `/app/data` 挂载中。升级时保留 `data/`、`data-openai/`、`data-anthropic/` 和 `data-dws/`，不需要把旧 Redis / MySQL 历史导入 dws。
 
 ## 环境变量要点
 
@@ -76,6 +89,9 @@ curl http://localhost:35002/
 | 变量 | 注意事项 |
 |---|---|
 | `BOT_ID` | compose 已为每个容器设置了不同值。它是历史消息归属、Soul 文件名（`{BOT_ID}__{cid}.md`）、`/clear` cutoff 的持久化键，**不要随意改**；多个容器共用同一个值会让角色重塑失效 |
+| `MAX_HISTORY_LENGTH` | 各 `.env*` 独立设置历史消息条数。2026-11-12 生产值：Gemini 50、GPT 50、Claude 25。先应用当前 bot 的 `/clear` 过滤，再取最近 N 条；不是 token 总量上限 |
+| `DWS_CONTEXT_LIMIT` | 默认 40。钉钉主链路会按 `MAX_HISTORY_LENGTH` 和当前消息去重余量扩大窗口，单次读取最多 100 条；保持现有 50 / 50 / 25 配置即可 |
+| `DWS_EXPECTED_CORP_ID` | 可选企业绑定。登录不可用或企业无法确认时停止读取，不使用旧库兜底；不要混用其他企业的共享登录态 |
 | `GEMINI_API_BASE` | 填中转站的 Gemini 原生协议入口，SDK 会自动拼接 `/v1beta`。**路径前缀取决于中转站**：sub2api 需要带 `/antigravity`（如 `https://<中转站域名>/antigravity`），不带会返回 400 `API key group platform is not gemini`；标准 `/v1beta` 协议层的中转站则不能带后缀。中转站在公网时用 `https`，`http` 会被 302 跳转导致 POST 失败 |
 | `GEMINI_API_KEY` | 保持为 Google 直连 key。生图的 `:predict` 端点中转站不覆盖，始终直连 |
 | `OPENAI_{FLASH,PRO}_SUPPORTS_SEARCH` | 只有上游真正执行 Responses `web_search` 时才会有搜索效果。不同中转站对不同上游的处理不一样（如 sub2api 上的 Claude 会在服务端搜索并把结果拼进正文，但不产生标准搜索事件），换中转站后需要重新实测 |
@@ -131,7 +147,9 @@ systemctl status v2raya
 
 ## 从 openrouter 迁移到 anthropic
 
-2026-08-25 起 Claude 容器由 `openrouter` 改名为 `anthropic`。已有部署需要**同时**完成以下四项，缺一项都会导致这个机器人"失忆"：
+> 以下是 2026-08-25 的旧存储迁移记录。2026-11-12 起钉钉会话仅从 dws 读取，下面第 4、5 项数据库历史归属迁移仅适用于仍使用旧历史存储的路径，不是当前 dws 上线的必需操作。Soul 文件和 `/clear` 起点仍需保留正确的 `BOT_ID` 归属。
+
+2026-08-25 起 Claude 容器由 `openrouter` 改名为 `anthropic`。当时使用旧历史存储的部署需要同时迁移以下内容：
 
 1. 停止旧容器：`docker compose -f docker-compose.openrouter.yml down`（在旧版本代码下执行）
 2. 重命名 env 文件：`mv .env.openrouter .env.anthropic`

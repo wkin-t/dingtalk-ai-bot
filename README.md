@@ -56,14 +56,17 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 ### 多机器人协作
 
-- **消息角色重塑**：其他机器人的回复在发给模型前转为 `user` 角色，并包上 `<other_bot name="X">…</other_bot>` 标签，避免模型把别人的话当成自己说的
+- **消息身份区分**：dws 历史按发送者区分本机器人的 `assistant` 回复与其他成员 / 机器人的 `user` 消息，保留发送人和时间；共享角色重塑层继续处理带 `bot_id` 的其他来源消息
 - **软清空**：`/clear` 只记录当前机器人的上下文起点，不删数据，也不影响其他机器人
 - **采样覆盖**：`/temp`、`/top_p` 按会话手动设置，24 小时后自动失效；Claude 温度上限 1.0，超出自动截断
 - **System Prompt 分块缓存**：拆成稳定 / 半稳定 / 变动三段，分别标注 `cache_control`
 
 ### 对话管理
 
-- **上下文记忆**：Redis + MySQL 双层存储，不可用时自动降级到本地文件
+- **dws 会话上下文**：群聊和单聊统一从 dws 读取近期消息、引用及媒体资源，不再读写应用自己的 Redis / MySQL / 文件对话历史；旧数据保留
+- **各机器人独立窗口**：继续读取各自 `.env*` 的 `MAX_HISTORY_LENGTH`，先按本机器人的 `/clear` 起点过滤，再取最近 N 条历史消息
+- **纯 @ 接话**：只 @机器人、不加文字，也会读取当前可见上下文并接话；上下文不足时简短询问
+- **群成员与定向 @**：通过 dws 获取当前群成员，优先识别群昵称 / 个人昵称；需要提醒时发送真实 @，并附带该轮完整回复
 - **消息合并**：2 秒缓冲窗口合并连续消息
 - **幂等去重**：钉钉 Stream 重推的消息按 message_id 去重
 - **会话隔离**：群聊共享上下文，单聊独立
@@ -75,7 +78,7 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 │ 钉钉群 / 单聊 │◄─────────►│ main.py (Monkey patch + Flask)                 │
 └──────────────┘           │  ├─ dingtalk_bot.py   消息处理 / 路由 / 卡片    │
                            │  ├─ app/ai/*          角色重塑 / 采样 / prompt │
-                           │  ├─ memory.py         Redis + MySQL → 文件降级  │
+                           │  ├─ dws_context.py    会话 / 引用 / 媒体读取   │
                            │  └─ routes.py         HTTP 端点                │
                            └───────────────────────┬────────────────────────┘
                                                    │ AI_BACKEND
@@ -88,6 +91,8 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 ```
 
 钉钉消息由 `app/dingtalk_bot.py::handle_ai_stream` 处理。`app/ai/handler.py` 的 `AIHandler` 只服务企业微信（Deprecated），两条路径共享 `app/ai/` 下的工具函数。
+
+dws 提供会话、引用、资源和成员读取，以及定向 @ 发送。应用负责上下文截取、媒体解析、模型调用和流式卡片展示；Soul、统计、采样配置仍由应用管理。钉钉会话每轮提交当前可见历史，不使用 `previous_response_id` 续接。
 
 ## 项目结构
 
@@ -109,8 +114,11 @@ dingtalk-ai-bot/
 │   ├── openclaw_tools_client.py  # OpenClaw Tools Invoke（Deprecated）
 │   ├── image_gen.py              # 生图 + 改图
 │   ├── image_store.py            # 图片上传 COS → 预签名 URL
-│   ├── memory.py / database.py   # 对话历史（Redis + MySQL → 文件降级）
-│   ├── agent_history.py          # 按 BOT_ID 的 cutoff 过滤历史
+│   ├── dws_context.py           # dws 会话读取、引用展开、企业校验
+│   ├── dws_files.py             # 图片 / 文档下载与解析
+│   ├── dws_members.py           # 群成员快照、受限的定向 @ 发送
+│   ├── memory.py / database.py   # 旧路径对话存储 / 应用统计，钉钉会话不读写旧历史
+│   ├── agent_history.py          # 旧路径按 BOT_ID 的 cutoff 过滤历史
 │   ├── clear_cutoff.py           # /clear 软清空时间戳
 │   ├── context_inspector.py      # /since 上下文起点
 │   ├── sample_override.py        # /temp /top_p /sample 手动覆盖
@@ -196,7 +204,12 @@ python main.py                     # 默认端口 35000
 | `OPENROUTER_PROVIDER_ORDER` | 否 | 默认 `Anthropic`。改成其他 provider 时，prompt cache 可能被静默忽略 |
 | `PLATFORM` | 否 | 默认 `dingtalk`（`wecom` / `both` 已 Deprecated） |
 | `SOCKS_PROXY` | 否 | 访问境外 API 的代理，如 `socks5h://127.0.0.1:1080`；钉钉不走代理 |
-| `REDIS_*` / `MYSQL_*` | 否 | 不配置时降级到本地文件存储 |
+| `MAX_HISTORY_LENGTH` | 否 | 当前容器的历史消息条数上限，默认 50；各 `.env*` 可独立设置，不是 token / 字符总量限制。dws 单次读取安全上限 100 条，含当前消息去重余量 |
+| `DWS_CONTEXT_LIMIT` | 否 | dws 基础读取窗口，默认 40；钉钉主链路会扩大到足以覆盖当前 bot 的历史预算及去重余量，不会把 50 条配置缩成 40 条 |
+| `DWS_EXPECTED_CORP_ID` | 否 | 可显式绑定企业；未设置时使用钉钉 Stream 消息中的机器人企业。无法确认企业或企业不一致时不读取会话 |
+| `DWS_MAX_QUOTE_IMAGES` | 否 | 自动补全的历史图与引用图总上限，默认 4；本轮用户上传图片另行处理 |
+| `DWS_MAX_DOC_BYTES` / `DWS_MAX_DOC_CHARS` | 否 | 单文档大小 / 正文截取上限，默认 10 MiB / 12000 字符 |
+| `REDIS_*` / `MYSQL_*` | 否 | 用于统计、采样等应用状态及旧路径；钉钉对话历史不再通过它们持久化或降级 |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_BUCKET` / `COS_REGION` | 生图 | 腾讯云 COS 图片存储 |
 | `SOUL_ADMIN_IDS` | 否 | 允许修改 Soul 的用户 ID（逗号分隔，留空表示所有人） |
 | `CLAUDE_SEARCH_BRIDGE_ENABLED` | 否 | Claude 搜索桥接总开关，默认 `false`（见上文"Claude 搜索暂时禁用"）。重新打开前需要下面 4 个变量都配齐，否则 `bridge_ready()` 仍为 false |
@@ -227,16 +240,39 @@ python main.py                     # 默认端口 35000
 | 指令 | 说明 |
 |---|---|
 | `@机器人 + 问题` | 普通对话 |
+| 只 `@机器人` | 根据当前可见群聊上下文接话；上下文不足时简短询问 |
 | 发图 + `@机器人 + 问题` | 图片分析或改图 |
 | `/help` | 查看命令清单 |
 | `/clear` | 软清空：只对当前机器人隐藏此刻之前的历史 |
-| `/resume` | 撤销 `/clear`，恢复全部历史 |
+| `/resume` | 撤销当前 bot 的 `/clear` 起点，恢复 dws 近期窗口；仍受该 bot 的 `MAX_HISTORY_LENGTH` 限制 |
 | `/since` | 查看当前可见的最早消息时间与 cutoff |
 | `/stats` | Token 用量与费用统计 |
 | `/soul` / `/soul <设定>` / `/soul reset` / `/soul evolve` / `/soul log` | 查看 / 设置 / 重置 / 手动进化 / 进化历史（仅群聊，修改需要管理员） |
 | `/temp [值\|reset]` | 查看或设置温度（0.0–2.0，24 小时后失效） |
 | `/top_p [值\|reset]` | 查看或设置 top_p（0.01–1.0） |
 | `/sample` / `/sample reset [temp\|top_p]` | 采样参数总览 / 清除手动设置 |
+
+### 上下文窗口与软清空
+
+历史来源统一为 dws，读取范围仍由每个机器人自己的配置决定。2026-11-12 核实的生产配置如下；这些是部署值，后续可以在各 `.env*` 中调整：
+
+| 机器人 | 配置文件 | `MAX_HISTORY_LENGTH` |
+|---|---|---|
+| Gemini | `.env` | 50 |
+| GPT | `.env.openai` | 50 |
+| Claude | `.env.anthropic` | 25 |
+
+每轮先排除当前触发消息及当前 bot 的 `/clear` 起点之前（含起点时刻）的消息，再取最近 N 条。历史图片和文档只补全这 N 条内的消息，说明文字归入原消息；用户显式引用的消息及引用邻居可以额外展开。N 指历史消息条数，不限制系统提示、当前输入、引用展开后的字符数或图片 token；文档和媒体另有大小限制。
+
+`/clear` 按 `(BOT_ID, 会话)` 保存起点，不删除钉钉记录，也不改变其他机器人的可见范围。例如只对 Claude 执行 `/clear` 后，Gemini / GPT 仍可以读取各自窗口内的旧消息。`/since` 可以查看当前实际可见条数、最早时间和清空状态；`/resume` 取消起点过滤，但不会加载无限历史。清空前的消息如果被用户重新显式引用，会作为本轮提供的内容处理。
+
+dws 登录或会话读取失败时，助手明确提示失败并停止该轮模型调用，不会回退旧数据库。部分互动卡片在 dws 中只有占位内容，会标记正文不可读取；不能把占位信息当作完整回复，也不能据图片占位文字猜测画面。
+
+### 群成员与定向提醒
+
+可以让助手提醒当前群中的某位成员。成员 ID 来自本轮 dws 名单，模型只选择成员编号，程序校验后通过 dws 以当前机器人身份发送 `@成员 + 完整回复`。每轮最多 3 人，不支持 @所有人；同名或身份不明确时先澄清。发送结果未知时不自动重发。
+
+这是回复过程中的定向提醒能力；当前没有新增后台定时巡群或定时提醒任务。
 
 ### 卡片
 
