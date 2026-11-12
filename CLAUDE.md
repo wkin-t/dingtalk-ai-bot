@@ -90,7 +90,9 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **采样可控化（Stage C/D）**: `/temp`、`/top_p`、`/sample` 命令写入 Redis（TTL 24h），`app/ai/sampling_pipeline.py` 在每次请求时读取并覆盖路由给出的默认值；`sampling_clamp.py` 按 provider 做边界 clamp（Claude 温度≤1.0）。卡片底部常显当前 top_p 值，手动设置时加 ⚙️ 标记。
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。Soul 文件命名 `{BOT_ID}__{cid}.md`（双下划线），防止多容器共享 soul（群聊 cid 跨容器相同）。
-- **数据降级**: Redis+MySQL 优先，不可用时自动降级到本地文件 (`data/history/`)。
+- **旧路径数据降级**: Redis+MySQL 与本地文件 (`data/history/`) 保留给 Deprecated 的企业微信等旧路径；钉钉会话不使用这套存储。
+- **钉钉会话唯一来源（2026-11-12）**：钉钉主链路仅从 dws 读取近期会话、引用、图片和文档，不读写 Redis/MySQL/文件对话历史，不合并旧库，不使用 `previous_response_id` 续接。dws 不可用时明确报错；单聊同样读取 dws。`/since`、`/resume`、`/soul evolve` 使用同一来源；`/clear` 仅保存本机器人可见起点。旧数据库保留，统计、Soul、采样配置继续由应用管理。dws 只能返回占位的互动卡片会标注正文不可读，不能从旧库恢复。
+- **群成员与定向 @**：通过只读 `chat +chat-members-list` 获取名单与完整性状态，模型以 `[[at:编号]]` 选择本轮名单成员。程序校验目标后通过独立、有界的 dws bot 发送入口发送定向提醒，每轮最多3人；同名成员要求澄清，不允许 @所有人，结果未知不重发。普通 dws 查询白名单仍禁止发送命令。
 - **OpenClaw 多 Agent 路由（⚠️ Deprecated，不再维护）**: `OPENCLAW_GROUP_AGENT_MAPPING` 按 conversationId 映射到不同 agent，严格模式 (`OPENCLAW_STRICT_ROUTING=true`) 下未映射的群拒绝访问。
 
 ## 配置
@@ -134,8 +136,7 @@ Feature flags（默认全 `true`，独立可回滚）:
 - `ENABLE_ROLE_REWRITE` — Stage A 消息角色重塑
 - `ENABLE_SAMPLE_OVERRIDE` — Stage D /temp /top_p 手动覆盖
 - `SEARCH_AUTONOMOUS` — 全自主搜索（fast/pro 档强制挂原生搜索工具，模型自决；lite 豁免）
-- `ENABLE_DWS_GROUP_CONTEXT` / `ENABLE_DWS_QUOTE_CONTEXT` — dws 群聊与引用上下文（默认开启）；读取前校验 `DWS_EXPECTED_CORP_ID` 和机器人企业，无法验证时跳过读取，企业不一致时阻断。
-- `DWS_PERSIST_GROUP_MESSAGES` / `DWS_QUOTE_FETCH_MEDIA` — 群消息持久化与引用媒体抓取（默认开启）；`DWS_CONTEXT_LIMIT` 默认 40，文档大小和文本上限分别由 `DWS_MAX_DOC_BYTES`、`DWS_MAX_DOC_CHARS` 控制，引用图片数量由 `DWS_MAX_QUOTE_IMAGES` 控制。
+- `ENABLE_DWS_QUOTE_CONTEXT` / `DWS_QUOTE_FETCH_MEDIA` — 引用展开和媒体抓取（默认开启）；`DWS_CONTEXT_LIMIT` 默认40，文档大小和文本上限由 `DWS_MAX_DOC_BYTES`、`DWS_MAX_DOC_CHARS` 控制，普通历史图和引用图总上限由 `DWS_MAX_QUOTE_IMAGES` 控制。钉钉会话读取始终使用 dws，旧 `ENABLE_DWS_GROUP_CONTEXT` 与 `DWS_PERSIST_GROUP_MESSAGES` 不再控制钉钉主链路。
 - `ENABLE_BQB` — ChineseBQB 表情包（默认开启）；`BQB_MAX_DISPLAY_PX` 和 `BQB_CARD_CANVAS_WIDTH_PX` 控制卡片图像尺寸。
 
 所有配置集中在 `app/config.py`，含环境变量读取辅助函数 (`_get_int`, `_get_bool`, `_get_float`)。

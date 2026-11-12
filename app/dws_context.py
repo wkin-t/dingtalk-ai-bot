@@ -27,6 +27,11 @@ _SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 # 正向只读子命令与参数白名单：任何未在此声明的子命令或参数一律拒绝执行
 _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
+    ("chat", "+chat-members-list"): {
+        "value_flags": {"--conversation-id", "--member-types", "--page-limit", "-f", "--format"},
+        "bool_flags": set(), "required_bool_flags": set(),
+        "required_value_flags": {"--conversation-id"},
+    },
     ("auth", "status"): {
         "value_flags": {"-f", "--format"},
         "bool_flags": {"--readonly"},
@@ -176,6 +181,10 @@ class DwsContextBundle:
     """单次请求由 dws 与 Stream 解析出的群聊历史、引用上下文、媒体文档与还原文本包。"""
 
     dws_available: bool = False
+    context_error: str = ""
+    context_images: list[bytes] = field(default_factory=list)
+    members: list[dict[str, str]] = field(default_factory=list)
+    members_complete: bool = False
     merged_history: list[dict[str, Any]] = field(default_factory=list)
     persistable_messages: list[dict[str, Any]] = field(default_factory=list)
     restored_user_content: str = ""
@@ -677,6 +686,9 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
             raw_text = candidate
 
     is_noise = raw_text in _NOISE_TEXTS
+    if not resources:
+        for media_id in re.findall(r"mediaId=([^\s)]+)", raw_text):
+            resources.append({"resourceType": "image", "resourceIdType": "mediaId", "resourceId": media_id})
 
     is_bot_like = (
         sender_type in {"robot", "bot", "chatbot", "system"}
@@ -1670,11 +1682,14 @@ async def fetch_dws_context_bundle(
     context_limit: int | None = None,
     quote_before: int | None = None,
     quote_after: int | None = None,
+    dws_only: bool = False,
 ) -> DwsContextBundle:
     """拉取只读群聊近期消息、还原 @提及、并解析引用消息/上下文/图片/文档。"""
     limit_val = context_limit if context_limit is not None else cfg.DWS_CONTEXT_LIMIT
     before_val = quote_before if quote_before is not None else cfg.DWS_QUOTE_CONTEXT_BEFORE
     after_val = quote_after if quote_after is not None else cfg.DWS_QUOTE_CONTEXT_AFTER
+    if dws_only:
+        history_messages = []
 
     # 1. 提取钉钉 Stream 自带的引用线索（支持 2s 窗口多条引用独立保存）与机器人归属企业 CorpId
     quotes: list[DwsQuoteInfo] = []
@@ -1699,7 +1714,7 @@ async def fetch_dws_context_bundle(
         fallback_history = list(history_messages)
 
     # 1.5 企业一致性门禁（严格 fail-closed）
-    need_dws = (is_group and bool(conversation_id) and cfg.ENABLE_DWS_GROUP_CONTEXT) or cfg.ENABLE_DWS_QUOTE_CONTEXT
+    need_dws = dws_only or (is_group and bool(conversation_id) and cfg.ENABLE_DWS_GROUP_CONTEXT) or cfg.ENABLE_DWS_QUOTE_CONTEXT
     dws_ready = False
     if need_dws:
         corp_check = await check_dws_corp_access(expected_corp_ids=expected_corp_ids)
@@ -1710,12 +1725,14 @@ async def fetch_dws_context_bundle(
                 corp_mismatch_error=corp_check.corp_mismatch_error,
             )
         dws_ready = corp_check.allowed
+    if dws_only and not dws_ready:
+        return DwsContextBundle(context_error="dws 登录或企业校验不可用，无法读取会话。请管理员检查登录状态。")
 
     recent_dws_items: list[dict[str, Any]] = []
     dws_available = False
 
     # 2. 群聊开启且通过企业门禁时拉取近期群聊消息
-    if dws_ready and is_group and conversation_id and cfg.ENABLE_DWS_GROUP_CONTEXT:
+    if dws_ready and conversation_id and (dws_only or (is_group and cfg.ENABLE_DWS_GROUP_CONTEXT)):
         payload = await run_dws_readonly_json(
             [
                 "chat",
@@ -1736,6 +1753,8 @@ async def fetch_dws_context_bundle(
                 if cleaned is not None:
                     recent_dws_items.append(cleaned)
             recent_dws_items.sort(key=lambda x: x.get("timestamp", ""))
+    if dws_only and not dws_available:
+        return DwsContextBundle(context_error="dws 会话读取失败，本次未调用模型。请稍后重试。")
 
     # 3. 识别本次触发消息对应的 dws 记录（同时服务引用发现与 @他人 还原）
     raw_curr_id_set = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
@@ -1821,7 +1840,7 @@ async def fetch_dws_context_bundle(
 
     # 4. 合并群聊近期历史与本地机器人问答历史，并提取可持久化的人类群消息
     persistable_messages: list[dict[str, Any]] = []
-    if is_group and dws_available and recent_dws_items:
+    if not dws_only and is_group and dws_available and recent_dws_items:
         merged_history = merge_dws_group_messages_with_history(
             dws_items=recent_dws_items,
             history_messages=history_messages,
@@ -1840,6 +1859,25 @@ async def fetch_dws_context_bundle(
             )
     else:
         merged_history = fallback_history
+
+    context_images: list[bytes] = []
+    context_media = []
+    if dws_only:
+        merged_history = []
+        persistable_messages = []
+        for item in recent_dws_items:
+            if item["message_id"] in curr_id_set or (cutoff_at and item["timestamp"] and item["timestamp"] <= cutoff_at):
+                continue
+            own = bool(chatbot_user_id and item["sender_id"] == chatbot_user_id)
+            text = item["display_text"] or ("[钉钉卡片正文不可读取]" if item["is_bot_like"] else "")
+            if item["is_noise"] and item["is_bot_like"]:
+                text = "[钉钉卡片正文不可读取]"
+            if not text or item["message_type"] == "system":
+                continue
+            merged_history.append({"role": "assistant" if own else "user", "content": text,
+                                   "timestamp": item["timestamp"], "sender_nick": item["sender"], "bot_id": cfg.BOT_ID if own else None})
+            context_media.append(_item_to_quote_info(item))
+        merged_history = merged_history[-cfg.MAX_HISTORY_LENGTH:]
 
     # 5. 若存在引用消息（含单聊与群聊），提取前后邻居上下文、只读图片字节与只读文档正文
     quote_prompt_block = ""
@@ -1909,6 +1947,8 @@ async def fetch_dws_context_bundle(
                     if around_items:
                         neighbor_source_items = around_items
 
+            if dws_only and cutoff_at:
+                neighbor_source_items = [item for item in neighbor_source_items if item["timestamp"] and item["timestamp"] > cutoff_at]
             n_lines = _build_quote_neighbor_lines(
                 neighbor_items=neighbor_source_items,
                 history_messages=history_messages,
@@ -1918,6 +1958,10 @@ async def fetch_dws_context_bundle(
                 after_count=after_val,
             )
             quotes_with_neighbors.append((q, n_lines))
+            if dws_only:
+                for item in neighbor_source_items:
+                    if item["message_id"] not in curr_id_set and (not cutoff_at or item["timestamp"] > cutoff_at):
+                        context_media.append(_item_to_quote_info(item))
 
         media_docs = await fetch_quoted_media_and_docs(
             quotes=valid_quotes,
@@ -1935,6 +1979,34 @@ async def fetch_dws_context_bundle(
             raw_user_content=effective_user_content,
         )
 
+    if dws_only and context_media:
+        seen_media = {q.message_id for q in valid_quotes}
+        media_candidates = []
+        for q in reversed(context_media):
+            if q.message_id in seen_media or not (q.resources or "alidocs.dingtalk.com" in q.text):
+                continue
+            seen_media.add(q.message_id)
+            media_candidates.append(q)
+        for q in reversed(media_candidates[:max(0, cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images))]):
+            context_docs = await fetch_quoted_media_and_docs(quotes=[q], conversation_id=conversation_id, dws_ready=dws_ready, run_dws_fn=run_dws_readonly_json)
+            remaining = cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images) - len(context_images)
+            images = context_docs.images[:max(0, remaining)]
+            if images:
+                first = len(context_images) + 1
+                context_images.extend(images)
+                merged_history.append({"role": "user", "content": f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。"})
+            elif any(r.get("resourceIdType") == "mediaId" or r.get("resourceType") in {"image", "picture", "photo", "emotion"} for r in q.resources):
+                merged_history.append({"role": "user", "content": f"[{q.create_time} {q.sender} 的图片未能读取原图，不可据占位文本猜测画面]"})
+            for doc in context_docs.documents:
+                merged_history.append({"role": "user", "content": f"[群历史文档: {doc.name}]\n{doc.content or doc.note}"})
+
+    members = []
+    members_complete = False
+    if dws_only and is_group and dws_ready:
+        from app.dws_members import parse_members
+        member_payload = await run_dws_readonly_json(["chat", "+chat-members-list", "--conversation-id", conversation_id, "--member-types", "user", "--page-limit", "5", "-f", "json"])
+        members, members_complete = parse_members(member_payload)
+
     return DwsContextBundle(
         dws_available=dws_available,
         merged_history=merged_history,
@@ -1943,6 +2015,9 @@ async def fetch_dws_context_bundle(
         quote_info=valid_quotes[0] if valid_quotes else None,
         quotes=valid_quotes,
         quoted_images=quoted_images,
+        context_images=context_images,
+        members=members,
+        members_complete=members_complete,
         quoted_documents=quoted_documents,
         quote_prompt_block=quote_prompt_block,
         quote_router_text=quote_router_text,

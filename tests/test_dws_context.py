@@ -11,6 +11,63 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
+@pytest.mark.asyncio
+async def test_dws_only_history_includes_bots_and_media_without_local_history():
+    from app.dws_context import fetch_dws_context_bundle, DwsCorpCheckResult
+    from app.dws_files import QuotedMediaAndDocsResult
+    rows = [
+        {"messageId": "p", "sender": "同事", "text": "[图片消息](mediaId=abc)", "createTime": "2026-11-12 10:00:00", "resources": [{"resourceType": "image", "resourceIdType": "mediaId", "resourceId": "abc"}]},
+        {"messageId": "b", "sender": "小克", "senderId": "bot", "senderType": "robot", "text": "之前的回答", "createTime": "2026-11-12 10:00:01"},
+    ]
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value={"messages": rows}), \
+         patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult(images=[b"png"])) as media:
+        result = await fetch_dws_context_bundle(conversation_id="conv", is_group=False, incoming_messages=[SimpleNamespace(chatbot_user_id="bot")], current_message_ids=[], raw_user_content="怎么看", history_messages=[{"role": "user", "content": "旧库残留"}], dws_only=True)
+    assert result.dws_available
+    assert all("旧库残留" not in m["content"] for m in result.merged_history)
+    assert any(m["role"] == "assistant" and m["content"] == "之前的回答" for m in result.merged_history)
+    assert result.context_images == [b"png"]
+    assert media.await_args.kwargs["quotes"][0].message_id == "p"
+
+
+@pytest.mark.asyncio
+async def test_dws_only_failure_never_falls_back_to_local_history():
+    from app.dws_context import fetch_dws_context_bundle, DwsCorpCheckResult
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=False)):
+        result = await fetch_dws_context_bundle(conversation_id="conv", is_group=True, incoming_messages=[], current_message_ids=[], raw_user_content="?", history_messages=[{"role": "user", "content": "旧库"}], dws_only=True)
+    assert result.merged_history == []
+    assert result.context_error
+
+
+def test_members_mentions_only_resolve_current_group_ids():
+    from app.dws_members import parse_members, resolve_mentions
+    members, complete = parse_members({"complete": True, "users": [
+        {"openDingtalkId": "real", "name": "甲"}, {"name": "无ID"}]})
+    assert complete and len(members) == 1
+    text, targets = resolve_mentions("请 [[at:1]] 看一下 [[at:999]]", members)
+    assert text == "请 @甲 看一下 "
+    assert targets == ["real"]
+
+
+@pytest.mark.asyncio
+async def test_mentions_send_is_scoped_to_bot_and_current_group():
+    from app.dws_members import send_mentions
+    from unittest.mock import MagicMock
+    proc = MagicMock(returncode=0)
+    proc.communicate = AsyncMock(return_value=(b'{"success":true}', b''))
+    with patch("app.dws_members.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc) as spawn:
+        await send_mentions("group-current", ["member"], [{"id": "member", "name": "甲"}])
+        args = spawn.await_args.args
+        assert args[args.index("--as") + 1] == "bot"
+        assert args[args.index("--group") + 1] == "group-current"
+        assert args[args.index("--at-open-dingtalk-ids") + 1] == "member"
+        assert "--at-all" not in args
+    with patch("app.dws_members.asyncio.create_subprocess_exec", new_callable=AsyncMock) as spawn:
+        with pytest.raises(ValueError):
+            await send_mentions("group-current", ["outsider"], [{"id": "member", "name": "甲"}])
+        spawn.assert_not_awaited()
+
+
 class TestReadonlySecurityGate:
     """硬编码只读白名单门禁测试：严禁任何发送、修改、撤回、下载等非只读指令通过。"""
 

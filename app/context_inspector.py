@@ -4,14 +4,15 @@
 from typing import Optional
 
 
-def render_since(session_key: str) -> str:
+def render_since(session_key: str, *, history=None) -> str:
     """返回 markdown，描述当前 agent 能看到的最早消息时间 + cutoff 状态 + 消息总数。"""
     from app.config import BOT_ID, MAX_HISTORY_LENGTH
     from app.agent_history import get_history_for_current_agent
     from app.clear_cutoff import get_cutoff_record
 
     # 用 MAX_HISTORY_LENGTH 读，与真实送给模型的上限一致
-    history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
+    if history is None:
+        history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
     cutoff_rec = get_cutoff_record(session_key)
 
     total = len(history)
@@ -44,6 +45,6 @@ def render_since(session_key: str) -> str:
         lines.append("> 此 cutoff 之前的历史对我不可见，但其他 agent 仍能看到。发 `/clear` 会更新 cutoff 到当前时刻。")
     else:
         lines.append("")
-        lines.append("> 暂未发过 /clear，能看到此 session 全部历史。")
+        lines.append("> 暂未发过 /clear；可见范围以本次读取的近期消息窗口为准。")
 
     return "\n".join(lines)

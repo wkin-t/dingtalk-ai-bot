@@ -8,13 +8,21 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
+@pytest.fixture(autouse=True)
+def isolated_dws_context():
+    from app.dws_context import DwsContextBundle
+    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True)), patch("app.dingtalk_bot.schedule_bqb_index_warmup"):
+        yield
+
+
 async def _iter_consumer_chunks(chunks):
     for chunk in chunks:
         yield chunk
 
 
 @pytest.mark.asyncio
-async def test_dws_turn_integrates_history_mentions_and_quoted_images():
+@pytest.mark.parametrize("image_field", ["quoted_images", "context_images"])
+async def test_dws_turn_integrates_history_mentions_and_quoted_images(image_field):
     from app.dingtalk_bot import GeminiBotHandler
     from app.dws_context import DwsContextBundle
 
@@ -28,30 +36,31 @@ async def test_dws_turn_integrates_history_mentions_and_quoted_images():
     png = b"\x89PNG\r\n\x1a\nimage"
     rows = [{"external_msg_id": "old", "content": "架构报错", "timestamp": "2026-11-11 10:00:00"}]
     bundle = DwsContextBundle(merged_history=[{"role": "user", "content": "架构报错", "sender_nick": "乙"}], persistable_messages=rows, restored_user_content="@小王 怎么看", quoted_images=[png])
+    bundle.quoted_images = []
+    setattr(bundle, image_field, [png])
     route = {"model": "fast", "thinking_level": "medium", "need_search": False, "temperature": "balanced", "thinking_text": "思考", "reason": "test"}
-    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), \
-         patch("app.dingtalk_bot.DWS_PERSIST_GROUP_MESSAGES", True), patch("app.dingtalk_bot.ENABLE_BQB", False), \
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), patch("app.dws_context.cfg.ENABLE_DWS_GROUP_CONTEXT", True), \
+         patch("app.dws_context.cfg.DWS_PERSIST_GROUP_MESSAGES", True), patch("app.dingtalk_bot.ENABLE_BQB", False), \
          patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
          patch("app.dingtalk_bot.USE_STATS", False), patch("app.dingtalk_bot.get_session_key", return_value="session"), \
-         patch("app.dingtalk_bot.get_history", return_value=[]), patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.memory.get_history", side_effect=AssertionError("钉钉不得读取旧库")), patch("app.dingtalk_bot._load_soul", return_value=""), \
          patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=bundle), \
-         patch("app.dingtalk_bot.persist_external_messages") as persist, \
+         patch("app.memory.persist_external_messages") as persist, \
          patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route) as router, \
          patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _: messages), \
          patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
          patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks([{"content": "回答"}])) as stream, \
-         patch("app.dingtalk_bot.update_history") as update, patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), patch("app.dingtalk_bot.asyncio.create_task"):
+         patch("app.memory.update_history") as update, patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), patch("app.dingtalk_bot.asyncio.create_task"):
         await handler.handle_ai_stream(incoming, "怎么看", "conv", [], current_message_ids=["m1", "m2"])
 
-    persist.assert_called_once_with("session", rows)
+    persist.assert_not_called()
     assert "@小王" in router.await_args.args[0] and "架构报错" in router.await_args.args[0]
     assert router.await_args.args[1] is True
     assert stream.call_args.kwargs["image_data_list"] == [png]
     assert "data:image/png;base64," in str(stream.call_args.args[0])
     assert "@小王" in str(stream.call_args.args[0])
-    assert update.call_args.kwargs["user_msg"] == "@小王 怎么看 [引用图片x1]"
-    assert update.call_args.kwargs["user_msg_id"] == "m1"
-    assert update.call_args.kwargs["extra_user_msg_ids"] == ["m2"]
+    assert stream.call_args.kwargs["conversation_id"] == ""
+    update.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -65,9 +74,9 @@ async def test_command_corp_mismatch_stops_before_execution(command):
     incoming = SimpleNamespace(message_id=None, message_type="text", text=SimpleNamespace(content=command),
         conversation_id="conv", conversation_type="2", sender_id="u", sender_staff_id="u", sender_nick="甲", at_users=[], chatbot_corp_id="corp", is_in_at_list=True)
     with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
-         patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), \
+         patch("app.dws_context.cfg.ENABLE_DWS_GROUP_CONTEXT", True), \
          patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=False, corp_mismatch_error="企业不一致")), \
-         patch("app.dingtalk_bot.run_dws_readonly_json", new_callable=AsyncMock) as fetch, \
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock) as fetch, \
          patch("app.clear_cutoff.reset_cutoff") as reset, patch("app.clear_cutoff.set_cutoff") as clear:
         await handler.process(SimpleNamespace(data={}))
     handler.reply_markdown.assert_called_once_with("dws 企业不一致错误", "企业不一致", incoming)
@@ -84,13 +93,12 @@ async def test_command_sync_persists_group_messages_before_command():
     handler = object.__new__(GeminiBotHandler)
     incoming = SimpleNamespace(conversation_type="2", chatbot_corp_id="corp", chatbot_user_id="bot")
     payload = {"messages": [{"messageId": "old", "sender": "乙", "text": "群消息", "createTime": "2026-11-11 14:00:00"}]}
-    with patch("app.dingtalk_bot.ENABLE_DWS_GROUP_CONTEXT", True), patch("app.dingtalk_bot.DWS_PERSIST_GROUP_MESSAGES", True), \
+    with patch("app.dws_context.cfg.ENABLE_DWS_GROUP_CONTEXT", True), patch("app.dws_context.cfg.DWS_PERSIST_GROUP_MESSAGES", True), \
          patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
-         patch("app.dingtalk_bot.run_dws_readonly_json", new_callable=AsyncMock, return_value=payload), \
-         patch("app.dingtalk_bot.persist_external_messages") as persist:
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value=payload), \
+         patch("app.memory.persist_external_messages") as persist:
         assert await handler._sync_dws_for_command(incoming, "conv", "session", pull_group_messages=True)
-    assert persist.call_args.args[0] == "session"
-    assert persist.call_args.args[1][0]["content"] == "群消息"
+    persist.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -112,6 +120,7 @@ async def test_history_commands_sync_before_execution(command):
         return ""
     with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
          patch.object(handler, "_sync_dws_for_command", side_effect=sync), \
+         patch.object(handler, "_read_dws_command_history", new_callable=AsyncMock, return_value=[]), \
          patch("app.context_inspector.render_since", side_effect=command_action), \
          patch("app.clear_cutoff.reset_cutoff", side_effect=command_action), \
          patch("app.agent_history.get_history_for_current_agent", return_value=[]), \
@@ -122,7 +131,7 @@ async def test_history_commands_sync_before_execution(command):
     assert events == ["sync", "command"]
 
 
-async def _run_dingtalk_consumer(chunks):
+async def _run_dingtalk_consumer(chunks, members=None):
     """运行真实 DingTalk handler 收尾逻辑，返回最终卡片全量更新数据。"""
     from app.dingtalk_bot import GeminiBotHandler
 
@@ -136,7 +145,7 @@ async def _run_dingtalk_consumer(chunks):
         sender_id="sender-test",
         sender_nick="测试用户",
         conversation_id="conversation-test",
-        conversation_type="1",
+        conversation_type="2" if members else "1",
     )
 
     route_result = {
@@ -148,18 +157,22 @@ async def _run_dingtalk_consumer(chunks):
         "reason": "test",
     }
 
-    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+    from app.dws_context import DwsContextBundle, DwsCorpCheckResult
+    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True, members=members or [], members_complete=True)), \
+         patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+         patch("app.dingtalk_bot.send_mentions", new_callable=AsyncMock) as send, \
+         patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
          patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
          patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
          patch("app.dingtalk_bot.USE_STATS", False), \
          patch("app.dingtalk_bot.get_session_key", return_value="session-test"), \
-         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.memory.get_history", return_value=[]), \
          patch("app.dingtalk_bot._load_soul", return_value=""), \
          patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
          patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
          patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
          patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks(chunks)), \
-         patch("app.dingtalk_bot.update_history"), \
+         patch("app.memory.update_history"), \
          patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
          patch("app.dingtalk_bot.asyncio.create_task"):
         await handler.handle_ai_stream(
@@ -169,7 +182,16 @@ async def _run_dingtalk_consumer(chunks):
             [],
         )
 
+    if members:
+        send.assert_awaited_once_with("conversation-test", [members[0]["id"]], members)
     return handler.card_helper.update_card.await_args_list[-1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_model_member_marker_sends_actual_targeted_notification():
+    result = await _run_dingtalk_consumer([{"content": "请 [[at:1]] 帮忙核对。"}], [{"id": "verified-id", "name": "同事甲"}])
+    assert "@同事甲" in result["msgContent"]
+    assert "[[at:" not in result["msgContent"]
 
 
 @pytest.mark.asyncio
@@ -345,13 +367,13 @@ async def test_dingtalk_consumer_embeds_bqb_in_card_and_sanitizes_history():
          patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
          patch("app.dingtalk_bot.USE_STATS", False), \
          patch("app.dingtalk_bot.get_session_key", return_value="session-bqb"), \
-         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.memory.get_history", return_value=[]), \
          patch("app.dingtalk_bot._load_soul", return_value=""), \
          patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
          patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
          patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
          patch("app.ai.backend.create_backend_stream", return_value=_iter_consumer_chunks(chunks)), \
-         patch("app.dingtalk_bot.update_history") as mock_update_history, \
+         patch("app.memory.update_history") as mock_update_history, \
          patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
          patch("app.dingtalk_bot.asyncio.create_task"):
         await handler.handle_ai_stream(
@@ -375,9 +397,7 @@ async def test_dingtalk_consumer_embeds_bqb_in_card_and_sanitizes_history():
     assert "![这么刺激吗](@lALP_FAKE_BQB_123)" in final_update["msgContent"]
 
     # 历史持久化仅保留语义标签，不写入短期 @media_id
-    saved_assistant_msg = mock_update_history.call_args.kwargs["assistant_msg"]
-    assert "[[bqb:金馆长熊猫 这么刺激吗]]" in saved_assistant_msg
-    assert "@lALP_FAKE_BQB_123" not in saved_assistant_msg
+    mock_update_history.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -462,12 +482,12 @@ async def test_dingtalk_group_quote_injects_context_into_router_and_llm_prompt()
          patch("app.dingtalk_bot.USE_STATS", False), \
          patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=fake_bundle), \
          patch("app.dingtalk_bot.get_session_key", return_value="dingtalk_cid-group-quote"), \
-         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.memory.get_history", return_value=[]), \
          patch("app.dingtalk_bot._load_soul", return_value=""), \
          patch("app.dingtalk_bot._analyze_with_openai", new=mock_router), \
          patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
          patch("app.ai.backend.create_backend_stream", side_effect=fake_create_stream), \
-         patch("app.dingtalk_bot.update_history") as mock_update_history, \
+         patch("app.memory.update_history") as mock_update_history, \
          patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
          patch("app.dingtalk_bot.asyncio.create_task"):
         await handler.handle_ai_stream(
@@ -489,8 +509,7 @@ async def test_dingtalk_group_quote_injects_context_into_router_and_llm_prompt()
     assert "越脱离群众越好" in joined_msgs
 
     # 3. 历史落盘保留紧凑单行引用摘要
-    saved_user_msg = mock_update_history.call_args.kwargs["user_msg"]
-    assert saved_user_msg == "[引用 杰少: 越脱离群众越好] ?"
+    mock_update_history.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -529,7 +548,7 @@ async def test_dingtalk_bot_reports_error_when_dws_corp_mismatches_bot_corp():
     with patch("app.dingtalk_bot.AI_BACKEND", "gemini"), \
          patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=mismatch_bundle), \
          patch("app.dingtalk_bot.get_session_key", return_value="dingtalk_cid-group-1"), \
-         patch("app.dingtalk_bot.get_history", return_value=[]), \
+         patch("app.memory.get_history", return_value=[]), \
          patch("app.dingtalk_bot._analyze_with_gemini", new=mock_router), \
          patch("app.ai.backend.create_backend_stream", new=mock_stream):
         await handler.handle_ai_stream(

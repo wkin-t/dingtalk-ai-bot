@@ -12,6 +12,10 @@ credentials/
 # 数据目录（含 dws 登录凭据目录 data-dws/，绝不打进镜像）
 data/
 data-*/
+deployment-backups/
+.pytest-basetemp/
+.codex/
+.grok/
 .agents/
 
 # Git
