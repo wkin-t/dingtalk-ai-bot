@@ -101,6 +101,26 @@ async def _verify_resolved_public_ips(url: str) -> str:
     return resolved[0]
 
 
+def _url_origin(url: str) -> tuple[str, str, int]:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").encode("idna").decode("ascii").lower()
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return parts.scheme, host, port
+
+
+def _download_error_summary(error: Optional[Exception]) -> str:
+    # HTTPX 异常常含签名 URL 或响应正文，只允许固定类别进入调用方的错误说明。
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"远端返回 HTTP {error.response.status_code}"
+    if isinstance(error, (httpx.TimeoutException, asyncio.TimeoutError)):
+        return "文件下载超时"
+    if isinstance(error, ValueError):
+        return "下载被安全策略禁止（URL、重定向或大小限制）"
+    if isinstance(error, (httpx.RequestError, OSError)):
+        return "文件下载网络连接失败"
+    return "文件下载未完成"
+
+
 async def fetch_public_bytes(
     url: str,
     *,
@@ -128,10 +148,11 @@ async def fetch_public_bytes(
     if allow_proxy_fallback or not attempts:
         attempts.append(None)
 
-    req_headers = {
+    base_headers = {
         "User-Agent": "dingtalk-ai-bot/1.0",
         "Accept-Encoding": "gzip, deflate",
     }
+    req_headers = dict(base_headers)
     if headers:
         req_headers.update({str(k): str(v) for k, v in headers.items() if k and v is not None})
 
@@ -144,27 +165,31 @@ async def fetch_public_bytes(
             "follow_redirects": False,
             "trust_env": False,
             "timeout": timeout_cfg,
-            "headers": req_headers,
         }
         if chosen_proxy:
             client_kwargs["proxy"] = chosen_proxy
 
         try:
             current_url = url
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                for hop in range(max_redirects + 1):
-                    validate_safe_public_url(current_url)
-                    if chosen_proxy and urlparse(chosen_proxy).scheme in {"http", "https"} and urlparse(current_url).scheme == "https":
-                        raise ValueError("HTTPS 固定公网 IP 不支持 HTTP CONNECT 代理")
-                    ip = await _verify_resolved_public_ips(current_url)
-                    parts = urlsplit(current_url)
-                    host = (parts.hostname or "").encode("idna").decode("ascii")
-                    ip_host = f"[{ip}]" if ":" in ip else ip
-                    netloc = f"{ip_host}:{parts.port}" if parts.port else ip_host
-                    pinned_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-                    host_header = f"[{host}]" if ":" in host else host
-                    if parts.port:
-                        host_header += f":{parts.port}"
+            current_headers = dict(req_headers)
+            redirect_cookies = httpx.Cookies()
+            for hop in range(max_redirects + 1):
+                validate_safe_public_url(current_url)
+                if chosen_proxy and urlparse(chosen_proxy).scheme in {"http", "https"} and urlparse(current_url).scheme == "https":
+                    raise ValueError("HTTPS 固定公网 IP 不支持 HTTP CONNECT 代理")
+                ip = await _verify_resolved_public_ips(current_url)
+                parts = urlsplit(current_url)
+                host = (parts.hostname or "").encode("idna").decode("ascii")
+                ip_host = f"[{ip}]" if ":" in ip else ip
+                netloc = f"{ip_host}:{parts.port}" if parts.port else ip_host
+                pinned_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+                host_header = f"[{host}]" if ":" in host else host
+                if parts.port:
+                    host_header += f":{parts.port}"
+                # Cookie 按原域名匹配，避免固定 IP 把不同虚拟主机误当成同一站点。
+                logical_request = httpx.Request("GET", current_url, headers=current_headers)
+                redirect_cookies.set_cookie_header(logical_request)
+                async with httpx.AsyncClient(headers=logical_request.headers, **client_kwargs) as client:
                     async with client.stream("GET", pinned_url, headers={"Host": host_header}, extensions={"sni_hostname": host}) as resp:
                         if resp.status_code in _REDIRECT_STATUSES:
                             if hop >= max_redirects:
@@ -174,6 +199,14 @@ async def fetch_public_bytes(
                                 raise ValueError("收到重定向响应但缺少 Location 头")
                             next_url = urljoin(current_url, location)
                             validate_safe_public_url(next_url)
+                            if parts.scheme == "https" and urlsplit(next_url).scheme != "https":
+                                raise ValueError("禁止 HTTPS 下载降级到 HTTP")
+                            if _url_origin(current_url) != _url_origin(next_url):
+                                current_headers = dict(base_headers)
+                                redirect_cookies = httpx.Cookies()
+                            else:
+                                redirect_cookies.extract_cookies(httpx.Response(
+                                    resp.status_code, headers=resp.headers, request=logical_request))
                             current_url = next_url
                             continue
 
@@ -201,4 +234,4 @@ async def fetch_public_bytes(
                 continue
             break
 
-    raise RuntimeError(f"拉取失败 ({url}): {last_error}")
+    raise RuntimeError(f"拉取失败：{_download_error_summary(last_error)}") from None

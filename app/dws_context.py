@@ -119,6 +119,10 @@ _PROXY_ENV_KEYS = (
 
 _AT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9._%+-])@([^\s@]+)")
 
+# 历史媒体读取与显式引用分开计预算，避免文档候选挤占图片配额或无限重试。
+_MAX_EXPLICIT_QUOTE_DOCUMENTS = 2
+_MAX_HISTORY_DOCUMENT_CANDIDATES = 2
+
 _backoff_until: float = 0.0
 _backoff_keychain_marker: tuple[tuple[str, int, int], ...] | None = None
 _cached_identity: DwsAuthIdentity | None = None
@@ -197,6 +201,39 @@ class DwsContextBundle:
     quote_router_text: str = ""
     quote_history_prefix: str = ""
     corp_mismatch_error: str = ""
+
+
+def _quote_has_image_resource(quote: DwsQuoteInfo) -> bool:
+    """判断消息是否包含可交给媒体 helper 的图片资源。"""
+    for raw_res in quote.resources:
+        if not isinstance(raw_res, dict):
+            continue
+        resource_type = str(raw_res.get("resourceType") or "").strip().lower()
+        resource_id_type = str(raw_res.get("resourceIdType") or "").strip()
+        if resource_id_type == "fileId" or resource_type in {"file", "document", "doc"}:
+            continue
+        if resource_type in {"image", "picture", "photo", "emotion"} or resource_id_type == "mediaId":
+            return True
+    return False
+
+
+def _quote_has_document_resource(quote: DwsQuoteInfo) -> bool:
+    """判断消息是否有在线文档或群文件候选，不依赖图片预算。"""
+    if "alidocs.dingtalk.com" in quote.text.lower() or "fileid:" in quote.text.lower():
+        return True
+    for raw_res in quote.resources:
+        if not isinstance(raw_res, dict):
+            continue
+        resource_type = str(raw_res.get("resourceType") or "").strip().lower()
+        resource_id_type = str(raw_res.get("resourceIdType") or "").strip()
+        resource_url = str(raw_res.get("url") or "").strip().lower()
+        if (
+            resource_id_type == "fileId"
+            or resource_type in {"file", "document", "doc"}
+            or "alidocs.dingtalk.com" in resource_url
+        ):
+            return True
+    return False
 
 
 def reset_dws_RuntimeState_for_tests() -> None:
@@ -1338,6 +1375,7 @@ def _build_quote_neighbor_lines(
     current_message_ids: Collection[str],
     before_count: int,
     after_count: int,
+    selected_message_ids: set[str] | None = None,
 ) -> list[str]:
     """在引用消息所处时间点附近组装前后上下文行（含同时间段的机器人历史回复）。"""
     excluded = {str(x).strip() for x in current_message_ids if str(x).strip()}
@@ -1449,6 +1487,13 @@ def _build_quote_neighbor_lines(
     else:
         sliced = timeline[-(before_count + after_count + 1) :]
         rel_target = -1
+
+    if selected_message_ids is not None:
+        selected_message_ids.update(
+            row.message_id
+            for row in sliced
+            if row.message_id and row.message_id != "__quoted_target__"
+        )
 
     lines: list[str] = []
     for i, row in enumerate(sliced):
@@ -1896,6 +1941,8 @@ async def fetch_dws_context_bundle(
     quote_history_prefix = ""
     quoted_images: list[bytes] = []
     quoted_documents: list[QuotedDocExtract] = []
+    max_image_budget = max(0, int(cfg.DWS_MAX_QUOTE_IMAGES))
+    quote_neighbor_media: list[DwsQuoteInfo] = []
 
     valid_quotes = [q for q in quotes if q.text or q.message_id or q.resources]
     if cfg.ENABLE_DWS_QUOTE_CONTEXT and valid_quotes:
@@ -1960,6 +2007,7 @@ async def fetch_dws_context_bundle(
 
             if dws_only and cutoff_at:
                 neighbor_source_items = [item for item in neighbor_source_items if item["timestamp"] and item["timestamp"] > cutoff_at]
+            selected_neighbor_ids: set[str] = set()
             n_lines = _build_quote_neighbor_lines(
                 neighbor_items=neighbor_source_items,
                 history_messages=history_messages,
@@ -1967,21 +2015,28 @@ async def fetch_dws_context_bundle(
                 current_message_ids=curr_id_set,
                 before_count=before_val,
                 after_count=after_val,
+                selected_message_ids=selected_neighbor_ids,
             )
             quotes_with_neighbors.append((q, n_lines))
             if dws_only:
                 for item in neighbor_source_items:
-                    if item["message_id"] not in curr_id_set and (not cutoff_at or item["timestamp"] > cutoff_at):
-                        context_media.append(_item_to_quote_info(item))
+                    if (
+                        item["message_id"] in selected_neighbor_ids
+                        and item["message_id"] not in curr_id_set
+                        and (not cutoff_at or item["timestamp"] > cutoff_at)
+                    ):
+                        quote_neighbor_media.append(_item_to_quote_info(item))
 
         media_docs = await fetch_quoted_media_and_docs(
             quotes=valid_quotes,
             conversation_id=conversation_id,
             dws_ready=dws_ready,
             run_dws_fn=run_dws_readonly_json,
+            max_images=max_image_budget,
+            max_documents=_MAX_EXPLICIT_QUOTE_DOCUMENTS,
         )
-        quoted_images = media_docs.images
-        quoted_documents = media_docs.documents
+        quoted_images = list(media_docs.images[:max_image_budget])
+        quoted_documents = list(media_docs.documents[:_MAX_EXPLICIT_QUOTE_DOCUMENTS])
 
         quote_prompt_block, quote_router_text, quote_history_prefix = _format_multi_quote_outputs(
             quotes_with_neighbors=quotes_with_neighbors,
@@ -1990,33 +2045,81 @@ async def fetch_dws_context_bundle(
             raw_user_content=effective_user_content,
         )
 
-    if dws_only and context_media:
+    if dws_only and (context_media or quote_neighbor_media):
+        # 普通历史媒体仅来自 N 条可见历史；引用媒体只来自明确选中的前后邻居，不能扩张历史预算。
+        visible_history_media = [
+            q for q in context_media if q.message_id in history_media_entries
+        ]
+        media_sources = [*visible_history_media, *quote_neighbor_media]
         seen_media = {q.message_id for q in valid_quotes}
-        media_candidates = []
-        for q in reversed(context_media):
-            if q.message_id in seen_media or not (q.resources or "alidocs.dingtalk.com" in q.text):
+        image_candidates: list[DwsQuoteInfo] = []
+        document_candidates: list[DwsQuoteInfo] = []
+        for q in reversed(media_sources):
+            if not q.message_id or q.message_id in seen_media:
                 continue
             seen_media.add(q.message_id)
-            media_candidates.append(q)
-        for q in reversed(media_candidates[:max(0, cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images))]):
-            context_docs = await fetch_quoted_media_and_docs(quotes=[q], conversation_id=conversation_id, dws_ready=dws_ready, run_dws_fn=run_dws_readonly_json)
-            supplements = []
-            remaining = cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images) - len(context_images)
-            images = context_docs.images[:max(0, remaining)]
+            if _quote_has_image_resource(q):
+                image_candidates.append(q)
+            if _quote_has_document_resource(q):
+                document_candidates.append(q)
+
+        def append_media_supplements(quote: DwsQuoteInfo, supplements: list[str]) -> None:
+            nonlocal quote_prompt_block
+            if not supplements:
+                return
+            supplement = "\n".join(supplements)
+            if quote.message_id in history_media_entries:
+                history_media_entries[quote.message_id]["content"] += "\n" + supplement
+            else:
+                quote_prompt_block += "\n" + supplement
+
+        # 图片候选尝试数沿用旧行为：优先最近消息，最多尝试当前剩余图片预算。
+        remaining_images = max(0, max_image_budget - len(quoted_images))
+        for q in reversed(image_candidates[:remaining_images]):
+            if remaining_images <= 0:
+                break
+            context_media_result = await fetch_quoted_media_and_docs(
+                quotes=[q],
+                conversation_id=conversation_id,
+                dws_ready=dws_ready,
+                run_dws_fn=run_dws_readonly_json,
+                max_images=remaining_images,
+                max_documents=0,
+            )
+            supplements: list[str] = []
+            images = list(context_media_result.images[:remaining_images])
             if images:
                 first = len(context_images) + 1
                 context_images.extend(images)
-                supplements.append(f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。")
-            elif any(r.get("resourceIdType") == "mediaId" or r.get("resourceType") in {"image", "picture", "photo", "emotion"} for r in q.resources):
-                supplements.append(f"[{q.create_time} {q.sender} 的图片未能读取原图，不可据占位文本猜测画面]")
-            for doc in context_docs.documents:
-                supplements.append(f"[群历史文档: {doc.name}]\n{doc.content or doc.note}")
-            if supplements:
-                supplement = "\n".join(supplements)
-                if q.message_id in history_media_entries:
-                    history_media_entries[q.message_id]["content"] += "\n" + supplement
-                else:
-                    quote_prompt_block += "\n" + supplement
+                remaining_images -= len(images)
+                supplements.append(
+                    f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。"
+                )
+            else:
+                supplements.append(
+                    f"[{q.create_time} {q.sender} 的图片未能读取原图，不可据占位文本猜测画面]"
+                )
+            append_media_supplements(q, supplements)
+
+        # 文档使用独立预算；即使图片预算为零，也最多尝试两个可见文档候选。
+        remaining_documents = _MAX_HISTORY_DOCUMENT_CANDIDATES
+        for q in document_candidates[:_MAX_HISTORY_DOCUMENT_CANDIDATES]:
+            if remaining_documents <= 0:
+                break
+            context_media_result = await fetch_quoted_media_and_docs(
+                quotes=[q],
+                conversation_id=conversation_id,
+                dws_ready=dws_ready,
+                run_dws_fn=run_dws_readonly_json,
+                max_images=0,
+                max_documents=remaining_documents,
+            )
+            documents = list(context_media_result.documents[:remaining_documents])
+            remaining_documents -= len(documents)
+            append_media_supplements(
+                q,
+                [f"[群历史文档: {doc.name}]\n{doc.content or doc.note}" for doc in documents],
+            )
 
     members = []
     members_complete = False

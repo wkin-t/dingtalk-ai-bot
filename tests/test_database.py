@@ -14,6 +14,7 @@
 import pytest
 import json
 import time
+import pymysql
 from unittest.mock import patch, MagicMock, PropertyMock, call
 from contextlib import contextmanager
 from datetime import datetime
@@ -721,6 +722,48 @@ class TestUsageStats:
 class TestInitDatabase:
     """MySQLClient.init_database() 测试"""
 
+    @staticmethod
+    def _run_init_database_with_migration_error(sql_marker, error):
+        """让指定迁移语句失败，并返回初始化结果及 mock 对象。"""
+        mock_init_conn = MagicMock()
+        mock_init_cursor = MagicMock()
+        mock_init_conn.cursor.return_value.__enter__ = lambda s: mock_init_cursor
+        mock_init_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_table_conn = MagicMock()
+        mock_table_cursor = MagicMock()
+
+        def execute_side_effect(sql, *args):
+            if sql_marker in sql:
+                raise error
+
+        mock_table_cursor.execute.side_effect = execute_side_effect
+        mock_table_conn.cursor.return_value.__enter__ = lambda s: mock_table_cursor
+        mock_table_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.database.pymysql.connect", return_value=mock_init_conn):
+            @contextmanager
+            def fake_conn():
+                yield mock_table_conn
+
+            with patch("app.database.MySQLClient.get_connection", side_effect=fake_conn):
+                from app.database import MySQLClient
+                result = MySQLClient.init_database()
+
+        return result, mock_table_conn, mock_table_cursor
+
+    @staticmethod
+    def _assert_migration_failure_stops_downstream(result, table_conn, table_cursor):
+        """迁移失败必须返回 False，且不能提交或继续执行后续建表。"""
+        assert result is False
+        table_conn.commit.assert_not_called()
+        sqls = [call_args[0][0] for call_args in table_cursor.execute.call_args_list]
+        assert not any(
+            "ALTER TABLE" in sql and "thinking_blocks" in sql for sql in sqls
+        )
+        assert not any("user_config" in sql for sql in sqls)
+        assert not any("usage_stats" in sql for sql in sqls)
+
     def test_init_database_creates_tables_with_bot_id(self):
         """init_database 应创建包含 bot_id 列的表"""
         mock_init_conn = MagicMock()
@@ -762,7 +805,7 @@ class TestInitDatabase:
         mock_table_cursor = MagicMock()
         # ALTER TABLE 抛出异常（列已存在）
         def execute_side_effect(sql, *args):
-            if "ALTER TABLE" in sql:
+            if "ALTER TABLE" in sql and "ADD COLUMN `bot_id`" in sql:
                 raise Exception("Duplicate column name 'bot_id'")
         mock_table_cursor.execute.side_effect = execute_side_effect
         mock_table_conn.cursor.return_value.__enter__ = lambda s: mock_table_cursor
@@ -775,9 +818,181 @@ class TestInitDatabase:
 
             with patch("app.database.MySQLClient.get_connection", side_effect=fake_conn):
                 from app.database import MySQLClient
-                # 不应抛出异常（CREATE TABLE 也会因 side_effect 失败，所以会进入 except）
-                # 这里主要测试 ALTER TABLE 异常被静默处理
-                MySQLClient.init_database()
+                result = MySQLClient.init_database()
+
+        assert result is True
+        mock_table_conn.commit.assert_called_once()
+        sqls = [call_args[0][0] for call_args in mock_table_cursor.execute.call_args_list]
+        assert any("ADD COLUMN `external_msg_id`" in sql for sql in sqls)
+        assert any("ADD UNIQUE INDEX `uk_session_ext_msg`" in sql for sql in sqls)
+        assert any("user_config" in sql for sql in sqls)
+        assert any("usage_stats" in sql for sql in sqls)
+
+    @pytest.mark.parametrize(
+        ("error_type", "error_args"),
+        [
+            (pymysql.err.OperationalError, (1142, "permission denied")),
+            (pymysql.err.OperationalError, (1205, "lock wait timeout")),
+            (pymysql.err.OperationalError, (1061, "duplicate key name")),
+            (pymysql.err.IntegrityError, (1062, "duplicate entry")),
+            (RuntimeError, ("unexpected migration failure",)),
+        ],
+    )
+    def test_init_database_external_msg_id_column_unexpected_error_returns_false(
+        self, error_type, error_args
+    ):
+        """external_msg_id 列迁移的非 1060 异常必须进入失败路径。"""
+        result, table_conn, table_cursor = self._run_init_database_with_migration_error(
+            "ADD COLUMN `external_msg_id`", error_type(*error_args)
+        )
+
+        self._assert_migration_failure_stops_downstream(result, table_conn, table_cursor)
+
+    @pytest.mark.parametrize(
+        ("error_type", "error_args"),
+        [
+            (pymysql.err.OperationalError, (1142, "permission denied")),
+            (pymysql.err.OperationalError, (1205, "lock wait timeout")),
+            (pymysql.err.OperationalError, (1060, "duplicate column")),
+            (pymysql.err.IntegrityError, (1062, "duplicate entry")),
+            (RuntimeError, ("unexpected migration failure",)),
+        ],
+    )
+    def test_init_database_external_msg_id_index_unexpected_error_returns_false(
+        self, error_type, error_args
+    ):
+        """uk_session_ext_msg 索引迁移的非 1061 异常必须进入失败路径。"""
+        result, table_conn, table_cursor = self._run_init_database_with_migration_error(
+            "ADD UNIQUE INDEX `uk_session_ext_msg`", error_type(*error_args)
+        )
+
+        self._assert_migration_failure_stops_downstream(result, table_conn, table_cursor)
+
+    def test_init_database_external_msg_id_schema_already_exists_is_idempotent(self):
+        """已有 external_msg_id 列和唯一索引时，1060/1061 应保持幂等成功。"""
+        mock_init_conn = MagicMock()
+        mock_init_cursor = MagicMock()
+        mock_init_conn.cursor.return_value.__enter__ = lambda s: mock_init_cursor
+        mock_init_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_table_conn = MagicMock()
+        mock_table_cursor = MagicMock()
+
+        def execute_side_effect(sql, *args):
+            if "ADD COLUMN `external_msg_id`" in sql:
+                raise pymysql.err.OperationalError(1060, "duplicate column")
+            if "ADD UNIQUE INDEX `uk_session_ext_msg`" in sql:
+                raise pymysql.err.OperationalError(1061, "duplicate key name")
+
+        mock_table_cursor.execute.side_effect = execute_side_effect
+        mock_table_conn.cursor.return_value.__enter__ = lambda s: mock_table_cursor
+        mock_table_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.database.pymysql.connect", return_value=mock_init_conn):
+            @contextmanager
+            def fake_conn():
+                yield mock_table_conn
+
+            with patch("app.database.MySQLClient.get_connection", side_effect=fake_conn):
+                from app.database import MySQLClient
+                result = MySQLClient.init_database()
+
+        assert result is True
+        mock_table_conn.commit.assert_called_once()
+        sqls = [call_args[0][0] for call_args in mock_table_cursor.execute.call_args_list]
+        assert any("user_config" in sql for sql in sqls)
+        assert any("usage_stats" in sql for sql in sqls)
+
+    def test_init_database_external_msg_id_partial_migration_can_retry(self):
+        """列已新增但索引失败时，重试应忽略 1060 并完成剩余迁移。"""
+        mock_init_conn = MagicMock()
+        mock_init_cursor = MagicMock()
+        mock_init_conn.cursor.return_value.__enter__ = lambda s: mock_init_cursor
+        mock_init_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        first_table_conn = MagicMock()
+        first_table_cursor = MagicMock()
+
+        def first_execute_side_effect(sql, *args):
+            if "ADD UNIQUE INDEX `uk_session_ext_msg`" in sql:
+                raise pymysql.err.OperationalError(1205, "lock wait timeout")
+
+        first_table_cursor.execute.side_effect = first_execute_side_effect
+        first_table_conn.cursor.return_value.__enter__ = lambda s: first_table_cursor
+        first_table_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        retry_table_conn = MagicMock()
+        retry_table_cursor = MagicMock()
+
+        def retry_execute_side_effect(sql, *args):
+            if "ADD COLUMN `external_msg_id`" in sql:
+                raise pymysql.err.OperationalError(1060, "duplicate column")
+
+        retry_table_cursor.execute.side_effect = retry_execute_side_effect
+        retry_table_conn.cursor.return_value.__enter__ = lambda s: retry_table_cursor
+        retry_table_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        @contextmanager
+        def first_conn():
+            yield first_table_conn
+
+        @contextmanager
+        def retry_conn():
+            yield retry_table_conn
+
+        with patch("app.database.pymysql.connect", return_value=mock_init_conn):
+            with patch(
+                "app.database.MySQLClient.get_connection",
+                side_effect=[first_conn(), retry_conn()],
+            ):
+                from app.database import MySQLClient
+                first_result = MySQLClient.init_database()
+                retry_result = MySQLClient.init_database()
+
+        self._assert_migration_failure_stops_downstream(
+            first_result, first_table_conn, first_table_cursor
+        )
+        first_sqls = [
+            call_args[0][0] for call_args in first_table_cursor.execute.call_args_list
+        ]
+        assert any("ADD COLUMN `external_msg_id`" in sql for sql in first_sqls)
+        assert any("ADD UNIQUE INDEX `uk_session_ext_msg`" in sql for sql in first_sqls)
+        assert retry_result is True
+        retry_table_conn.commit.assert_called_once()
+        sqls = [call_args[0][0] for call_args in retry_table_cursor.execute.call_args_list]
+        assert any("ADD COLUMN `external_msg_id`" in sql for sql in sqls)
+        assert any("ADD UNIQUE INDEX `uk_session_ext_msg`" in sql for sql in sqls)
+        assert any("user_config" in sql for sql in sqls)
+        assert any("usage_stats" in sql for sql in sqls)
+
+    def test_init_database_external_msg_id_schema_migration_success(self):
+        """external_msg_id 列和唯一索引迁移成功时应提交并继续初始化。"""
+        mock_init_conn = MagicMock()
+        mock_init_cursor = MagicMock()
+        mock_init_conn.cursor.return_value.__enter__ = lambda s: mock_init_cursor
+        mock_init_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_table_conn = MagicMock()
+        mock_table_cursor = MagicMock()
+        mock_table_conn.cursor.return_value.__enter__ = lambda s: mock_table_cursor
+        mock_table_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("app.database.pymysql.connect", return_value=mock_init_conn):
+            @contextmanager
+            def fake_conn():
+                yield mock_table_conn
+
+            with patch("app.database.MySQLClient.get_connection", side_effect=fake_conn):
+                from app.database import MySQLClient
+                result = MySQLClient.init_database()
+
+        assert result is True
+        mock_table_conn.commit.assert_called_once()
+        sqls = [call_args[0][0] for call_args in mock_table_cursor.execute.call_args_list]
+        assert any("ADD COLUMN `external_msg_id`" in sql for sql in sqls)
+        assert any("ADD UNIQUE INDEX `uk_session_ext_msg`" in sql for sql in sqls)
+        assert any("user_config" in sql for sql in sqls)
+        assert any("usage_stats" in sql for sql in sqls)
 
     def test_init_database_failure(self):
         """数据库初始化失败应返回 False"""

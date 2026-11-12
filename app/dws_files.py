@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Sequence
+from urllib.parse import urlsplit
 
 from app import config as cfg
 from app.bqb_image import detect_image_format, normalize_image_for_vision
@@ -244,8 +245,19 @@ def parse_text_bytes(data: bytes) -> str:
     return data.decode("utf-8", errors="replace").strip()
 
 
+def _document_display_name(name: str) -> str:
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip()
+    if re.match(r"^[a-z][a-z0-9+.-]*://", name, re.IGNORECASE):
+        try:
+            return urlsplit(name).path.rsplit("/", 1)[-1] or "文档"
+        except ValueError:
+            return "文档"
+    return name
+
+
 def parse_document_bytes(data: bytes, *, filename: str = "", extension: str = "") -> tuple[str, str]:
     """按扩展名分派内存解析，返回 `(解析正文, 附加说明)`。"""
+    filename = _document_display_name(filename)
     ext = (extension or "").strip().lstrip(".").lower()
     if not ext and "." in filename:
         ext = filename.rsplit(".", 1)[-1].lower()
@@ -265,8 +277,8 @@ def parse_document_bytes(data: bytes, *, filename: str = "", extension: str = ""
             if text:
                 return text, ""
         return "", f"[暂不支持内存解析 .{ext or 'unknown'} 二进制文件格式]"
-    except Exception as exc:
-        return "", f"[解析文件 {filename or ext} 失败: {exc}]"
+    except Exception:
+        return "", f"[解析文件 {filename or ext} 失败：文件损坏、格式不受支持或超出解析限制]"
 
 
 def _unwrap_dws_dict(payload: Any) -> dict[str, Any] | None:
@@ -303,6 +315,14 @@ def _truncate_doc_text(text: str, max_chars: int) -> str:
     if max_chars > 0 and len(clean) > max_chars:
         return f"{clean[:max_chars]}\n…[文档内容已截断，原文共 {len(clean)} 字]"
     return clean
+
+
+async def _run_media_query(run_dws_fn: Callable[[Sequence[str]], Awaitable[Any]], args: Sequence[str]) -> Any:
+    try:
+        return await run_dws_fn(args)
+    except Exception:
+        # 资源增强失败由调用方生成固定说明；CLI 异常可能含链接或正文，不向模型透传。
+        return None
 
 
 async def _fetch_single_quoted_image(
@@ -347,7 +367,8 @@ async def _fetch_single_quoted_image(
 
     with tempfile.TemporaryDirectory(prefix="dws_ro_media_") as tmp_dir:
         real_tmp = os.path.realpath(tmp_dir)
-        dl_payload = await run_dws_fn(
+        dl_payload = await _run_media_query(
+            run_dws_fn,
             [
                 "chat",
                 "message",
@@ -366,6 +387,8 @@ async def _fetch_single_quoted_image(
                 "json",
             ]
         )
+        if dl_payload is None:
+            return None
         candidate_files: list[str] = []
         dl_dict = _unwrap_dws_dict(dl_payload)
         if dl_dict:
@@ -405,17 +428,22 @@ async def fetch_quoted_media_and_docs(
     conversation_id: str,
     dws_ready: bool,
     run_dws_fn: Callable[[Sequence[str]], Awaitable[Any]],
+    max_images: int | None = None,
+    max_documents: int | None = None,
 ) -> QuotedMediaAndDocsResult:
-    """只读提取被引用消息中的图片字节与在线文档/群文件正文。"""
+    """只读提取媒体正文；独立预算允许调用方用 0 禁用某类读取，不能突破配置硬上限。"""
     result = QuotedMediaAndDocsResult()
     if not cfg.DWS_QUOTE_FETCH_MEDIA or not quotes:
         return result
 
-    max_images = max(0, int(cfg.DWS_MAX_QUOTE_IMAGES))
+    image_limit = max(0, int(cfg.DWS_MAX_QUOTE_IMAGES))
+    max_images = image_limit if max_images is None else max(0, min(image_limit, int(max_images)))
+    document_limit = _MAX_QUOTE_DOCS if max_documents is None else max(0, min(_MAX_QUOTE_DOCS, int(max_documents)))
     max_doc_bytes = max(65536, int(cfg.DWS_MAX_DOC_BYTES))
     max_doc_chars = max(500, int(cfg.DWS_MAX_DOC_CHARS))
 
     seen_img_keys: set[str] = set()
+    image_attempts = 0
     candidate_nodes: list[str] = []
     seen_nodes: set[str] = set()
 
@@ -443,7 +471,7 @@ async def fetch_quoted_media_and_docs(
                         candidate_nodes.append(nid)
                 continue
 
-            if len(result.images) < max_images and (
+            if len(result.images) < max_images and image_attempts < max_images and (
                 r_type in {"image", "picture", "photo", "emotion"}
                 or r_id_type == "mediaId"
             ):
@@ -452,6 +480,7 @@ async def fetch_quoted_media_and_docs(
                     continue
                 if dedup_k:
                     seen_img_keys.add(dedup_k)
+                image_attempts += 1
                 img_bytes = await _fetch_single_quoted_image(
                     res,
                     quote_conv_id=q_conv,
@@ -470,19 +499,21 @@ async def fetch_quoted_media_and_docs(
     if not dws_ready or not candidate_nodes:
         return result
 
-    for node_id in candidate_nodes[:_MAX_QUOTE_DOCS]:
-        info = _unwrap_dws_dict(await run_dws_fn(["doc", "info", "--node", node_id, "-f", "json"]))
+    for node_id in candidate_nodes[:document_limit]:
+        info = _unwrap_dws_dict(await _run_media_query(run_dws_fn, ["doc", "info", "--node", node_id, "-f", "json"]))
         if not info:
+            result.documents.append(QuotedDocExtract(node_id=node_id, name="引用文档", extension="file",
+                note="[读取文档信息失败，文件可能不可访问或当前账号无权限]"))
             continue
 
-        doc_name = str(info.get("name") or info.get("title") or node_id).strip()
+        doc_name = _document_display_name(str(info.get("name") or info.get("title") or node_id))
         ext = str(info.get("extension") or "").strip().lstrip(".").lower()
         if not ext and "." in doc_name:
             ext = doc_name.rsplit(".", 1)[-1].lower()
 
         # 1. 钉钉在线文档（adoc）：直接走 dws doc read
         if ext == "adoc":
-            read_raw = await run_dws_fn(["doc", "read", "--node", node_id, "-f", "json"])
+            read_raw = await _run_media_query(run_dws_fn, ["doc", "read", "--node", node_id, "-f", "json"])
             adoc_text = _extract_adoc_text(read_raw)
             if adoc_text:
                 result.documents.append(
@@ -506,7 +537,7 @@ async def fetch_quoted_media_and_docs(
 
         # 2. 群上传文件或云盘文件：强制走 --url-only 获取临时链接并在内存中解析
         dl_info = _unwrap_dws_dict(
-            await run_dws_fn(["drive", "download", "--node", node_id, "--url-only", "-f", "json"])
+            await _run_media_query(run_dws_fn, ["drive", "download", "--node", node_id, "--url-only", "-f", "json"])
         )
         if not dl_info:
             result.documents.append(
@@ -519,7 +550,7 @@ async def fetch_quoted_media_and_docs(
             )
             continue
 
-        file_name = str(dl_info.get("fileName") or doc_name).strip()
+        file_name = _document_display_name(str(dl_info.get("fileName") or doc_name))
         try:
             file_size = int(dl_info.get("fileSize") or dl_info.get("size") or 0)
         except (TypeError, ValueError):
@@ -556,13 +587,13 @@ async def fetch_quoted_media_and_docs(
                 max_bytes=max_doc_bytes,
                 timeout_seconds=12.0,
             )
-        except Exception as exc:
+        except Exception:
             result.documents.append(
                 QuotedDocExtract(
                     node_id=node_id,
                     name=file_name,
                     extension=ext or "file",
-                    note=f"[内存读取文件《{file_name}》失败: {exc}]",
+                    note=f"[内存读取文件《{file_name}》失败：无法安全完成下载，文件可能不可访问或超出大小限制]",
                 )
             )
             continue

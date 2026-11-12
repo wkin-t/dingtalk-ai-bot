@@ -192,10 +192,9 @@ class MySQLClient:
                         """)
                         print("✅ 已为 conversation_history 表添加 external_msg_id 列")
                     except pymysql.err.OperationalError as e:
+                        # 仅 MySQL 1060 表示目标列已存在，其他异常必须中断初始化。
                         if not e.args or e.args[0] != 1060:
-                            print(f"⚠️ 添加 external_msg_id 列异常: {e}")
-                    except Exception:
-                        pass
+                            raise
 
                     try:
                         cursor.execute("""
@@ -204,10 +203,9 @@ class MySQLClient:
                         """)
                         print("✅ 已为 conversation_history 表添加 uk_session_ext_msg 唯一索引")
                     except pymysql.err.OperationalError as e:
+                        # 仅 MySQL 1061 表示目标索引已存在，其他异常必须中断初始化。
                         if not e.args or e.args[0] != 1061:
-                            print(f"⚠️ 添加 uk_session_ext_msg 索引异常: {e}")
-                    except Exception:
-                        pass
+                            raise
 
                     # 兼容旧表：自动添加 thinking_blocks 列（如果不存在）
                     try:

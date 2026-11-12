@@ -28,6 +28,118 @@ def read_dws_only_window():
     return read
 
 
+def _dws_image_row(message_id, sender, timestamp, resource_id):
+    """构造带图片资源的最小 dws 历史消息。"""
+    resource_ids = resource_id if isinstance(resource_id, (list, tuple)) else [resource_id]
+    return {
+        "messageId": message_id,
+        "conversationId": "cid",
+        "sender": sender,
+        "messageType": "picture",
+        "text": "[图片]",
+        "createTime": timestamp,
+        "resources": [
+            {
+                "resourceId": item_id,
+                "resourceIdType": "mediaId",
+                "resourceType": "image",
+            }
+            for item_id in resource_ids
+        ],
+    }
+
+
+def _dws_document_row(message_id, sender, timestamp, node_id):
+    """构造带在线文档链接的最小 dws 历史消息。"""
+    return {
+        "messageId": message_id,
+        "conversationId": "cid",
+        "sender": sender,
+        "text": f"在线文档 https://alidocs.dingtalk.com/i/nodes/{node_id}",
+        "createTime": timestamp,
+    }
+
+
+def _dws_current_row(message_id, quoted_id, sender="丙", timestamp="2026-11-12 10:00:02"):
+    """构造带引用图片线索的当前 dws 消息。"""
+    return {
+        "messageId": message_id,
+        "conversationId": "cid",
+        "sender": sender,
+        "text": "@Gemini小助手 看图并读文档",
+        "createTime": timestamp,
+        "quotedMessage": {"messageId": quoted_id, "sender": "甲", "text": "[图片]"},
+    }
+
+
+def _dws_incoming(message_id, content="看图并读文档", sender="丙"):
+    """构造与当前 dws 消息对应的 Stream 消息。"""
+    return SimpleNamespace(
+        message_id=message_id,
+        sender_nick=sender,
+        conversation_id="cid",
+        conversation_type="2",
+        chatbot_user_id="bot",
+        chatbot_corp_id="corp",
+        text=SimpleNamespace(content=content, extensions={}),
+        extensions={},
+    )
+
+
+@pytest.fixture
+def read_dws_media_bundle():
+    """复用媒体预算测试的 dws 企业门禁、查询和 helper mock。"""
+    from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+    async def read(
+        rows,
+        *,
+        media_factory,
+        incoming_messages=(),
+        current_ids=(),
+        raw_user_content="看一下",
+        quote_before=None,
+        quote_after=None,
+    ):
+        calls = []
+
+        async def query(_args, **_kwargs):
+            return {"messages": rows}
+
+        async def media(*, quotes, **kwargs):
+            quote_id = quotes[0].message_id
+            calls.append((quote_id, kwargs))
+            return media_factory(quote_id)
+
+        with patch(
+            "app.dws_context.check_dws_corp_access",
+            new_callable=AsyncMock,
+            return_value=DwsCorpCheckResult(allowed=True),
+        ), patch(
+            "app.dws_context.run_dws_readonly_json",
+            new_callable=AsyncMock,
+            side_effect=query,
+        ), patch(
+            "app.dws_context.fetch_quoted_media_and_docs",
+            new_callable=AsyncMock,
+            side_effect=media,
+        ):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid",
+                is_group=False,
+                incoming_messages=list(incoming_messages),
+                current_message_ids=list(current_ids),
+                raw_user_content=raw_user_content,
+                history_messages=[],
+                dws_only=True,
+                quote_before=quote_before,
+                quote_after=quote_after,
+            )
+        return bundle, calls
+
+    return read
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("budget", [25, 50])
 async def test_dws_only_keeps_each_bot_history_budget(budget, monkeypatch, read_dws_only_window):
@@ -1420,6 +1532,226 @@ class TestSingleChatQuoteMultiQuoteAndAtMentionRestore:
 
 class TestQuotedImagesAndDocumentsReadonly:
     """F3 & F4：引用图片（公网 OSS / 内网表情降级）与引用文档（adoc / docx / pdf）内存只读提取测试。"""
+
+    @pytest.mark.asyncio
+    async def test_history_document_does_not_consume_budget_before_older_image(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """图片与文档预算独立：较新的文档不能挡住较旧可见历史图片。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedDocExtract, QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 10)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 1)
+        rows = [
+            _dws_image_row("old-image", "甲", "2026-11-12 10:00:00", "old-media"),
+            _dws_document_row("new-document", "乙", "2026-11-12 10:00:01", "NODE_DOC_1"),
+        ]
+
+        def media_for(quote_id):
+            if quote_id == "old-image":
+                return QuotedMediaAndDocsResult(images=[b"old-image"])
+            return QuotedMediaAndDocsResult(
+                documents=[
+                    QuotedDocExtract(
+                        node_id="NODE_DOC_1",
+                        name="新文档",
+                        extension="adoc",
+                        content="新文档正文",
+                    )
+                ]
+            )
+
+        bundle, calls = await read_dws_media_bundle(
+            rows,
+            media_factory=media_for,
+            raw_user_content="请看历史附件",
+        )
+
+        assert {quote_id for quote_id, _ in calls} == {"old-image", "new-document"}
+        assert bundle.context_images == [b"old-image"]
+        assert any("新文档正文" in item["content"] for item in bundle.merged_history)
+        call_args = {quote_id: kwargs for quote_id, kwargs in calls}
+        assert call_args["old-image"]["max_images"] == 1
+        assert call_args["new-document"]["max_images"] == 0
+        assert 0 < call_args["new-document"]["max_documents"] <= 2
+
+    @pytest.mark.asyncio
+    async def test_history_document_is_read_after_quoted_image_budget_is_exhausted(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """显式引用图片耗尽图片配额后，仍应读取可见历史文档。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedDocExtract, QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 10)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 1)
+        rows = [
+            _dws_image_row("quoted-image", "甲", "2026-11-12 10:00:00", "quoted-media"),
+            _dws_document_row("visible-document", "乙", "2026-11-12 10:00:01", "NODE_DOC_2"),
+            _dws_current_row("current", "quoted-image"),
+        ]
+
+        def media_for(quote_id):
+            if quote_id == "quoted-image":
+                return QuotedMediaAndDocsResult(images=[b"quoted-image"])
+            return QuotedMediaAndDocsResult(
+                documents=[
+                    QuotedDocExtract(
+                        node_id="NODE_DOC_2",
+                        name="可见文档",
+                        extension="adoc",
+                        content="可见历史文档正文",
+                    )
+                ]
+            )
+
+        bundle, calls = await read_dws_media_bundle(
+            rows,
+            media_factory=media_for,
+            incoming_messages=[_dws_incoming("current")],
+            current_ids=["current"],
+            raw_user_content="看图并读文档",
+        )
+
+        assert bundle.quoted_images == [b"quoted-image"]
+        assert any("可见历史文档正文" in item["content"] for item in bundle.merged_history)
+        call_args = {quote_id: kwargs for quote_id, kwargs in calls}
+        assert call_args["quoted-image"]["max_images"] == 1
+        assert call_args["visible-document"]["max_images"] == 0
+        assert 0 < call_args["visible-document"]["max_documents"] <= 2
+
+    @pytest.mark.asyncio
+    async def test_quoted_and_history_images_share_total_image_budget(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """显式引用图片与历史图片合计不能超过总图片上限，且保留现有的最近优先行为。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 10)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 2)
+        rows = [
+            _dws_image_row("history-image-old", "甲", "2026-11-12 10:00:00", "history-old-media"),
+            _dws_image_row("history-image-new", "乙", "2026-11-12 10:00:01", "history-new-media"),
+            _dws_image_row("quoted-image", "丙", "2026-11-12 10:00:02", "quoted-media"),
+            _dws_current_row("current", "quoted-image", sender="丁", timestamp="2026-11-12 10:00:03"),
+        ]
+
+        def media_for(quote_id):
+            return QuotedMediaAndDocsResult(images=[f"{quote_id}-bytes".encode()])
+
+        bundle, _ = await read_dws_media_bundle(
+            rows,
+            media_factory=media_for,
+            incoming_messages=[_dws_incoming("current", content="看图", sender="丁")],
+            current_ids=["current"],
+            raw_user_content="看图",
+        )
+
+        assert len(bundle.quoted_images) == 1
+        assert len(bundle.context_images) == 1
+        assert len(bundle.quoted_images) + len(bundle.context_images) <= 2
+        assert bundle.context_images == [b"history-image-new-bytes"]
+
+    @pytest.mark.asyncio
+    async def test_history_multi_image_message_receives_remaining_image_budget(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """单条历史富文本含多图时，helper 收到剩余预算而非固定的单图预算。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 10)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 3)
+        rows = [
+            _dws_image_row("quoted-image", "甲", "2026-11-12 10:00:00", "quoted-media"),
+            _dws_image_row(
+                "history-image-multi",
+                "乙",
+                "2026-11-12 10:00:01",
+                ["history-media-1", "history-media-2"],
+            ),
+            _dws_current_row("current", "quoted-image"),
+        ]
+
+        def media_for(quote_id):
+            if quote_id == "quoted-image":
+                return QuotedMediaAndDocsResult(images=[b"quoted-image"])
+            return QuotedMediaAndDocsResult(images=[b"history-image-1", b"history-image-2"])
+
+        bundle, calls = await read_dws_media_bundle(
+            rows,
+            media_factory=media_for,
+            incoming_messages=[_dws_incoming("current")],
+            current_ids=["current"],
+            raw_user_content="看图",
+        )
+
+        call_args = {quote_id: kwargs for quote_id, kwargs in calls}
+        assert call_args["history-image-multi"]["max_images"] == 2
+        assert bundle.quoted_images == [b"quoted-image"]
+        assert bundle.context_images == [b"history-image-1", b"history-image-2"]
+        assert len(bundle.quoted_images) + len(bundle.context_images) == 3
+
+    @pytest.mark.asyncio
+    async def test_selected_quote_neighbor_media_is_kept_outside_history_budget(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """明确选中的引用邻居仍可补媒体，但不能把整个 dws 窗口当成历史媒体范围。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 1)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 1)
+        rows = [
+            _dws_image_row("neighbor-image", "甲", "2026-11-12 10:00:00", "neighbor-media"),
+            {
+                "messageId": "quote-target",
+                "conversationId": "cid",
+                "sender": "甲",
+                "text": "被引用的正文",
+                "createTime": "2026-11-12 10:00:01",
+            },
+            {
+                "messageId": "near-text",
+                "conversationId": "cid",
+                "sender": "乙",
+                "text": "引用附近的正文",
+                "createTime": "2026-11-12 10:00:02",
+            },
+            _dws_image_row("outside-image", "丙", "2026-11-12 10:00:03", "outside-media"),
+            {
+                "messageId": "latest",
+                "conversationId": "cid",
+                "sender": "丁",
+                "text": "最新普通消息",
+                "createTime": "2026-11-12 10:00:04",
+            },
+            _dws_current_row("current", "quote-target", sender="戊", timestamp="2026-11-12 10:00:05"),
+        ]
+
+        def media_for(quote_id):
+            if quote_id == "neighbor-image":
+                return QuotedMediaAndDocsResult(images=[b"neighbor-image"])
+            return QuotedMediaAndDocsResult()
+
+        bundle, calls = await read_dws_media_bundle(
+            rows,
+            media_factory=media_for,
+            incoming_messages=[_dws_incoming("current", content="看引用")],
+            current_ids=["current"],
+            raw_user_content="看引用",
+            quote_before=1,
+            quote_after=1,
+        )
+
+        called_ids = [quote_id for quote_id, _ in calls]
+        assert "neighbor-image" in called_ids
+        assert "outside-image" not in called_ids
+        assert bundle.context_images == [b"neighbor-image"]
+        assert "群历史图片" in bundle.quote_prompt_block
+        assert [item["content"] for item in bundle.merged_history] == ["最新普通消息"]
 
     @pytest.mark.asyncio
     async def test_quoted_public_and_internal_images_extracted_into_memory(self):
