@@ -186,6 +186,7 @@ class DwsContextBundle:
     members: list[dict[str, str]] = field(default_factory=list)
     members_complete: bool = False
     merged_history: list[dict[str, Any]] = field(default_factory=list)
+    # Deprecated：仅供旧 dws 入库模式返回待持久化消息；钉钉 dws_only=True 时恒为空。
     persistable_messages: list[dict[str, Any]] = field(default_factory=list)
     restored_user_content: str = ""
     quote_info: DwsQuoteInfo | None = None
@@ -977,7 +978,7 @@ def extract_persistable_dws_messages(
     chatbot_user_id: str = "",
     ignore_senders: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    """提取可持久化写入数据库/文件的群聊人类消息（不受单 bot /clear cutoff 影响，排除本轮未完结消息）。"""
+    """Deprecated：旧 dws 入库模式的消息提取；当前钉钉直接读取 dws，不再持久化副本。"""
     excluded_ids = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
     ignored_nicks = {str(s).strip() for s in ignore_senders if str(s).strip()}
     out: list[dict[str, Any]] = []
@@ -1016,7 +1017,7 @@ def merge_dws_group_messages_with_history(
     chatbot_user_id: str = "",
     ignore_senders: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    """将 dws 拉取的群聊人类消息与机器人持久化的问答历史按时间线去重合并。"""
+    """Deprecated：旧 dws + 本地历史合并；当前钉钉 dws_only=True 不合并旧库。"""
     excluded_ids = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
     ignored_nicks = {str(s).strip() for s in ignore_senders if str(s).strip()}
 
@@ -1288,7 +1289,7 @@ def _enrich_quote_from_history(
     quote: DwsQuoteInfo,
     history_messages: Sequence[dict[str, Any]],
 ) -> DwsQuoteInfo:
-    """当用户引用了机器人的 AI 互动卡片（dws/Stream 仅存 Thinking... 占位）时，从本地历史恢复真实回复全文。"""
+    """Deprecated：从旧历史补全互动卡片；当前钉钉传入空旧历史，仅标注正文不可读取。"""
     if quote.text and quote.text not in _NOISE_TEXTS:
         return quote
 
@@ -1398,6 +1399,7 @@ def _build_quote_neighbor_lines(
             )
         )
 
+    # Deprecated：以下旧历史补邻居分支仅保留兼容；dws_only=True 的 history_messages 为空。
     epochs = [e for row in timeline if (e := _parse_ts_epoch(row.timestamp)) is not None]
     if epochs:
         min_ep, max_ep = min(epochs) - 15.0, max(epochs) + 180.0
@@ -1684,7 +1686,11 @@ async def fetch_dws_context_bundle(
     quote_after: int | None = None,
     dws_only: bool = False,
 ) -> DwsContextBundle:
-    """拉取只读群聊近期消息、还原 @提及、并解析引用消息/上下文/图片/文档。"""
+    """读取 dws 会话、还原 @提及，并解析引用、图片和文档。
+
+    Deprecated：dws_only=False 的旧库合并 / 入库返回模式仅保留兼容；
+    当前钉钉主链路与历史命令均显式使用 dws_only=True。
+    """
     limit_val = context_limit if context_limit is not None else cfg.DWS_CONTEXT_LIMIT
     before_val = quote_before if quote_before is not None else cfg.DWS_QUOTE_CONTEXT_BEFORE
     after_val = quote_after if quote_after is not None else cfg.DWS_QUOTE_CONTEXT_AFTER
@@ -1840,7 +1846,7 @@ async def fetch_dws_context_bundle(
         for idx, q in enumerate(quotes):
             quotes[idx] = _enrich_quote_from_history(q, history_messages)
 
-    # 4. 合并群聊近期历史与本地机器人问答历史，并提取可持久化的人类群消息
+    # Deprecated：旧库合并和入库模式；当前钉钉仅走后续 dws_only=True 分支。
     persistable_messages: list[dict[str, Any]] = []
     if not dws_only and is_group and dws_available and recent_dws_items:
         merged_history = merge_dws_group_messages_with_history(

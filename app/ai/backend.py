@@ -101,6 +101,7 @@ async def create_backend_stream(
     enable_search = resolved_search
 
     if backend == "openclaw":
+        # Deprecated：OpenClaw 后端分派仅供旧部署兼容。
         from app.openclaw_client import call_openclaw_stream
         stream = call_openclaw_stream(
             messages,

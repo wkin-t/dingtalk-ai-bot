@@ -5,6 +5,9 @@
 下一轮调用时作为 previous_response_id 传回，让服务端保留 thinking 上下文。
 
 存储优先 Redis（TTL 7 天），不可用降级文件。
+
+Deprecated（钉钉会话续接，2026-11-12）：钉钉每轮读取 dws 历史并传空 conversation_id，
+不再读写此续接状态。通用 Responses 客户端的兼容能力以及 /clear 清理旧状态仍保留。
 """
 from __future__ import annotations
 

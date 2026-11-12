@@ -3,6 +3,9 @@
 数据库连接模块
 - Redis: 缓存层 (对话历史缓存、会话锁、AccessToken)
 - MySQL: 持久层 (对话历史持久化、用户配置)
+
+Deprecated（2026-11-12）：HistoryStorage 及其旧对话写锁不再用于钉钉会话。
+RedisClient、MySQLClient、UsageStats、TokenCache 和数据库初始化仍在使用，不属于整体弃用。
 """
 import os
 import re
@@ -252,7 +255,7 @@ class MySQLClient:
 
 
 class DistributedLock:
-    """基于 Redis 的分布式锁"""
+    """Deprecated：旧对话历史写入使用的 Redis 锁，仅保留兼容。"""
 
     def __init__(self, lock_name: str, ttl: int = LOCK_TTL):
         self.lock_name = lock_name
@@ -292,7 +295,7 @@ class DistributedLock:
 
 
 class HistoryStorage:
-    """对话历史存储 (Redis 缓存 + MySQL 持久化)"""
+    """Deprecated：旧 Redis / MySQL 对话存储；钉钉现以 dws 为唯一历史来源。"""
 
     def __init__(self):
         self.redis = RedisClient.get_instance()
@@ -899,7 +902,7 @@ class TokenCache:
         }
 
 
-# 全局实例
+# Deprecated：history_storage 仅供旧历史兼容；token_cache 和 usage_stats 仍在使用。
 history_storage = HistoryStorage()
 token_cache = TokenCache()
 usage_stats = UsageStats()

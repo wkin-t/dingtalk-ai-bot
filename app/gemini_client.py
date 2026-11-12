@@ -781,7 +781,8 @@ async def call_gemini_stream(
 
 async def google_search(query: str) -> Optional[str]:
     """
-    用 Gemini Flash + Google Search grounding 做实时搜索。
+    Deprecated：旧跨后端搜索摘要注入，仅保留显式 fallback 兼容回滚。
+    Gemini 主对话的原生 google_search 工具仍在使用，不属于此函数的弃用范围。
     返回搜索摘要文本，供其他后端注入 prompt（原生搜索不可用时的 fallback）。
 
     要点：

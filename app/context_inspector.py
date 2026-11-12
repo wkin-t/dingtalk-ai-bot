@@ -10,7 +10,7 @@ def render_since(session_key: str, *, history=None) -> str:
     from app.agent_history import get_history_for_current_agent
     from app.clear_cutoff import get_cutoff_record
 
-    # 用 MAX_HISTORY_LENGTH 读，与真实送给模型的上限一致
+    # Deprecated：history=None 的旧库回退仅保留兼容；当前钉钉显式传入 dws 历史。
     if history is None:
         history = get_history_for_current_agent(session_key, limit=MAX_HISTORY_LENGTH)
     cutoff_rec = get_cutoff_record(session_key)

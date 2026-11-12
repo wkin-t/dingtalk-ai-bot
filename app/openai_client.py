@@ -837,6 +837,7 @@ def _last_user_text(messages: List[Dict[str, Any]]) -> str:
 
 
 async def _build_search_fallback_summary(messages: List[Dict[str, Any]]) -> Optional[str]:
+    """Deprecated：旧 Gemini 搜索摘要注入，仅在显式兼容回滚配置下启用。"""
     if SEARCH_FALLBACK_PROVIDER != "gemini":
         return None
     query = _last_user_text(messages)
@@ -1318,6 +1319,8 @@ async def _stream_via_responses(
     Claude（store=False）走 input[0] 的 role="system" 消息，保留 cache_control，
     每轮全量重发才有机会命中 sub2api 转译层的缓存。
     """
+    # Deprecated（钉钉会话）：以下续接兼容逻辑仅在其他调用方传入 conversation_id 时启用；
+    # 当前钉钉传空 ID 并每轮提交 dws 可见历史，避免绕过窗口和 /clear。
     from app import responses_state
 
     # previous_response_id 仅对支持 store 的上游有效（OpenAI 原生），Anthropic 不支持；

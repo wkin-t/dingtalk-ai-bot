@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-消息缓冲器 - 支持多平台消息合并
+Deprecated：旧多平台消息缓冲器，保留兼容导出。
+当前钉钉使用 GeminiBotHandler.process_buffered_messages 的独立两秒缓冲链路。
 """
 import asyncio
 import threading
@@ -8,7 +9,7 @@ from typing import Dict, List, Any, Optional, Callable
 
 
 class MessageBuffer:
-    """消息缓冲器 - 支持异步和同步模式"""
+    """Deprecated：旧异步 / 同步缓冲器；不参与当前钉钉消息合并。"""
 
     def __init__(self, buffer_time: float = 2.0):
         """

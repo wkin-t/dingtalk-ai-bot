@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-企业微信机器人消息处理器
+Deprecated（2026-07-08 起）：企业微信消息处理器，保留兼容，不再维护。
+当前生产入口为 app.dingtalk_bot.GeminiBotHandler。
 """
 import asyncio
 import json
@@ -17,7 +18,7 @@ from app.memory import get_session_key, update_history, clear_history
 
 
 class WeComBotHandler:
-    """企业微信机器人消息处理器"""
+    """Deprecated：企业微信消息处理器；当前钉钉不经过此类。"""
 
     def __init__(self):
         self.ai_handler = AIHandler(platform="wecom")

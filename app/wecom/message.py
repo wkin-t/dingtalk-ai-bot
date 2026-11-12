@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-企业微信机器人消息发送 (Webhook 模式)
+Deprecated（2026-07-08 起）：企业微信 Webhook 发送，保留兼容，不再维护。
 """
 import base64
 import hashlib
@@ -12,7 +12,7 @@ from app.config import WECOM_BOT_WEBHOOK_KEY, WECOM_BOT_WEBHOOK_URL
 
 
 class WeComMessageSender:
-    """企业微信机器人消息发送器 (Webhook)"""
+    """Deprecated：旧企业微信 Webhook 发送器；当前钉钉使用卡片 SDK 和 dws。"""
 
     def __init__(self):
         self.webhook_url = self._build_webhook_url()

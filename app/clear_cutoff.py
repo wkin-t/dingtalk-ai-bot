@@ -3,10 +3,10 @@
 """按 (BOT_ID, session_key) 记录"上下文起始时间戳"。
 
 当用户在群里发 /clear，记录当前北京时间为 cutoff。
-该 bot 后续调用模型时，历史读取在 format_history_with_meta 层过滤掉
-timestamp <= cutoff 的消息——其他 agent 不受影响。
+该 bot 后续读取 dws 时先排除 timestamp <= cutoff 的消息，
+format_history_with_meta 继续执行过滤；其他 agent 不受影响。
 
-不删 DB 行，只过滤。需要硬清可走 /clear hard（未实现）。
+不删除钉钉或旧数据库记录，只过滤本 bot 的可见范围。
 
 Schema: data/clear_cutoff/{BOT_ID}__{session_key}.json
   {"cutoff_at": "2026-05-18 14:30:15", "set_by": "stafffx_xxx", "set_by_nick": "张三"}
@@ -59,8 +59,8 @@ def get_cutoff_record(session_key: str) -> Optional[Dict[str, Any]]:
 def set_cutoff(session_key: str, *, set_by: str, set_by_nick: str) -> str:
     """记录当前北京时间为 cutoff，返回该时间戳字符串。
 
-    同时清除 Responses API 的 previous_response_id：/clear 后服务端不应再
-    续接旧 thinking 链，否则会把已软清空的历史重新带回上下文。
+    Deprecated（旧续接兼容）：仍清理已有 previous_response_id；当前钉钉
+    已禁用该续接，清理保留用于旧调用方及历史状态。
     """
     now = datetime.now(_BEIJING).strftime("%Y-%m-%d %H:%M:%S")
     data = {"cutoff_at": now, "set_by": set_by, "set_by_nick": set_by_nick}
@@ -81,11 +81,10 @@ def set_cutoff(session_key: str, *, set_by: str, set_by_nick: str) -> str:
 
 
 def reset_cutoff(session_key: str) -> None:
-    """删除 cutoff（恢复看到全部历史）。
+    """取消 cutoff，恢复当前 bot 在 dws 近期窗口及条数上限内的可见历史。
 
-    同时清除 previous_response_id：/resume 后本地历史恢复到 /clear 之前，但服务端
-    的 response_id 只记得 cutoff 后的子集——如果继续用旧 id，server 会丢失 resume
-    带回来的旧消息。强制下一轮走全量历史，状态对齐。
+    Deprecated（旧续接兼容）：仍清除 previous_response_id，避免旧调用方的
+    response_id 只记得 cutoff 后的子集，导致遗漏恢复后的历史。
     """
     path = _file_path(session_key)
     if os.path.exists(path):

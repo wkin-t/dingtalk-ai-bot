@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-企业微信机器人消息加解密
+Deprecated（2026-07-08 起）：企业微信消息加解密，随企业微信接入保留，不再维护。
 """
 import base64
 import hashlib
@@ -13,7 +13,7 @@ from Crypto.Cipher import AES
 
 
 class WXBizMsgCrypt:
-    """企业微信消息加解密工具"""
+    """Deprecated：仅供旧企业微信接入使用的消息加解密工具。"""
 
     def __init__(self, token: str, encoding_aes_key: str, receive_id: str = ""):
         self.token = token

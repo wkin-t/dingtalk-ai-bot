@@ -274,6 +274,24 @@ dws 登录或会话读取失败时，助手明确提示失败并停止该轮模�
 
 这是回复过程中的定向提醒能力；当前没有新增后台定时巡群或定时提醒任务。
 
+### Deprecated 逻辑
+
+以下代码保留兼容、旧数据维护和回归验证，已在对应模块、类、函数或分支标注 `Deprecated`；新增钉钉能力应沿当前 dws 链路实现。
+
+| 弃用范围 | 代码位置 | 当前路径 / 保留原因 |
+|---|---|---|
+| 企业微信接入 | `app/wecom/`、`main.register_wecom_webhook`、`app.ai.handler.AIHandler` | 2026-07-08 起不再维护；生产使用 `app.dingtalk_bot` |
+| OpenClaw Gateway / Tools | `app/openclaw_client.py`、`app/openclaw_tools_client.py`，以及后端分派、配置和钉钉内的 OpenClaw 分支 | 保留旧 HTTP / WebSocket / ASR / 文件工具兼容；当前钉钉历史图片和文档走 dws。语音 / 直接文件消息的旧 Tools 分支尚未迁移 |
+| 旧多平台缓冲器 | `app.ai.buffer.MessageBuffer` | 保留兼容导出；钉钉使用 `GeminiBotHandler.process_buffered_messages` |
+| Redis / MySQL / 文件对话历史 | `app.memory` 的历史读写函数、`app.database.HistoryStorage` / `DistributedLock`、`app.agent_history` | 钉钉改用 dws；`get_session_key`、数据库连接、使用统计、Token 缓存继续使用 |
+| dws 与旧库混合模式 | `fetch_dws_context_bundle(dws_only=False)`、旧历史合并 / 消息入库 / 卡片正文补全，以及 `render_since(history=None)` | 钉钉始终使用 `dws_only=True`，`/since` 显式传入 dws 历史 |
+| 旧历史配置 | `MAX_STORAGE_LENGTH`、`HISTORY_TTL`、`ENABLE_DWS_GROUP_CONTEXT`、`DWS_PERSIST_GROUP_MESSAGES`、`DWS_IGNORE_SENDERS` | 仅服务旧历史 / 混合模式；当前钉钉历史条数由 `MAX_HISTORY_LENGTH` 控制 |
+| 钉钉 Responses 服务端续接 | `app.responses_state` 与 `app.openai_client` 内的 `previous_response_id` 兼容分支 | 仅钉钉会话弃用续接；通用客户端能力、清理旧状态的逻辑仍保留 |
+| 旧搜索摘要注入 | `app.gemini_client.google_search`、`_build_search_fallback_summary`、`SEARCH_FALLBACK_PROVIDER` | 仅保留显式兼容回滚，默认 `none`；后端原生搜索继续使用 |
+| 旧历史 bot_id 回填 | `scripts/backfill_bot_id.py` | 只供旧数据维护，当前 dws 部署无需执行 |
+
+这些标记仅说明适用范围，不改变执行行为。`/clear`、`/resume`、`/since`、共享 AI 工具、原生 OpenRouter 后端以及当前关闭但保留的 Claude 搜索桥接均未整体弃用。
+
 ### 卡片
 
 底部快捷按钮：**🧹 清空 / 🔄 重试 / 📝 总结 / 🇬🇧 翻译**

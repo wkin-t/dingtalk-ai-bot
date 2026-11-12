@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-企业微信 Webhook 回调处理
+Deprecated（2026-07-08 起）：企业微信 Webhook 回调，保留兼容，不再维护。
+当前生产使用钉钉 Stream，不注册此蓝图。
 """
 import json
 import threading

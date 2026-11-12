@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw Tools Invoke HTTP API client.
-
-This project uses OpenClaw as the orchestration layer. For non-chat actions
-like ASR or file summarization, prefer calling tools-invoke API instead of
-encoding behavior in chat prompts.
+Deprecated：OpenClaw Tools Invoke 客户端，保留旧 ASR / 文件摘要 / 图片识别兼容入口。
+当前钉钉历史图片与文档通过 dws 资源读取和 app.dws_files 解析；本模块不再维护。
+语音与直接文件消息仍有调用此模块的旧分支，不表示它们已经迁移到 dws。
 """
 
 import base64
@@ -30,7 +28,7 @@ async def invoke_tool(
     timeout_s: int = 120,
 ) -> Dict[str, Any]:
     """
-    Invoke an OpenClaw tool via HTTP API.
+    Deprecated：调用旧 OpenClaw 工具，保留兼容，不应作为新增功能入口。
 
     The exact request/response schema can vary by OpenClaw version, so this
     client uses a conservative payload and returns the raw JSON response.

@@ -62,7 +62,7 @@ from app.config import (
 )
 from app.database import init_database
 from app.dingtalk_bot import GeminiBotHandler
-from app.memory import DATA_DIR # 导入数据目录
+from app.memory import DATA_DIR # Deprecated：仅供旧历史目录初始化和启动展示，钉钉会话不再写入。
 
 # 建表 + schema 迁移（如 thinking_blocks 列）必须先于 Stream/Webhook 处理消息执行，
 # 否则运行中的表结构永远追不上代码里的新增列（历史上 main.py 从未调用过此函数，
@@ -90,7 +90,7 @@ def run_stream_in_thread():
         print(f"❌ 钉钉 Stream 线程异常退出: {e}")
 
 def register_wecom_webhook():
-    """注册企业微信 Webhook 路由"""
+    """Deprecated：注册旧企业微信 Webhook，当前生产只启动钉钉 Stream。"""
     if not all([WECOM_BOT_TOKEN, WECOM_BOT_ENCODING_AES_KEY]):
         print("⚠️ 未配置 WECOM_BOT_TOKEN/WECOM_BOT_ENCODING_AES_KEY，跳过注册企业微信 Webhook")
         return
@@ -112,6 +112,7 @@ if PLATFORM in ["dingtalk", "both"]:
     stream_thread = threading.Thread(target=run_stream_in_thread, daemon=True)
     stream_thread.start()
 
+# Deprecated：企业微信启动兼容分支；当前生产 PLATFORM=dingtalk。
 if PLATFORM in ["wecom", "both"]:
     register_wecom_webhook()
 

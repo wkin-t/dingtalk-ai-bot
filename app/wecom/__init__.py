@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-企业微信机器人模块
+Deprecated（2026-07-08 起）：企业微信接入，保留兼容，不再维护。
+当前生产使用钉钉 Stream 接入（app.dingtalk_bot）。
 """
 
 from .crypto import WXBizMsgCrypt

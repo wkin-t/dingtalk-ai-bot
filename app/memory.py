@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-对话历史管理模块
-使用 Redis + MySQL 数据层，支持降级到文件存储
+Deprecated（2026-11-12）：Redis / MySQL / 文件对话历史读写，仅保留旧路径兼容。
+钉钉会话改用 app.dws_context.fetch_dws_context_bundle(dws_only=True)。
+get_session_key 仍用于当前钉钉会话、统计及配置隔离，不属于弃用逻辑。
 """
 import os
 import json
@@ -67,7 +68,7 @@ def _get_file_path(session_key: str) -> str:
 
 def get_history(session_key: str, limit: int = 50) -> List[Dict[str, str]]:
     """
-    获取对话历史
+    Deprecated：读取旧数据库 / 文件对话历史；钉钉会话改用 dws。
 
     Args:
         session_key: 会话键
@@ -115,7 +116,7 @@ def update_history(
     extra_user_msg_ids: Optional[List[str]] = None,
 ):
     """
-    更新对话历史
+    Deprecated：写入旧数据库 / 文件对话历史；钉钉主链路不再入库。
 
     Args:
         session_key: 会话键
@@ -227,7 +228,7 @@ def update_history(
 
 
 def persist_external_messages(session_key: str, messages: List[Dict[str, Any]]) -> int:
-    """将 dws 拉取到的群聊人类消息幂等持久化到数据库（异常或关闭数据库时自动降级到本地文件）。"""
+    """Deprecated：旧 dws 消息入库兼容入口；钉钉现直接读取 dws，不再保存副本。"""
     if not session_key or not messages:
         return 0
 
@@ -339,7 +340,7 @@ def persist_external_messages(session_key: str, messages: List[Dict[str, Any]]) 
 
 
 def clear_history(session_key: str):
-    """清空对话历史"""
+    """Deprecated：删除旧存储历史；当前钉钉 /clear 使用 clear_cutoff.set_cutoff 软清空。"""
     if USE_DATABASE:
         try:
             history_storage.clear_history(session_key)

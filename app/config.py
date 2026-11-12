@@ -73,7 +73,7 @@ DINGTALK_TOKEN_EARLY_REFRESH_SEC = max(
     _get_int("DINGTALK_TOKEN_EARLY_REFRESH_SEC", 120),
 )
 
-# 企业微信机器人配置 (新)
+# Deprecated（2026-07-08 起）：企业微信机器人配置，仅保留旧接入兼容。
 WECOM_BOT_WEBHOOK_KEY = os.getenv("WECOM_BOT_WEBHOOK_KEY", "")
 WECOM_BOT_WEBHOOK_URL = os.getenv("WECOM_BOT_WEBHOOK_URL", "")
 WECOM_BOT_TOKEN = os.getenv("WECOM_BOT_TOKEN", os.getenv("WECOM_TOKEN", ""))
@@ -90,14 +90,14 @@ WECOM_BOT_STREAM_STYLE = os.getenv("WECOM_BOT_STREAM_STYLE", "stream").strip().l
 if WECOM_BOT_STREAM_STYLE not in {"stream", "stream_with_template_card"}:
     WECOM_BOT_STREAM_STYLE = "stream"
 
-# 企业微信应用配置 (兼容旧配置，逐步废弃)
+# Deprecated：企业微信旧应用配置，仅保留兼容。
 WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", "")
 WECOM_AGENT_ID = os.getenv("WECOM_AGENT_ID", "")
 WECOM_SECRET = os.getenv("WECOM_SECRET", "")
 WECOM_TOKEN = os.getenv("WECOM_TOKEN", WECOM_BOT_TOKEN)
 WECOM_ENCODING_AES_KEY = os.getenv("WECOM_ENCODING_AES_KEY", WECOM_BOT_ENCODING_AES_KEY)
 
-# platform 选择: dingtalk | wecom | both
+# platform 选择：dingtalk；wecom / both 为 Deprecated 兼容选项。
 PLATFORM = os.getenv("PLATFORM", "dingtalk")
 
 # 代理设置 (优先读取环境变量)
@@ -126,7 +126,7 @@ HTTP_PROXY_URL = os.getenv("HTTP_PROXY_URL", "http://127.0.0.1:1087")
 # httpx 支持 socks5 但需要 httpx[socks] 依赖
 HTTPX_PROXY = SOCKS_PROXY.replace("socks5h://", "socks5://")
 
-# OpenClaw Gateway 配置
+# Deprecated：OpenClaw Gateway 配置；以下 Gateway、群路由与 Tools 配置仅保留旧部署兼容。
 OPENCLAW_GATEWAY_URL = os.getenv("OPENCLAW_GATEWAY_URL", "ws://openclaw-gateway:18789")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "default")
@@ -170,7 +170,7 @@ OPENCLAW_VISION_TOOL_NAME = os.getenv("OPENCLAW_VISION_TOOL_NAME", "vision").str
 
 def get_agent_for_conversation(conversation_id: str) -> str | None:
     """
-    根据钉钉 conversationId 获取对应的 OpenClaw agent ID
+    Deprecated：旧 OpenClaw 群路由；当前 dws 会话不使用此映射。
 
     严格路由模式（推荐）：
     - 当群 conversationId 在 OPENCLAW_GROUP_AGENT_MAPPING 中有映射时，返回对应 agent
@@ -225,8 +225,8 @@ BOT_NAME = os.getenv("BOT_NAME", "")  # 显示名称，不设则按后端 + 实�
 
 # 上下文配置
 MAX_HISTORY_LENGTH = int(os.getenv("MAX_HISTORY_LENGTH", 50)) # 发送给 Gemini 的最大条数
-MAX_STORAGE_LENGTH = int(os.getenv("MAX_STORAGE_LENGTH", 1000)) # 本地存储的最大条数
-HISTORY_TTL = 3600 * 24 * 7 # 本地存储保留 7 天
+MAX_STORAGE_LENGTH = int(os.getenv("MAX_STORAGE_LENGTH", 1000)) # Deprecated：仅供旧对话历史存储。
+HISTORY_TTL = 3600 * 24 * 7 # Deprecated：仅供旧对话历史过期处理。
 
 # Google Endpoint
 GOOGLE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -345,6 +345,7 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").lower() == "true"
 
 # 是否启用 Google Search (让 AI 自动搜索实时信息)
 ENABLE_SEARCH = os.getenv("ENABLE_SEARCH", "true").lower() == "true"
+# Deprecated：旧 Gemini 搜索摘要注入仅保留兼容回滚，默认 none；当前优先使用后端原生搜索。
 SEARCH_FALLBACK_PROVIDER = os.getenv("SEARCH_FALLBACK_PROVIDER", "none").strip().lower()
 
 # 多 agent 角色重塑 + cache + 采样改造 feature flags
@@ -434,9 +435,11 @@ BQB_MAX_DISPLAY_PX = max(0, _get_int("BQB_MAX_DISPLAY_PX", 168))
 BQB_CARD_CANVAS_WIDTH_PX = max(0, _get_int("BQB_CARD_CANVAS_WIDTH_PX", 480))
 
 # ===== DingTalk Workspace CLI (dws) 只读群聊/引用上下文配置 =====
-# 安全边界：仅允许内部 Python 只读查询群消息、引用消息与引用文档/图片，严禁开放发送/修改/撤回/上传等写能力
+# 查询白名单仅允许只读操作；定向 @ 发送由 dws_members 的独立受限入口处理。
+# Deprecated：仅控制旧 dws_only=False 模式，不能关闭当前钉钉的 dws 会话读取。
 ENABLE_DWS_GROUP_CONTEXT = _get_bool("ENABLE_DWS_GROUP_CONTEXT", True)
 ENABLE_DWS_QUOTE_CONTEXT = _get_bool("ENABLE_DWS_QUOTE_CONTEXT", True)
+# Deprecated：仅供旧 dws 入库模式使用，当前钉钉不再持久化 dws 消息副本。
 DWS_PERSIST_GROUP_MESSAGES = _get_bool("DWS_PERSIST_GROUP_MESSAGES", True)
 DWS_QUOTE_FETCH_MEDIA = _get_bool("DWS_QUOTE_FETCH_MEDIA", True)
 DWS_BIN = os.getenv("DWS_BIN", "dws").strip() or "dws"
@@ -488,6 +491,7 @@ DWS_AUTH_BACKOFF_SECONDS = max(10, _get_int("DWS_AUTH_BACKOFF_SECONDS", 60))
 DWS_MAX_DOC_BYTES = max(65536, _get_int("DWS_MAX_DOC_BYTES", 10 * 1024 * 1024))
 DWS_MAX_DOC_CHARS = max(500, _get_int("DWS_MAX_DOC_CHARS", 12000))
 DWS_MAX_QUOTE_IMAGES = max(1, min(4, _get_int("DWS_MAX_QUOTE_IMAGES", 4)))
+# Deprecated：仅供旧 dws_only=False 的入库 / 合并过滤使用，当前钉钉不读取此名单。
 DWS_IGNORE_SENDERS = frozenset(
     s.strip() for s in os.getenv("DWS_IGNORE_SENDERS", "").split(",") if s.strip()
 )

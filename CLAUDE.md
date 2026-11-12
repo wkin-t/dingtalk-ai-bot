@@ -47,8 +47,8 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── image_gen.py         # 生图+改图 (Gemini Imagen/Flash / OpenAI gpt-image-2)
 │   ├── image_store.py       # 生图存储 → 腾讯云 COS → 预签名 URL
 │   ├── reference.py         # 历史引用（智能触发）
-│   ├── memory.py            # 对话历史 (Redis+MySQL → 文件降级)
-│   ├── database.py          # 数据层 (Redis 缓存 + MySQL 持久化)
+│   ├── memory.py            # Deprecated: 旧对话历史；get_session_key 仍在使用
+│   ├── database.py          # 数据层（仅 HistoryStorage / 旧历史写锁 Deprecated）
 │   ├── dws_context.py       # dws 只读群聊、引用与企业校验
 │   ├── dws_files.py         # 引用图片、文档抓取与解析
 │   ├── bqb.py               # 表情包索引、匹配与钉钉媒体上传
@@ -56,10 +56,10 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 │   ├── http_safe.py         # 公网 URL 校验与受限下载
 │   ├── sample_override.py   # Stage D: /temp /top_p /sample 手动覆盖 (sticky 24h, Redis+文件)
 │   ├── ai/
-│   │   ├── handler.py       # AIHandler - 统一 AI 处理层，抽象平台差异
+│   │   ├── handler.py       # Deprecated: 仅旧企业微信使用的 AIHandler
 │   │   ├── backend.py       # 后端分派 (gemini/openclaw/openai → 各客户端)
 │   │   ├── router.py        # 智能路由 (关键词匹配 → 模型/thinking level)
-│   │   ├── buffer.py        # 消息缓冲器 (2秒窗口合并连续消息)
+│   │   ├── buffer.py        # Deprecated: 旧多平台缓冲器；钉钉有独立2秒缓冲
 │   │   ├── system_prompt.py      # Stage B: system prompt 分块 cache (稳定/半稳/变动三段)
 │   │   ├── message_transform.py  # Stage A: 消息角色重塑 (他bot assistant→user, 合并连续同role)
 │   │   ├── sampling_clamp.py     # Stage C: 温度/top_p provider-aware clamp (Claude≤1.0)
@@ -91,6 +91,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **消息缓冲**: 2 秒窗口合并用户连续消息，避免重复触发 AI 请求。
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。Soul 文件命名 `{BOT_ID}__{cid}.md`（双下划线），防止多容器共享 soul（群聊 cid 跨容器相同）。
 - **旧路径数据降级**: Redis+MySQL 与本地文件 (`data/history/`) 保留给 Deprecated 的企业微信等旧路径；钉钉会话不使用这套存储。
+- **Deprecated 标记范围**：完整索引见 README 的「Deprecated 逻辑」。标记限于已弃用的对象或兼容分支，不添加运行时告警或改变调用行为。`database.py` 的统计 / Token 缓存、`memory.get_session_key`、共享 AI 工具和 `/clear` 仍在使用。Responses `previous_response_id` 仅在钉钉主链路弃用，客户端通用兼容逻辑仍保留；本文涉及 GPT 续接的客户端说明不代表当前钉钉会启用该能力。
 - **钉钉会话唯一来源（2026-11-12）**：钉钉主链路仅从 dws 读取近期会话、引用、图片和文档，不读写 Redis/MySQL/文件对话历史，不合并旧库，不使用 `previous_response_id` 续接。dws 不可用时明确报错；单聊同样读取 dws。`/since`、`/resume`、`/soul evolve` 使用同一来源；`/clear` 仅保存本机器人可见起点。旧数据库保留，统计、Soul、采样配置继续由应用管理。dws 只能返回占位的互动卡片会标注正文不可读，不能从旧库恢复。
 - **各 bot 的可见范围**：`MAX_HISTORY_LENGTH` 仍按容器独立控制历史消息条数；dws 拉取窗口至少覆盖此预算及当前消息的去重余量（单次最多100条），不能被默认 `DWS_CONTEXT_LIMIT=40` 缩短。先按本 bot 的 `/clear` 起点过滤，再取最近 N 条；历史媒体只补全这 N 条内的消息，图片说明和文档正文归入原消息。显式引用仍可展开引用及其邻居。纯 @ 无文字时按当前可见上下文接话，无足够上下文时简短询问，走同一缓冲、企业校验和模型链路。
 - **群成员与定向 @**：通过只读 `chat +chat-members-list` 获取名单与完整性状态，模型以 `[[at:编号]]` 选择本轮名单成员。程序校验目标后通过独立、有界的 dws bot 发送入口发送定向提醒，每轮最多3人；同名成员要求澄清，不允许 @所有人，结果未知不重发。普通 dws 查询白名单仍禁止发送命令。

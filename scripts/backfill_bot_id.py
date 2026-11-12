@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""一次性回填 conversation_history 中 NULL bot_id 为当前 BOT_ID。
+"""Deprecated（2026-11-12）：仅供旧 conversation_history 表回填 bot_id 的维护脚本。
+
+当前钉钉已改用 dws，不需要执行此脚本；保留给旧数据维护，不自动运行。
 
 仅处理最近 30 天 assistant 消息，避免破坏更早的混合历史。
 """

@@ -1,18 +1,15 @@
 # app/agent_history.py
 # -*- coding: utf-8 -*-
-"""按当前 agent 视角读取历史，自动应用 /clear cutoff 过滤。
+"""Deprecated（2026-11-12）：旧数据库 / 文件历史的当前 bot 视图，保留兼容。
 
-任何"读历史"的场景都应走这里，而不是直接调 app.memory.get_history：
-- 主 AI 流（handler/dingtalk_bot 已通过 format_history_with_meta 走 cutoff）
-- /soul evolve 读历史进化人格
-- image_gen prompt 增强读上下文
-- 其他未来场景
+钉钉主链路和历史相关命令改用 fetch_dws_context_bundle(dws_only=True)，
+同样应用各 bot 的 /clear 起点；新增钉钉历史读取不应经过此模块。
 """
 from typing import List, Dict, Any
 
 
 def get_history_for_current_agent(session_key: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """读历史并按当前 BOT_ID 的 cutoff 过滤。
+    """Deprecated：读取旧历史并按当前 BOT_ID 的 cutoff 过滤，仅供兼容调用。
 
     timestamp 缺失的消息保留（保守策略，避免误删）。
     timestamp <= cutoff 的消息被排除（cutoff 时刻自身也算"被清掉"）。

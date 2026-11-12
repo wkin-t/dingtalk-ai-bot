@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw Gateway HTTP 客户端
+Deprecated：OpenClaw Gateway 客户端，保留 HTTP / WebSocket 兼容路径，不再维护。
+当前钉钉会话使用 dws 上下文及 gemini / openai 后端，不再依赖 OpenClaw。
 使用 OpenAI 兼容的 /v1/chat/completions 端点 (SSE 流式)
 
 端点: http://172.17.0.1:48789/v1/chat/completions (经过 Safeline WAF)
@@ -88,7 +89,7 @@ async def call_openclaw_ws_chat_stream(
     timeout_s: float = 300.0,
 ) -> AsyncGenerator[Dict, None]:
     """
-    Call OpenClaw Gateway WebSocket protocol via chat.send.
+    Deprecated：OpenClaw WebSocket 对话入口，仅保留旧部署兼容。
 
     This is closer to official channel plugins:
     - Gateway manages session memory/transcript by sessionKey
@@ -309,7 +310,7 @@ async def call_openclaw_stream(
     top_p: Optional[float] = None,
 ) -> AsyncGenerator[Dict, None]:
     """
-    调用 OpenClaw Gateway HTTP API 进行流式对话
+    Deprecated：OpenClaw HTTP 流式对话入口，仅保留旧部署兼容。
 
     使用 OpenAI 兼容的 /v1/chat/completions 端点，SSE 流式返回。
 

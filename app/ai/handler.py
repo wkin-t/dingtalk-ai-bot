@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-统一 AI 处理层 - 抽象平台差异
+Deprecated：仅供旧企业微信接入使用的 AI 处理骨架，保留兼容。
+当前钉钉入口为 app.dingtalk_bot.GeminiBotHandler.handle_ai_stream；共享 app.ai 工具仍在使用。
 """
 import asyncio
 import time
@@ -28,11 +29,9 @@ TEMPERATURE_MAP = {
 
 class AIHandler:
     """
-    统一 AI 处理器 - 抽象平台差异
+    Deprecated：旧多平台 AI 处理器，目前仅由已弃用的企业微信接入调用。
 
-    支持:
-    - 钉钉 (流式卡片更新)
-    - 企业微信 (完整回复)
+    钉钉已使用 GeminiBotHandler.handle_ai_stream；新增能力不应接入此类。
     """
 
     def __init__(self, platform: str = "dingtalk"):

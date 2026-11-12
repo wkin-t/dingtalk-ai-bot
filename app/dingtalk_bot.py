@@ -1028,6 +1028,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         )
 
         if use_openclaw_backend:
+            # Deprecated：OpenClaw 专属上下文与媒体兼容链路；当前钉钉使用后续 dws 分支。
             # 智能“历史引用”注入（仅用于本次 AI 请求，不写入历史）
             if DINGTALK_REFERENCE_AUTO_ENABLED:
                 injected_content, quote = maybe_inject_reference(
@@ -2018,6 +2019,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                             image_data_list.append(img_data)
                         await asyncio.sleep(0.5)
             elif msg_type in {"audio", "file"}:
+                # Deprecated：语音 / 直接文件消息仍保留旧 OpenClaw Tools 入口，尚未迁移至 dws。
                 # dingtalk_stream SDK 未内置解析 audio/file，content 会落在 extensions["content"]
                 raw_content = incoming_message.extensions.get("content")
                 if not isinstance(raw_content, dict):
