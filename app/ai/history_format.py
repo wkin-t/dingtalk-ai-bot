@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """对话历史格式化工具，保留 bot_id 元数据给消息转换层。"""
+import base64
 from typing import Any, Dict, List, Optional
 
 
@@ -92,6 +93,28 @@ def format_history_with_meta(
             if rd:
                 new_msg["reasoning_details"] = rd
 
+        images = msg.get("images") or []
+        if images:
+            # Responses 不接受 assistant 的 input_image；补充上下文保留原正文角色和来源。
+            if role == "assistant":
+                formatted.append(new_msg)
+                new_msg = {"role": "user", "content": f"[{timestamp or '时间未知'}] {sender_nick or get_bot_source_name(bot_id)} 的历史图片（原消息附件，非当前上传）"}
+            else:
+                new_msg["content"] += "\n[历史图片：以下原图属于本条历史消息，非当前上传]"
+            if msg.get("message_id"):
+                new_msg["content"] += f"\n[来源消息 ID：{msg['message_id']}]"
+            parts = [{"type": "text", "text": new_msg["content"]}]
+            for image in images:
+                if image[:8] == b"\x89PNG\r\n\x1a\n":
+                    mime = "image/png"
+                elif image[:4] == b"GIF8":
+                    mime = "image/gif"
+                elif image[8:12] == b"WEBP":
+                    mime = "image/webp"
+                else:
+                    mime = "image/jpeg"
+                parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"}})
+            new_msg["content"] = parts
         formatted.append(new_msg)
 
     return formatted

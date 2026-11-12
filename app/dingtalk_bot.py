@@ -4,6 +4,7 @@ import time
 import base64
 import json
 import re
+import weakref
 from dataclasses import dataclass
 import dingtalk_stream
 from dingtalk_stream import AckMessage
@@ -59,7 +60,8 @@ from app.image_gen import generate_image, edit_image
 from app.image_store import save_image
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
-from app.dws_members import members_prompt, resolve_mentions, send_mentions
+from app.dws_members import members_prompt, resolve_mentions
+from app.dingtalk_reactions import ProcessingReactionScope, collect_processing_message_ids
 
 # 尝试导入使用统计模块
 try:
@@ -79,7 +81,8 @@ class BufferedTurnContext:
     at_user_ids: list
     group_info: dict | None
 
-session_locks = {}  # 会话级锁字典
+# 等待者和持有者保留强引用，空闲会话的锁可自动释放，避免群聊锁永久积累。
+session_locks = weakref.WeakValueDictionary()
 processing_sessions = set()  # 正在处理的会话集合
 group_info_cache = {}  # 群信息缓存 (conversation_id -> {"name": str, "timestamp": float})
 
@@ -799,7 +802,17 @@ async def _enrich_image_prompt(
     recent = []
     for msg in messages[-12:]:
         role = msg.get("role", "")
-        text = msg.get("content", "")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text = "\n".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            )
+        else:
+            text = content
         if role == "system" or not text:
             continue
         recent.append(f"{'用户' if role == 'user' else 'AI'}: {text[:200]}")
@@ -937,7 +950,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             print(f"⚠️ 获取统计失败: {safe_error}")
             self.reply_markdown("系统提示", f"⚠️ 获取统计失败: {safe_error}", incoming_message)
 
-    def _build_display_content(self, thinking: str, response: str, is_thinking: bool = False) -> str:
+    def _build_display_content(self, thinking: str, response: str, is_thinking: bool = False, *, members=None) -> str:
         """
         构建显示内容，包含 thinking 和正式回复
 
@@ -961,7 +974,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             display_response = response.replace("[AILoading]", "……")
             if ENABLE_BQB:
                 display_response = strip_bqb_tags_for_streaming(display_response)
-            display_response = re.sub(r"\[\[at:[^\]]*(?:\]\]|$)", "", display_response)
+            display_response, _ = resolve_mentions(display_response, members or [], card=True)
             lines = display_response.split('\n')
             filtered_lines = [line for line in lines if not line.strip().startswith("> 📝 概要：")]
             display_response = "\n".join(filtered_lines).strip()
@@ -986,6 +999,64 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         return last_update_time
 
     async def handle_ai_stream(
+        self,
+        incoming_message,
+        content,
+        conversation_id,
+        at_user_ids,
+        image_data_list=None,
+        group_info=None,
+        incoming_messages=None,
+        current_message_ids=None,
+        buffered_context=None,
+    ):
+        """为一轮 AI 请求管理用户消息上的处理中 reaction。
+
+        核心处理保留在 ``_handle_ai_stream_core``，这样 dws、路由、卡片和
+        流式阶段的既有早返回都共享同一套清理边界。
+        """
+
+        reaction_ids = collect_processing_message_ids(
+            incoming_message,
+            buffered_context=buffered_context,
+            current_message_ids=current_message_ids,
+            incoming_messages=incoming_messages,
+        )
+        reaction_scope = ProcessingReactionScope(
+            getattr(self, "card_helper", None),
+            conversation_id,
+            reaction_ids,
+        )
+        core_error: BaseException | None = None
+        try:
+            await reaction_scope.start()
+            return await self._handle_ai_stream_core(
+                incoming_message,
+                content,
+                conversation_id,
+                at_user_ids,
+                image_data_list=image_data_list,
+                group_info=group_info,
+                incoming_messages=incoming_messages,
+                current_message_ids=current_message_ids,
+                buffered_context=buffered_context,
+            )
+        except BaseException as exc:
+            core_error = exc
+            raise
+        finally:
+            try:
+                await reaction_scope.close()
+            except asyncio.CancelledError:
+                # 核心异常（包括取消）优先于 cleanup 的二次取消；如果核心
+                # 已经正常返回，则让外层取消仍按原语义传播。
+                if core_error is None:
+                    raise
+            except Exception:
+                # reaction 是辅助能力，不能覆盖 AI 请求本身的结果或异常。
+                pass
+
+    async def _handle_ai_stream_core(
         self,
         incoming_message,
         content,
@@ -1150,7 +1221,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     raw_user_content = dws_bundle.restored_user_content
                     content = router_content = raw_user_content
                 quoted_img_count = len(dws_bundle.quoted_images or [])
-                effective_image_list = list(dws_bundle.quoted_images or []) + list(dws_bundle.context_images or []) + list(image_data_list or [])
+                effective_image_list = list(dws_bundle.quoted_images or []) + list(image_data_list or [])
 
             if dws_bundle.quote_prompt_block:
                 content = f"{dws_bundle.quote_prompt_block}\n{raw_user_content}"
@@ -1186,9 +1257,15 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             formatted_history = format_history_with_meta(
                 dws_bundle.merged_history, BOT_ID, cutoff_at=_cutoff_at
             )
+            quote_neighbor_messages = format_history_with_meta(dws_bundle.context_image_messages, BOT_ID)
 
             if getattr(incoming_message, "conversation_type", None) == "2" and not dws_bundle.quote_prompt_block and formatted_history:
-                context_lines = [str(msg.get("content", ""))[:120] for msg in formatted_history[-4:]]
+                context_lines = []
+                for msg in formatted_history[-4:]:
+                    history_content = msg.get("content", "")
+                    if isinstance(history_content, list):
+                        history_content = "\n".join(part.get("text", "") for part in history_content if part.get("type") == "text")
+                    context_lines.append(str(history_content)[:120])
                 router_content = "[近期群聊上下文]\n" + "\n".join(context_lines) + "\n[当前用户消息]\n" + router_content
 
             if effective_image_list:
@@ -1199,7 +1276,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 sender_nick = incoming_message.sender_nick or "User"
 
                 user_message_content = []
-                image_labels = " ".join(([f"[引用图片x{quoted_img_count}]"] if quoted_img_count else []) + ([f"[群历史图片x{len(dws_bundle.context_images)}]"] if dws_bundle.context_images else []) + ([f"[图片x{user_uploaded_count}]"] if user_uploaded_count else []))
+                image_labels = " ".join(([f"[显式引用图片x{quoted_img_count}，原消息来源见引用上下文]"] if quoted_img_count else []) + ([f"[本次上传图片x{user_uploaded_count}]"] if user_uploaded_count else []))
                 user_message_content.append({"type": "text", "text": f"[{current_timestamp}] {sender_nick}: {image_labels} {content}"})
 
                 for i, img_data in enumerate(effective_image_list):
@@ -1222,6 +1299,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     })
 
                 messages_raw.extend(formatted_history)
+                messages_raw.extend(quote_neighbor_messages)
                 messages_raw.append({"role": "user", "content": user_message_content})
 
             else:
@@ -1234,12 +1312,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 print(f"🔍 [调试] 构造当前消息 - sender_nick='{sender_nick}', content='{content}'")
                 text_content = f"[{current_timestamp}] {sender_nick}: {content}"
                 messages_raw.extend(formatted_history)
+                messages_raw.extend(quote_neighbor_messages)
                 messages_raw.append({"role": "user", "content": text_content})
 
                 # 调试：打印发送给 Gemini 的完整消息
                 print(f"🔍 [调试] 发送给 Gemini 的历史记录数量: {len(formatted_history)}")
                 if formatted_history:
-                    print(f"🔍 [调试] 最后一条历史: {formatted_history[-1].get('content', '')[:200]}")
+                    last_history = formatted_history[-1].get("content", "")
+                    if isinstance(last_history, list):
+                        last_history = "\n".join(part.get("text", "") for part in last_history if part.get("type") == "text")
+                    print(f"🔍 [调试] 最后一条历史: {last_history[:200]}")
                 print(f"🔍 [调试] 当前消息: {text_content}")
 
         from app.ai.messages_pipeline import prepare_messages_for_backend
@@ -1248,7 +1330,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         # 智能路由（提前到卡片创建前，让初始卡片直接显示正确的思考文字）
         print(f"🔄 [路由] AI 后端: {AI_BACKEND}")
-        has_images = bool(effective_image_list)
+        has_images = bool(effective_image_list or dws_bundle.context_images)
+        if dws_bundle.context_images:
+            router_content = (
+                f"[图片来源：历史上下文 {len(dws_bundle.context_images)} 张，"
+                f"显式引用 {quoted_img_count} 张，本次上传 {user_uploaded_count} 张；历史图片不是本次上传]\n"
+                + router_content
+            )
         soul_text = _load_soul(conversation_id)
         complexity = {}
         route_slot = None
@@ -1330,6 +1418,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
+        if not image_data_list:
+            complexity["need_image_edit"] = False
+
         # 初始化 AI 卡片（路由已完成，thinkingText 使用模型生成的思考文字）
         thinking_text = complexity.get("thinking_text", "").strip() or "思考中..."
         _BACKEND_TITLES = {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI", "openrouter": "OpenRouter AI"}
@@ -1337,6 +1428,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             "msgTitle": _BACKEND_TITLES.get(AI_BACKEND, "AI"),
             "thinkingText": thinking_text,
             "msgContent": "Thinking...",
+            "msgButtons": [],
             "isError": "false",
             "flowStatus": "1",
             "config": {"autoLayout": True}
@@ -1484,7 +1576,6 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         search_info = None
 
         sender_name = incoming_message.sender_nick or "User"
-        at_header = f"👋 @{sender_name} \n\n"
 
         # “敲键盘”状态动画（通过 statusText 流式更新模拟，结束后清空）
         stop_typing = asyncio.Event()
@@ -1514,6 +1605,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             typing_task = asyncio.create_task(_typing_loop())
 
+        final_status_written = False
         try:
             # 记录完整 System Prompt（含 Soul）
             sys_msg = next((m["content"] for m in messages if m["role"] == "system"), None)
@@ -1579,7 +1671,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if thinking_delta:
                     full_thinking += thinking_delta
                     # 构造显示内容：thinking + 正式回复
-                    display_content = self._build_display_content(full_thinking, full_response, is_thinking=True)
+                    display_content = self._build_display_content(full_thinking, full_response, is_thinking=True, members=dws_bundle.members)
                     await self._update_card_throttled(out_track_id, display_content, last_update_time, is_first_chunk)
                     if is_first_chunk:
                         is_first_chunk = False
@@ -1593,7 +1685,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     full_response += content_delta
 
                     # 构造显示内容
-                    display_content = self._build_display_content(full_thinking, full_response, is_thinking=False)
+                    display_content = self._build_display_content(full_thinking, full_response, is_thinking=False, members=dws_bundle.members)
                     if not display_content:
                         continue
 
@@ -1610,6 +1702,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         last_update_time = current_time
 
             print(f"✅ 流式响应结束，总长度: {len(full_response)}, thinking: {len(full_thinking)}")
+            stop_typing.set()
+            if typing_task:
+                await asyncio.shield(typing_task)
 
             # 记录使用统计
             if USE_STATS and usage_info:
@@ -1699,9 +1794,6 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             card_response = clean_response
             history_response = clean_response
-            card_response, mention_targets = resolve_mentions(card_response, dws_bundle.members)
-            clean_response = card_response
-            history_response = card_response
             if ENABLE_BQB and not use_openclaw_backend and not image_gen_payload:
                 bqb_res = await resolve_bqb_tags(
                     clean_response,
@@ -1715,6 +1807,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     # 模型仅输出了表情包标签但被节流或上传失败剥空时给轻量占位，防空白卡片与空历史
                     card_response = "🙂"
                     history_response = "🙂"
+
+            card_response, _ = resolve_mentions(card_response, dws_bundle.members, card=True)
+            history_response, _ = resolve_mentions(history_response, dws_bundle.members)
 
             # 构建状态栏：只有 thinking 时才显示摘要，避免重复显示内容
             status_text = ""
@@ -1745,51 +1840,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     _top_p_part = " | top_p=default"
                 status_text += f"\n\n<font color='#808080' size='2'>{model_status} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
 
-            buttons = [
-                {
-                    "text": "🧹 清空",
-                    "color": "grey", 
-                    "event": {
-                        "type": "openUrl",
-                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=🧹 清空记忆"}
-                    }
-                },
-                {
-                    "text": "🔄 重试",
-                    "color": "blue", 
-                    "event": {
-                        "type": "openUrl",
-                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=" + (raw_user_content or "重试")}
-                    }
-                },
-                {
-                    "text": "📝 总结",
-                    "color": "grey",
-                    "event": {
-                        "type": "openUrl",
-                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=📝 总结摘要"}
-                    }
-                },
-                {
-                    "text": "🇬🇧 翻译",
-                    "color": "grey",
-                    "event": {
-                        "type": "openUrl",
-                        "params": {"url": "dtmd://dingtalkclient/sendMessage?content=🇬🇧 翻译成英文"}
-                    }
-                }
-            ]
-            
-            final_content = at_header + card_response
-            if mention_targets and getattr(incoming_message, "conversation_type", None) == "2":
-                corp = await check_dws_corp_access(expected_corp_ids=[DWS_EXPECTED_CORP_ID, getattr(incoming_message, "chatbot_corp_id", "")])
-                if corp.allowed:
-                    try:
-                        await send_mentions(conversation_id, mention_targets, dws_bundle.members, content=card_response)
-                    except (RuntimeError, ValueError, OSError):
-                        final_content += "\n\n⚠️ 定向 @ 提醒未确认成功，请手动确认对方是否收到。"
-                else:
-                    final_content += "\n\n⚠️ 企业身份无法确认，未发送定向 @ 提醒。"
+            final_content = card_response
 
             # Soul 自主进化（异步后台，不阻塞响应）
             try:
@@ -1810,26 +1861,19 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 "msgContent": final_content,
                 "isError": "false",
                 "statusText": status_text,
-                "msgButtons": buttons,
+                "msgButtons": [],
                 "flowStatus": "3",
                 "config": {"autoLayout": True}
             }
             print(f"🔄 正在全量更新卡片: keys={list(update_data.keys())}")
 
             success = await self.card_helper.update_card(out_track_id, update_data)
+            final_status_written = bool(success)
             
             if not success:
-                print("⚠️ 全量更新失败，启用兜底方案：拼接按钮到正文")
-                buttons_md = (
-                    "\n\n"
-                    "[🧹 清空](dtmd://dingtalkclient/sendMessage?content=🧹 清空记忆) | "
-                    "[🔄 重试](dtmd://dingtalkclient/sendMessage?content=" + (raw_user_content or "重试") + ") | "
-                    "[📝 总结](dtmd://dingtalkclient/sendMessage?content=📝 总结摘要) | "
-                    "[🇬🇧 翻译](dtmd://dingtalkclient/sendMessage?content=🇬🇧 翻译成英文)"
-                )
+                print("⚠️ 全量更新失败，尝试将状态栏追加到正文")
                 if status_text:
                     final_content += "\n\n---\n" + status_text
-                final_content += buttons_md
                 
                 await self.card_helper.stream_update(
                     out_track_id,
@@ -1856,22 +1900,25 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 pass
         finally:
             stop_typing.set()
-            if typing_task:
-                try:
-                    await asyncio.wait_for(typing_task, timeout=1.0)
-                except Exception:
-                    pass
-            # 清空打字状态，避免残留
             try:
-                await self.card_helper.stream_update(
-                    out_track_id,
-                    "",
-                    is_finalize=False,
-                    is_full=True,
-                    content_key="statusText",
-                )
-            except Exception:
-                pass
+                if typing_task:
+                    try:
+                        await asyncio.wait_for(asyncio.shield(typing_task), timeout=1.0)
+                    except Exception:
+                        pass
+            finally:
+                # 成功卡片保留正式状态栏；取消动画等待也必须尝试清理未完成状态。
+                if not final_status_written:
+                    try:
+                        await self.card_helper.stream_update(
+                            out_track_id,
+                            "",
+                            is_finalize=False,
+                            is_full=True,
+                            content_key="statusText",
+                        )
+                    except Exception:
+                        pass
 
     async def process_buffered_messages(self, buffer_key):
         try:
@@ -1880,11 +1927,18 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             print(f"⏹️ 定时器被取消（缓冲 {buffer_key[-8:]}），消息已合并到新缓冲区")
             return
 
-        # 获取或创建会话锁（在 sleep 之前检查，避免重复处理）
-        if buffer_key not in session_locks:
-            session_locks[buffer_key] = asyncio.Lock()
+        pending = message_buffer.get(buffer_key)
+        if pending is None:
+            return
+        conversation_id = pending["incoming_message"].conversation_id or buffer_key
+        lock_key = (BOT_ID, conversation_id)
+        conversation_lock = session_locks.get(lock_key)
+        if conversation_lock is None:
+            conversation_lock = asyncio.Lock()
+            session_locks[lock_key] = conversation_lock
 
-        async with session_locks[buffer_key]:
+        # 缓冲仍按用户合并；处理按机器人和会话串行，拿锁后才读取上下文。
+        async with conversation_lock:
             # 再次检查，防止在等待锁期间被其他任务处理
             if buffer_key not in message_buffer:
                 print(f"⚠️ 缓冲区已被其他任务处理: {buffer_key[-8:]}")

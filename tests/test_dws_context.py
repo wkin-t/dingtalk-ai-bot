@@ -174,7 +174,7 @@ async def test_history_media_annotation_stays_in_original_message(monkeypatch, r
     rows = [{"messageId": "image", "sender": "甲", "text": "[图片消息](mediaId=new)", "createTime": "2026-11-12 10:00:02"}]
     bundle, _ = await read_dws_only_window(rows)
     assert len(bundle.merged_history) == 1
-    assert "原图附在本轮" in bundle.merged_history[0]["content"]
+    assert "原图附在本条历史消息中" in bundle.merged_history[0]["content"]
     assert bundle.context_images == [b"image"]
 
 
@@ -252,6 +252,68 @@ def test_members_mentions_only_resolve_current_group_ids():
     text, targets = resolve_mentions("请 [[at:1]] 看一下 [[at:999]]", members)
     assert text == "请 @甲 看一下 "
     assert targets == ["real"]
+
+
+def test_card_mentions_render_safe_anchor_and_plain_mode_stays_compatible():
+    from app.dws_members import resolve_mentions
+
+    members = [{"id": "member_1", "name": "甲&<乙>"}]
+
+    card_text, card_targets = resolve_mentions("请 [[at:1]] 看一下", members, card=True)
+    assert card_text == "请 <a atId=member_1>甲&amp;&lt;乙&gt;</a> 看一下"
+    assert card_targets == ["member_1"]
+
+    plain_text, plain_targets = resolve_mentions("请 [[at:1]] 看一下", members)
+    assert plain_text == "请 @甲&<乙> 看一下"
+    assert plain_targets == ["member_1"]
+
+
+def test_card_mentions_reject_unsafe_member_id_without_attribute_injection():
+    from app.dws_members import resolve_mentions
+
+    members = [{"id": 'member_1" onmouseover="alert(1)', "name": "恶意成员"}]
+    card_text, targets = resolve_mentions("请 [[at:1]] 看一下", members, card=True)
+
+    assert "[[at:" not in card_text
+    assert "<a atId=" not in card_text
+    assert "onmouseover" not in card_text
+    assert targets == []
+
+
+def test_card_mentions_escape_model_supplied_anchor_instead_of_trusting_it():
+    from app.dws_members import resolve_mentions
+
+    members = [{"id": "member_1", "name": "甲"}]
+    card_text, targets = resolve_mentions(
+        "模型自拼 <a atId=outsider>外部成员</a>，请 [[at:1]]。",
+        members,
+        card=True,
+    )
+
+    assert "<a atId=outsider>" not in card_text
+    assert "&lt;a atId=outsider>" in card_text
+    assert "<a atId=member_1>甲</a>" in card_text
+    assert targets == ["member_1"]
+
+
+def test_card_mentions_keep_same_name_confirmation_and_cap_targets_at_three():
+    from app.dws_members import resolve_mentions
+
+    members = [
+        {"id": "dup-1", "name": "重名"},
+        {"id": "dup-2", "name": "重名"},
+        {"id": "member-3", "name": "甲"},
+        {"id": "member-4", "name": "乙"},
+        {"id": "member-5", "name": "丙"},
+        {"id": "member-6", "name": "丁"},
+    ]
+    marker_text = " ".join(f"[[at:{index}]]" for index in range(1, 7))
+    card_text, targets = resolve_mentions(marker_text, members, card=True)
+
+    assert card_text.count("<a atId=") == 3
+    assert targets == ["member-3", "member-4", "member-5"]
+    assert card_text.count("重名（同名成员，请确认身份）") == 2
+    assert "丁" in card_text and "<a atId=member-6>" not in card_text
 
 
 def test_parse_members_prefers_group_nickname_then_personal_nickname():
@@ -523,6 +585,96 @@ class TestEnvelopeAndMessageParsing:
         assert card_msg is not None
         assert card_msg["is_bot_like"] is True
 
+    def test_recalled_rows_and_tombstones_are_filtered_without_matching_normal_text(self):
+        from app.dws_context import extract_clean_dws_item
+
+        assert extract_clean_dws_item(
+            {
+                "messageId": "recalled-flag",
+                "sender": "甲",
+                "isRecalled": True,
+                "text": "不要把这段撤回正文送给模型",
+            }
+        ) is None
+        assert extract_clean_dws_item(
+            {
+                "messageId": "recalled-tombstone",
+                "sender": "甲",
+                "text": "[消息已撤回]",
+            }
+        ) is None
+
+        ordinary_discussion = extract_clean_dws_item(
+            {
+                "messageId": "ordinary-discussion",
+                "sender": "甲",
+                "text": "请不要撤回这条配置说明，后面还要核对。",
+            }
+        )
+        assert ordinary_discussion is not None
+        assert ordinary_discussion["display_text"] == "请不要撤回这条配置说明，后面还要核对。"
+
+    def test_quote_and_forwarded_children_filter_recalled_content(self):
+        from app.dws_context import _parse_quote_dict, extract_clean_dws_item
+
+        assert _parse_quote_dict(
+            {
+                "messageId": "recalled-quote",
+                "sender": "甲",
+                "status": "recalled",
+                "text": "引用中的秘密正文",
+            }
+        ) is None
+
+        forwarded = extract_clean_dws_item(
+            {
+                "messageId": "forwarded-parent",
+                "sender": "甲",
+                "text": "合并转发",
+                "forwardMessages": [
+                    {
+                        "messageId": "recalled-child",
+                        "sender": "乙",
+                        "isRecalled": True,
+                        "text": "合并转发里的秘密撤回正文",
+                    },
+                    {
+                        "messageId": "recalled-child",
+                        "sender": "乙",
+                        "text": "合并转发里的秘密撤回正文旧副本",
+                    },
+                    {
+                        "messageId": "visible-child",
+                        "sender": "丙",
+                        "text": "合并转发里的可见正文",
+                    },
+                ],
+            }
+        )
+        assert forwarded is not None
+        assert "合并转发里的秘密撤回正文" not in forwarded["display_text"]
+        assert "合并转发里的秘密撤回正文旧副本" not in forwarded["display_text"]
+        assert "合并转发里的可见正文" in forwarded["display_text"]
+
+    def test_raw_message_aliases_are_all_retained_for_recall_deduplication(self):
+        from app.dws_context import _raw_message_ids
+
+        assert _raw_message_ids(
+            {
+                "messageId": "message-id",
+                "openMessageId": "open-message-id",
+                "msgId": "msg-id",
+                "message_id": "snake-message-id",
+                "open_message_id": "snake-open-message-id",
+            }
+        ) == {
+            "message-id",
+            "open-message-id",
+            "msg-id",
+            "snake-message-id",
+            "snake-open-message-id",
+        }
+
 
 class TestAuthBackoffAndSubprocessEnv:
     """未登录/缺少二进制时的负缓存退避与国内直连环境变量剥离测试。"""
@@ -722,6 +874,643 @@ class TestGroupHistoryMerge:
 
 class TestQuoteContextResolution:
     """引用消息及引用处前后上下文提取测试（含窗口内零额外调用、历史跨窗口查询、引用机器人卡片恢复）。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mget_payload",
+        [
+            None,
+            {"ok": True, "data": {"found": 0, "messages": []}},
+            {
+                "ok": True,
+                "data": {
+                    "found": 0,
+                    "messages": [],
+                    "notFoundMessageIds": ["recalled-target"],
+                    "failures": [{"messageId": "recalled-target", "reason": "not_returned"}],
+                },
+            },
+        ],
+        ids=["mget-failed", "mget-empty", "mget-not-returned"],
+    )
+    async def test_full_stream_quote_is_mget_verified_and_not_returned_drops_stale_body(self, mget_payload):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        calls = []
+
+        async def fake_run_json(args, **_kwargs):
+            calls.append(list(args))
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "current",
+                                "sender": "乙",
+                                "text": "这张图怎么看？",
+                                "createTime": "2026-11-12 10:00:02",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                return mget_payload
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = SimpleNamespace(
+            message_id="current",
+            conversation_id="cid_quote_recall",
+            conversation_type="2",
+            chatbot_user_id="bot",
+            chatbot_corp_id="corp",
+            text=SimpleNamespace(
+                content="这张图怎么看？",
+                extensions={
+                    "repliedMsg": {
+                        "messageId": "recalled-target",
+                        "sender": "甲",
+                        "createTime": "2026-11-12 10:00:00",
+                        "text": "recalled-marker-来自 Stream 的旧正文",
+                        "resources": [{"resourceType": "image", "resourceIdType": "mediaId", "resourceId": "stale-img"}],
+                    }
+                },
+            ),
+            extensions={},
+        )
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", True), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult()) as media:
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_quote_recall",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["current"],
+                raw_user_content="这张图怎么看？",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert any(list(args[:2]) == ["chat", "+messages-mget"] for args in calls)
+        assert bundle.quote_info is None
+        assert bundle.quotes == []
+        assert "recalled-marker" not in repr(bundle)
+        assert media.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_quote_mget_recall_alias_also_removes_existing_history_copy(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "current",
+                                "sender": "乙",
+                                "text": "继续看这个",
+                                "createTime": "2026-11-12 10:00:02",
+                            },
+                            {
+                                "messageId": "canonical-id",
+                                "openMessageId": "quoted-alias",
+                                "sender": "甲",
+                                "text": "撤回前的历史秘密正文",
+                                "createTime": "2026-11-12 09:59:00",
+                            },
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                assert args[args.index("--msg-ids") + 1] == "quoted-alias"
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "canonical-id",
+                                "openMessageId": "quoted-alias",
+                                "sender": "甲",
+                                "isRecalled": True,
+                                "text": "撤回前的历史秘密正文",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = SimpleNamespace(
+            message_id="current",
+            conversation_id="cid_quote_alias_recall",
+            conversation_type="2",
+            chatbot_user_id="bot",
+            chatbot_corp_id="corp",
+            text=SimpleNamespace(
+                content="继续看这个",
+                extensions={
+                    "repliedMsg": {
+                        "messageId": "quoted-alias",
+                        "sender": "甲",
+                        "createTime": "2026-11-12 09:59:00",
+                        "text": "撤回前的历史秘密正文",
+                    }
+                },
+            ),
+            extensions={},
+        )
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", True), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult()) as media:
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_quote_alias_recall",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["current"],
+                raw_user_content="继续看这个",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert bundle.quote_info is None
+        assert bundle.quotes == []
+        assert all("撤回前的历史秘密正文" not in str(row) for row in bundle.merged_history)
+        assert media.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_non_window_quote_uses_mget_body_instead_of_stream_body(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "current",
+                                "sender": "乙",
+                                "text": "继续看引用",
+                                "createTime": "2026-11-12 10:00:05",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                assert args[args.index("--msg-ids") + 1] == "quote-target"
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "quote-target",
+                                "sender": "甲",
+                                "text": "mget 当前可信正文",
+                                "createTime": "2026-11-12 09:59:00",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = SimpleNamespace(
+            message_id="current",
+            conversation_id="cid_quote_mget_body",
+            conversation_type="2",
+            chatbot_user_id="bot",
+            chatbot_corp_id="corp",
+            text=SimpleNamespace(
+                content="继续看引用",
+                extensions={
+                    "repliedMsg": {
+                        "messageId": "quote-target",
+                        "sender": "甲",
+                        "createTime": "2026-11-12 09:59:00",
+                        "text": "Stream 携带的旧正文不应成为可信来源",
+                    }
+                },
+            ),
+            extensions={},
+        )
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", True), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult()):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_quote_mget_body",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["current"],
+                raw_user_content="继续看引用",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert bundle.quote_info is not None
+        assert bundle.quote_info.text == "mget 当前可信正文"
+        assert "mget 当前可信正文" in bundle.quote_prompt_block
+        assert "Stream 携带的旧正文" not in bundle.quote_prompt_block
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("existing_history_copy", [False, True])
+    async def test_neighbor_recall_removes_older_duplicate_from_other_direction(self, existing_history_copy):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"] and "--direction" not in args:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            *([{
+                                "messageId": "neighbor-recalled",
+                                "sender": "丙",
+                                "text": "邻居撤回秘密旧副本",
+                                "createTime": "2026-11-12 10:00:00",
+                            }] if existing_history_copy else []),
+                            {
+                                "messageId": "current",
+                                "sender": "乙",
+                                "text": "继续看引用",
+                                "createTime": "2026-11-12 10:00:05",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "quote-target",
+                                "sender": "甲",
+                                "text": "被引用的可见正文",
+                                "createTime": "2026-11-12 09:59:00",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:3]) == ["chat", "message", "list"]:
+                direction = args[args.index("--direction") + 1]
+                if direction == "older":
+                    return {
+                        "ok": True,
+                        "data": {
+                            "messages": [
+                                {
+                                    "messageId": "neighbor-recalled",
+                                    "sender": "丙",
+                                    "text": "邻居撤回秘密旧副本",
+                                    "createTime": "2026-11-12 08:59:00",
+                                },
+                                {
+                                    "messageId": "quote-target",
+                                    "sender": "甲",
+                                    "text": "被引用的可见正文",
+                                    "createTime": "2026-11-12 09:59:00",
+                                },
+                            ]
+                        },
+                    }
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "quote-target",
+                                "sender": "甲",
+                                "text": "被引用的可见正文",
+                                "createTime": "2026-11-12 09:59:00",
+                            },
+                            {
+                                "messageId": "neighbor-recalled",
+                                "sender": "丙",
+                                "isRecalled": True,
+                                "text": "[消息已撤回]",
+                                "createTime": "2026-11-12 09:59:30",
+                            },
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = SimpleNamespace(
+            message_id="current",
+            conversation_id="cid_neighbor_recall",
+            conversation_type="2",
+            chatbot_user_id="bot",
+            chatbot_corp_id="corp",
+            text=SimpleNamespace(
+                content="继续看引用",
+                extensions={
+                    "repliedMsg": {
+                        "messageId": "quote-target",
+                        "sender": "甲",
+                        "createTime": "2026-11-12 09:59:00",
+                        "text": "被引用的可见正文",
+                    }
+                },
+            ),
+            extensions={},
+        )
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", True), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json), \
+             patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult()) as media:
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_neighbor_recall",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["current"],
+                raw_user_content="继续看引用",
+                history_messages=[],
+                dws_only=True,
+                quote_before=2,
+                quote_after=2,
+            )
+
+        if existing_history_copy:
+            assert bundle.context_error
+            assert not bundle.merged_history
+            assert media.await_count == 0
+            return
+        assert bundle.context_error == ""
+        assert "邻居撤回秘密旧副本" not in bundle.quote_prompt_block
+        assert media.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mget_payload", [
+        (
+            {
+                "ok": True,
+                "data": {
+                    "found": 0,
+                    "notFoundMessageIds": ["missing-current"],
+                    "failures": [{"messageId": "missing-current", "reason": "not_returned"}],
+                },
+            },
+        ),
+        None,
+    ])
+    async def test_missing_current_dws_only_does_not_fallback_after_mget_uncertain(self, mget_payload):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {"ok": True, "data": {"messages": []}}
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                return mget_payload
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = _dws_incoming("missing-current", content="普通消息")
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", True), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_current_recall",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["missing-current"],
+                raw_user_content="普通消息",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert "当前消息" in bundle.context_error
+        assert "未调用模型" in bundle.context_error
+
+    @pytest.mark.asyncio
+    async def test_explicit_stream_recall_marker_blocks_current_message(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "current-recalled",
+                                "sender": "甲",
+                                "text": "旧正文",
+                                "createTime": "2026-11-12 10:00:01",
+                            }
+                        ]
+                    },
+                }
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = _dws_incoming("current-recalled", content="[消息已撤回]")
+        incoming.is_recalled = True
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", False), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_stream_recall",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["current-recalled"],
+                raw_user_content="[消息已撤回]",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert "当前消息" in bundle.context_error
+        assert "未调用模型" in bundle.context_error
+
+    @pytest.mark.asyncio
+    async def test_recent_recalled_id_suppresses_old_duplicate_row(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "same-id",
+                                "sender": "甲",
+                                "isRecalled": True,
+                                "text": "[消息已撤回]",
+                                "createTime": "2026-11-12 10:00:01",
+                            },
+                            {
+                                "messageId": "same-id",
+                                "sender": "甲",
+                                "text": "旧副本秘密正文",
+                                "createTime": "2026-11-12 10:00:00",
+                            },
+                            {
+                                "messageId": "current",
+                                "sender": "乙",
+                                "text": "普通当前消息",
+                                "createTime": "2026-11-12 10:00:02",
+                            },
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", False), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_recall_duplicate",
+                is_group=True,
+                incoming_messages=[_dws_incoming("current", content="普通当前消息")],
+                current_message_ids=["current"],
+                raw_user_content="普通当前消息",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert all("旧副本秘密正文" not in str(row) for row in bundle.merged_history)
+        assert all(row.get("message_id") != "same-id" for row in bundle.merged_history)
+
+    @pytest.mark.asyncio
+    async def test_buffer_with_one_matched_and_one_missing_current_stops_on_missing_id(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+        calls = []
+
+        async def fake_run_json(args, **_kwargs):
+            calls.append(list(args))
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "matched-current",
+                                "sender": "甲",
+                                "text": "第一条正常消息",
+                                "createTime": "2026-11-12 10:00:01",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                assert args[args.index("--msg-ids") + 1] == "missing-current"
+                return {
+                    "ok": True,
+                    "data": {
+                        "found": 0,
+                        "notFoundMessageIds": ["missing-current"],
+                        "failures": [{"messageId": "missing-current", "reason": "not_returned"}],
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = [
+            _dws_incoming("matched-current", content="第一条正常消息", sender="甲"),
+            _dws_incoming("missing-current", content="第二条已撤回消息", sender="乙"),
+        ]
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", False), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_buffer_recall",
+                is_group=True,
+                incoming_messages=incoming,
+                current_message_ids=["matched-current", "missing-current"],
+                raw_user_content="第一条正常消息\n第二条已撤回消息",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert "当前消息" in bundle.context_error
+        assert "未调用模型" in bundle.context_error
+        assert any(list(args[:2]) == ["chat", "+messages-mget"] for args in calls)
+
+    @pytest.mark.asyncio
+    async def test_missing_current_mget_accepts_heterogeneous_id_when_text_matches(self):
+        import app.dws_context as dws_ctx
+        from app.dws_context import DwsCorpCheckResult, fetch_dws_context_bundle
+
+        async def fake_run_json(args, **_kwargs):
+            if list(args[:2]) == ["chat", "message"]:
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "old-history",
+                                "sender": "丙",
+                                "text": "更早的历史消息",
+                                "createTime": "2026-11-12 09:59:00",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+messages-mget"]:
+                assert args[args.index("--msg-ids") + 1] == "stream-id"
+                return {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "messageId": "dws-id",
+                                "sender": "甲",
+                                "text": "异构正常消息",
+                                "createTime": "2026-11-12 10:00:01",
+                            }
+                        ]
+                    },
+                }
+            if list(args[:2]) == ["chat", "+chat-members-list"]:
+                return {"ok": True, "data": {"users": [], "complete": True}}
+            raise AssertionError(f"unexpected dws args: {args}")
+
+        incoming = _dws_incoming("stream-id", content="异构正常消息", sender="甲")
+        with patch.object(dws_ctx.cfg, "ENABLE_DWS_QUOTE_CONTEXT", False), \
+             patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=fake_run_json):
+            bundle = await fetch_dws_context_bundle(
+                conversation_id="cid_heterogeneous_id",
+                is_group=True,
+                incoming_messages=[incoming],
+                current_message_ids=["stream-id"],
+                raw_user_content="异构正常消息",
+                history_messages=[],
+                dws_only=True,
+            )
+
+        assert bundle.context_error == ""
 
     @pytest.mark.asyncio
     async def test_in_window_quote_extracts_neighbors_without_extra_rpc(self):
@@ -1577,6 +2366,69 @@ class TestQuotedImagesAndDocumentsReadonly:
         assert 0 < call_args["new-document"]["max_documents"] <= 2
 
     @pytest.mark.asyncio
+    async def test_history_image_is_attached_to_its_own_history_entry(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """普通可见历史图片应归属于原消息，而不是聚合成当前 user 的图片。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 2)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 1)
+        rows = [
+            _dws_image_row("old-image", "甲", "2026-11-12 10:00:00", "old-media"),
+            {"messageId": "new-text", "sender": "乙", "text": "最新文字", "createTime": "2026-11-12 10:00:01"},
+        ]
+
+        bundle, _ = await read_dws_media_bundle(
+            rows,
+            media_factory=lambda quote_id: QuotedMediaAndDocsResult(
+                images=[b"old-image-bytes"] if quote_id == "old-image" else []
+            ),
+        )
+
+        image_entry = next(item for item in bundle.merged_history if item["timestamp"] == "2026-11-12 10:00:00")
+        assert image_entry["images"] == [b"old-image-bytes"]
+        assert bundle.context_image_messages == []
+
+    @pytest.mark.asyncio
+    async def test_non_window_quote_neighbor_image_is_separate_context_message(
+        self, monkeypatch, read_dws_media_bundle
+    ):
+        """可见窗口外、被明确引用的邻居图片应保留原消息归属。"""
+        import app.dws_context as dws_ctx
+        from app.dws_files import QuotedMediaAndDocsResult
+
+        monkeypatch.setattr(dws_ctx.cfg, "MAX_HISTORY_LENGTH", 1)
+        monkeypatch.setattr(dws_ctx.cfg, "DWS_MAX_QUOTE_IMAGES", 1)
+        rows = [
+            _dws_image_row("neighbor-image", "甲", "2026-11-12 10:00:00", "neighbor-media"),
+            {"messageId": "quote-target", "sender": "甲", "text": "被引用的正文", "createTime": "2026-11-12 10:00:01"},
+            {"messageId": "latest", "sender": "丁", "text": "最新普通消息", "createTime": "2026-11-12 10:00:04"},
+            _dws_current_row("current", "quote-target", sender="戊", timestamp="2026-11-12 10:00:05"),
+        ]
+
+        bundle, _ = await read_dws_media_bundle(
+            rows,
+            media_factory=lambda quote_id: QuotedMediaAndDocsResult(
+                images=[b"neighbor-image-bytes"] if quote_id == "neighbor-image" else []
+            ),
+            incoming_messages=[_dws_incoming("current", content="看引用")],
+            current_ids=["current"],
+            raw_user_content="看引用",
+            quote_before=1,
+            quote_after=1,
+        )
+
+        assert len(bundle.context_image_messages) == 1
+        message = bundle.context_image_messages[0]
+        assert message["role"] == "user"
+        assert message["timestamp"] == "2026-11-12 10:00:00"
+        assert message["sender_nick"] == "甲"
+        assert "明确引用邻居" in message["content"]
+        assert message["images"] == [b"neighbor-image-bytes"]
+
+    @pytest.mark.asyncio
     async def test_history_document_is_read_after_quoted_image_budget_is_exhausted(
         self, monkeypatch, read_dws_media_bundle
     ):
@@ -1750,7 +2602,7 @@ class TestQuotedImagesAndDocumentsReadonly:
         assert "neighbor-image" in called_ids
         assert "outside-image" not in called_ids
         assert bundle.context_images == [b"neighbor-image"]
-        assert "群历史图片" in bundle.quote_prompt_block
+        assert "原图附在独立引用邻居消息中" in bundle.quote_prompt_block
         assert [item["content"] for item in bundle.merged_history] == ["最新普通消息"]
 
     @pytest.mark.asyncio
@@ -2000,3 +2852,24 @@ class TestQuotedImagesAndDocumentsReadonly:
         from app.dws_files import parse_pdf_bytes
 
         assert isinstance(parse_pdf_bytes(pdf_bytes), str)
+
+
+@pytest.mark.parametrize("prefix", ["[[at:1]] @同事甲 ", "@同事甲 [[at:1]] ", "[[at:1]] [[at:1]] ", "@同事甲 @同事甲 "])
+def test_repeated_leading_mentions_collapse_without_losing_other_members(prefix):
+    from app.dws_members import resolve_mentions
+
+    members = [{"id": "member-a", "name": "同事甲"}, {"id": "member-b", "name": "同事乙"}]
+    text, targets = resolve_mentions(prefix + "请与 [[at:2]] 核对。", members, card=True)
+    assert text.count("同事甲") == 1
+    assert text.count('atId=member-b') == 1
+    assert "请与" in text and "核对。" in text
+    assert targets[-1] == "member-b"
+
+
+def test_same_member_has_only_one_structured_mention_per_reply():
+    from app.dws_members import resolve_mentions
+
+    text, targets = resolve_mentions("请 [[at:1]] 核对，完成后请 [[at:1]] 回复。", [{"id": "member-a", "name": "同事甲"}], card=True)
+    assert text.count("atId=member-a") == 1
+    assert "完成后请 同事甲 回复。" in text
+    assert targets == ["member-a"]

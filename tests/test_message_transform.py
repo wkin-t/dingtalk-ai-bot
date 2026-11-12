@@ -160,6 +160,67 @@ def test_merge_two_list_messages():
     assert any("first text" in text and "second text" in text for text in text_parts)
 
 
+def test_merge_multimodal_messages_preserves_text_image_text_order():
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "旧文本"},
+                {"type": "image_url", "image_url": {"url": "old-image"}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "新文本"}]},
+    ]
+
+    merged = merge_consecutive_same_role(msgs)[0]["content"]
+
+    assert [part["type"] for part in merged] == ["text", "image_url", "text"]
+    assert [part.get("text") for part in merged if part["type"] == "text"] == ["旧文本", "新文本"]
+
+
+def test_merge_interleaved_multimodal_messages_preserves_each_message_order():
+    msgs = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "第一段"},
+                {"type": "image_url", "image_url": {"url": "image-1"}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "第二段"},
+                {"type": "image_url", "image_url": {"url": "image-2"}},
+            ],
+        },
+    ]
+
+    merged = merge_consecutive_same_role(msgs)[0]["content"]
+
+    assert [part["type"] for part in merged] == ["text", "image_url", "text", "image_url"]
+    assert [part.get("text") for part in merged if part["type"] == "text"] == ["第一段", "第二段"]
+    assert [part["image_url"]["url"] for part in merged if part["type"] == "image_url"] == ["image-1", "image-2"]
+
+
+def test_merge_multimodal_messages_preserves_other_blocks():
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "文本"},
+                {"type": "file", "file": {"id": "file-1"}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "后续文本"}]},
+    ]
+
+    merged = merge_consecutive_same_role(msgs)[0]["content"]
+
+    assert [part["type"] for part in merged] == ["text", "file", "text"]
+    assert merged[1] == {"type": "file", "file": {"id": "file-1"}}
+
+
 def test_message_without_role_treated_as_user():
     msgs = [{"content": "no role"}]
     result = rewrite_roles_for_current_agent(msgs, "openrouter")

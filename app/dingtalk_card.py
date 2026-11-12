@@ -12,6 +12,7 @@ import traceback
 from typing import Optional, Dict, Any, List, Callable
 from functools import wraps
 
+import httpx
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -284,6 +285,106 @@ class DingTalkCardHelper:
             return self.access_token
 
         return None
+
+    @staticmethod
+    def _reaction_response_success(response: httpx.Response) -> bool:
+        """判断机器人表情接口的 HTTP 与业务响应是否成功。"""
+        if not 200 <= response.status_code < 300:
+            return False
+        if not response.content:
+            return True
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        if payload == {}:
+            return True
+        if not isinstance(payload, dict):
+            return False
+
+        success = payload.get("success")
+        if success in (False, 0, "0", "false", "False"):
+            return False
+
+        if "code" in payload and payload["code"] not in (None, 0, 200, "0", "200"):
+            return False
+        for key in ("error", "errorCode", "errcode"):
+            if payload.get(key) not in (None, "", 0, "0"):
+                return False
+        return True
+
+    @staticmethod
+    def _log_reaction_failure(action: str, message_id: str, status: Optional[int] = None) -> None:
+        suffix = f" HTTP {status}" if status is not None else ""
+        print(f"⚠️ 表情回应失败: action={action}, msg_id={message_id}{suffix}")
+
+    async def set_processing_reaction(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        active: bool,
+    ) -> bool:
+        """以机器人身份添加或撤回用户消息上的处理中表情。"""
+        client_id = str(getattr(self, "client_id", "") or "").strip()
+        conversation_id = str(conversation_id or "").strip()
+        message_id = str(message_id or "").strip()
+        action = "reply" if active else "recall"
+        if not client_id or not conversation_id or not message_id:
+            return False
+
+        payload = {
+            "robotCode": client_id,
+            "openMsgId": message_id,
+            "openConversationId": conversation_id,
+            "emotionType": 2,
+            "emotionName": "🤔思考中",
+            "textEmotion": {
+                "emotionId": "2659900",
+                "emotionName": "🤔思考中",
+                "text": "🤔思考中",
+                "backgroundId": "im_bg_1",
+            },
+        }
+        url = f"https://api.dingtalk.com/v1.0/robot/emotion/{action}"
+
+        async def _request_within_budget() -> bool:
+            token = await self.get_access_token()
+            if not token:
+                return False
+
+            headers = {
+                "x-acs-dingtalk-access-token": token,
+                "Content-Type": "application/json",
+            }
+            async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code == 401:
+                    refreshed = await self.get_access_token(force_refresh=True)
+                    if not refreshed:
+                        return False
+                    headers["x-acs-dingtalk-access-token"] = refreshed
+                    response = await client.post(url, headers=headers, json=payload)
+
+            if not 200 <= response.status_code < 300:
+                self._log_reaction_failure(action, message_id, response.status_code)
+                return False
+            if not self._reaction_response_success(response):
+                self._log_reaction_failure(action, message_id, response.status_code)
+                return False
+            return True
+
+        try:
+            return bool(await asyncio.wait_for(_request_within_budget(), timeout=5))
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            self._log_reaction_failure(action, message_id)
+            return False
+        except Exception:
+            self._log_reaction_failure(action, message_id)
+            return False
 
     def _convert_card_data(self, card_data: Dict[str, Any]) -> Dict[str, str]:
         """将卡片数据转换为字符串格式"""

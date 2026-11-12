@@ -5,6 +5,7 @@
 - 当前 bot 的 assistant 消息：原样保留
 """
 from app.ai.history_format import format_history_with_meta
+import pytest
 
 
 def test_other_bot_assistant_gets_timestamp_prefix():
@@ -163,3 +164,50 @@ def test_xml_tag_survives_rewrite_and_merge():
         '[t2] <other_bot name="Gem">回答A</other_bot>\n\n'
         "[t3] 李四: 追问B"
     )
+def test_historical_image_stays_with_sender_and_original_time():
+    import base64
+    from app.ai.history_format import format_history_with_meta
+
+    png = b"\x89PNG\r\n\x1a\nold"
+    rows = [{"role": "user", "content": "旧截图", "sender_nick": "甲", "timestamp": "2026-11-12 10:00:00", "images": [png]}]
+    result = format_history_with_meta(rows, "anthropic")
+    parts = result[0]["content"]
+    assert isinstance(parts, list)
+    assert "2026-11-12 10:00:00" in parts[0]["text"]
+    assert "甲" in parts[0]["text"]
+    assert "历史图片" in parts[0]["text"]
+    assert base64.b64encode(png).decode() in parts[1]["image_url"]["url"]
+    assert rows[0]["content"] == "旧截图"
+
+
+def test_own_bot_historical_image_is_context_not_assistant_input_image():
+    from app.ai.history_format import format_history_with_meta
+
+    rows = [{"role": "assistant", "bot_id": "anthropic", "content": "先前图片回复", "sender_nick": "Claude", "timestamp": "2026-11-12 10:00:00", "images": [b"GIF89a-old"]}]
+    result = format_history_with_meta(rows, "anthropic")
+    assert result[0]["role"] == "assistant"
+    assert result[0]["content"] == "先前图片回复"
+    assert result[1]["role"] == "user"
+    assert "Claude" in result[1]["content"][0]["text"]
+    assert "历史图片" in result[1]["content"][0]["text"]
+    assert result[1]["content"][1]["image_url"]["url"].startswith("data:image/gif;")
+
+
+@pytest.mark.parametrize("provider", ["responses", "gemini"])
+def test_historical_bot_images_remain_user_visual_context_after_provider_conversion(provider):
+    from app.ai.message_transform import rewrite_roles_for_current_agent, merge_consecutive_same_role
+
+    rows = [{"role": "assistant", "bot_id": "anthropic", "sender_nick": "Claude", "timestamp": "2026-11-12 10:00:00", "message_id": "old-image", "content": "旧图片回复", "images": [b"\x89PNG\r\n\x1a\nold"]}]
+    messages = merge_consecutive_same_role(rewrite_roles_for_current_agent(format_history_with_meta(rows, "anthropic"), "anthropic"))
+    if provider == "responses":
+        from app.openai_client import _split_messages_for_responses
+        _, payload = _split_messages_for_responses(messages, supports_vision=True, supports_store=False)
+        visual = [msg for msg in payload if isinstance(msg["content"], list) and any(p.get("type") == "input_image" for p in msg["content"])]
+        assert len(visual) == 1 and visual[0]["role"] == "user"
+        assert "old-image" in visual[0]["content"][0]["text"]
+    else:
+        from app.gemini_client import _convert_openai_to_gemini
+        _, payload = _convert_openai_to_gemini(messages)
+        visual = [msg for msg in payload if any(p.inline_data for p in msg.parts)]
+        assert len(visual) == 1 and visual[0].role == "user"
+        assert "old-image" in visual[0].parts[0].text

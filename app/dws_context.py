@@ -108,6 +108,89 @@ _NOISE_TEXTS = frozenset(
     }
 )
 
+# dws/Stream 在不同消息入口使用过多套撤回投影；这里只接受明确的撤回
+# 状态或精确占位文本，不能用 ``"撤回" in 正文``，否则普通讨论会被误删。
+_RECALL_FLAG_KEYS = frozenset(
+    {
+        "isRecalled",
+        "is_recalled",
+        "isRecall",
+        "is_recall",
+        "recalled",
+        "recall",
+        "isRevoked",
+        "is_revoked",
+        "revoked",
+        "withdrawn",
+        "isWithdrawn",
+        "is_withdrawn",
+    }
+)
+_RECALL_STATUS_KEYS = frozenset(
+    {
+        "recallStatus",
+        "recall_status",
+        "messageStatus",
+        "message_status",
+        "status",
+        "state",
+        "eventType",
+        "event_type",
+        "event",
+        "messageType",
+        "message_type",
+        "msgType",
+        "msg_type",
+        "contentType",
+        "content_type",
+    }
+)
+_RECALL_STATUS_VALUES = frozenset(
+    {
+        "recall",
+        "recalled",
+        "recallmsg",
+        "recalledmsg",
+        "revoked",
+        "revoke",
+        "withdrawn",
+        "withdraw",
+        "retracted",
+        "retract",
+    }
+)
+_RECALL_TOMBSTONES = frozenset(
+    {
+        "消息已撤回",
+        "[消息已撤回]",
+        "消息已被撤回",
+        "[消息已被撤回]",
+        "该消息已撤回",
+        "[该消息已撤回]",
+        "该消息已被撤回",
+        "[该消息已被撤回]",
+        "此消息已撤回",
+        "[此消息已撤回]",
+        "此消息已被撤回",
+        "[此消息已被撤回]",
+        "已撤回",
+        "[已撤回]",
+        "撤回了一条消息",
+        "[撤回了一条消息]",
+        "你撤回了一条消息",
+        "[你撤回了一条消息]",
+        "对方撤回了一条消息",
+        "[对方撤回了一条消息]",
+        "message recalled",
+        "[message recalled]",
+        "message has been recalled",
+        "[message has been recalled]",
+    }
+)
+_NORMALIZED_RECALL_TOMBSTONES = frozenset(
+    re.sub(r"\s+", "", marker).strip().lower() for marker in _RECALL_TOMBSTONES
+)
+
 _PROXY_ENV_KEYS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -122,6 +205,222 @@ _AT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9._%+-])@([^\s@]+)")
 # 历史媒体读取与显式引用分开计预算，避免文档候选挤占图片配额或无限重试。
 _MAX_EXPLICIT_QUOTE_DOCUMENTS = 2
 _MAX_HISTORY_DOCUMENT_CANDIDATES = 2
+
+
+def _normalize_recall_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", "", value).strip().lower()
+
+
+def _is_recall_tombstone(value: Any) -> bool:
+    return _normalize_recall_text(value) in _NORMALIZED_RECALL_TOMBSTONES
+
+
+def _recall_fields(src: Any) -> dict[str, Any]:
+    if isinstance(src, dict):
+        return src
+    if src is None:
+        return {}
+
+    fields: dict[str, Any] = {}
+    for key in _RECALL_FLAG_KEYS | _RECALL_STATUS_KEYS:
+        if hasattr(src, key):
+            fields[key] = getattr(src, key)
+    text_obj = getattr(src, "text", None)
+    if isinstance(text_obj, str):
+        fields["text"] = text_obj
+    elif text_obj is not None:
+        content = getattr(text_obj, "content", None)
+        if isinstance(content, str):
+            fields["text"] = content
+    return fields
+
+
+def _is_explicit_recalled(src: Any, *, _depth: int = 0) -> bool:
+    """只识别明确的撤回状态/占位，不把正文中的普通词语当成撤回。"""
+    src = _recall_fields(src)
+    if not src or _depth > 3:
+        return False
+
+    for key in _RECALL_FLAG_KEYS:
+        value = src.get(key)
+        if value is True or (isinstance(value, int) and value == 1 and not isinstance(value, bool)):
+            return True
+        if isinstance(value, str) and _normalize_recall_text(value) in {"true", "yes", "1"}:
+            return True
+
+    for key in _RECALL_STATUS_KEYS:
+        value = src.get(key)
+        normalized = _normalize_recall_text(value)
+        if normalized in _RECALL_STATUS_VALUES:
+            return True
+
+    for key in ("text", "content"):
+        value = src.get(key)
+        if isinstance(value, str) and _is_recall_tombstone(value):
+            return True
+        if isinstance(value, dict):
+            if _is_explicit_recalled(value, _depth=_depth + 1):
+                return True
+            nested_text = value.get("text") or value.get("content")
+            if isinstance(nested_text, str) and _is_recall_tombstone(nested_text):
+                return True
+    return False
+
+
+def _raw_message_id(src: Any) -> str:
+    if not isinstance(src, dict):
+        return ""
+    for key in ("messageId", "openMessageId", "msgId", "message_id", "open_message_id"):
+        value = str(src.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _raw_message_ids(src: Any) -> set[str]:
+    if not isinstance(src, dict):
+        return set()
+    aliases = {
+        str(src.get(key)).strip()
+        for key in ("messageId", "openMessageId", "msgId", "message_id", "open_message_id")
+        if str(src.get(key) or "").strip()
+    }
+    stored_aliases = src.get("message_ids")
+    if isinstance(stored_aliases, (list, tuple, set)):
+        aliases.update(str(value).strip() for value in stored_aliases if str(value).strip())
+    return aliases
+
+
+def _collect_recalled_message_ids(payload: Any) -> set[str]:
+    """收集消息列表/mget 中明确标为撤回的消息 ID。"""
+    recalled_ids: set[str] = set()
+
+    def visit(raw_item: Any, depth: int, scan_budget: list[int]) -> None:
+        if not isinstance(raw_item, dict):
+            return
+        if depth > 3 or scan_budget[0] >= 30:
+            return
+        scan_budget[0] += 1
+        if _is_explicit_recalled(raw_item):
+            recalled_ids.update(_raw_message_ids(raw_item))
+        for key in ("quotedMessage", "repliedMsg", "quoteContent", "originalMsg"):
+            nested = raw_item.get(key)
+            if isinstance(nested, dict):
+                visit(nested, depth + 1, scan_budget)
+        for key in ("forwardMessages", "forwarded", "forward_messages"):
+            nested = raw_item.get(key)
+            if isinstance(nested, list):
+                for child in nested:
+                    visit(child, depth + 1, scan_budget)
+
+    for raw_item in extract_messages_from_payload(payload):
+        # 每条外层消息独立保留既有合并转发展开预算，避免为过滤撤回而
+        # 递归扫描未送入模型的深层/超量子消息。
+        visit(raw_item, 1, [0])
+    return recalled_ids
+
+
+_NOT_RETURNED_REASONS = frozenset(
+    {
+        "not_returned",
+        "notreturned",
+        "not_found",
+        "notfound",
+        "missing",
+        "recalled",
+        "revoked",
+        "withdrawn",
+    }
+)
+
+
+def _collect_not_returned_message_ids(
+    payload: Any,
+    requested_ids: Collection[str],
+) -> set[str]:
+    """从 mget 结构化失败回执中提取明确不可返回的请求 ID。"""
+    requested = {str(mid).strip() for mid in requested_ids if str(mid).strip()}
+    if not requested or payload is None:
+        return set()
+
+    not_returned: set[str] = set()
+    id_keys = {
+        "messageId",
+        "openMessageId",
+        "msgId",
+        "message_id",
+        "open_message_id",
+        "messageid",
+        "openmessageid",
+        "msgid",
+        "id",
+    }
+    list_keys = {
+        "notfoundmessageids",
+        "notreturnedmessageids",
+        "not_found_message_ids",
+        "not_returned_message_ids",
+    }
+
+    def add_ids(value: Any) -> None:
+        if isinstance(value, str):
+            for message_id in value.split(","):
+                clean_id = message_id.strip()
+                if clean_id in requested:
+                    not_returned.add(clean_id)
+        elif isinstance(value, list):
+            for entry in value:
+                add_ids(entry)
+        elif isinstance(value, dict):
+            message_id = _raw_message_id(value)
+            if message_id:
+                add_ids(message_id)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            for entry in value:
+                visit(entry)
+            return
+        if not isinstance(value, dict):
+            return
+
+        for key, child in value.items():
+            normalized_key = str(key).replace("-", "_").lower()
+            compact_key = normalized_key.replace("_", "")
+            if normalized_key in list_keys or compact_key in {key.replace("_", "") for key in list_keys}:
+                add_ids(child)
+            if normalized_key in {"failures", "failure", "errors", "error"}:
+                failure_entries = child if isinstance(child, list) else [child]
+                for failure in failure_entries:
+                    if not isinstance(failure, dict):
+                        continue
+                    reason = _normalize_recall_text(
+                        failure.get("reason")
+                        or failure.get("code")
+                        or failure.get("status")
+                        or failure.get("type")
+                        or failure.get("error")
+                    ).replace("-", "_")
+                    if reason not in _NOT_RETURNED_REASONS:
+                        continue
+                    failed_id = next(
+                        (
+                            str(failure.get(id_key) or "").strip()
+                            for id_key in id_keys
+                            if str(failure.get(id_key) or "").strip()
+                        ),
+                        "",
+                    )
+                    if failed_id in requested:
+                        not_returned.add(failed_id)
+                    elif len(requested) == 1:
+                        not_returned.update(requested)
+            visit(child)
+
+    visit(payload)
+    return not_returned
 
 _backoff_until: float = 0.0
 _backoff_keychain_marker: tuple[tuple[str, int, int], ...] | None = None
@@ -188,6 +487,9 @@ class DwsContextBundle:
     dws_available: bool = False
     context_error: str = ""
     context_images: list[bytes] = field(default_factory=list)
+    # 明确引用到、但不在可见历史窗口内的图片消息；调用层应将其作为独立
+    # 多模态 user 消息附在当前输入之前，避免把邻居图片伪装成本轮上传。
+    context_image_messages: list[dict[str, Any]] = field(default_factory=list)
     members: list[dict[str, str]] = field(default_factory=list)
     members_complete: bool = False
     merged_history: list[dict[str, Any]] = field(default_factory=list)
@@ -623,6 +925,8 @@ def _extract_resources_from_dict(src: dict[str, Any]) -> list[dict[str, Any]]:
 def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
     if not isinstance(q, dict):
         return None
+    if _is_explicit_recalled(q):
+        return None
     msg_id = str(q.get("messageId") or q.get("openMessageId") or q.get("msgId") or "").strip()
     conv_id = str(q.get("conversationId") or q.get("openConversationId") or "").strip()
     sender = str(q.get("sender") or q.get("senderNick") or q.get("nick") or "").strip()
@@ -746,6 +1050,27 @@ def _expand_forwarded_content(src: dict[str, Any]) -> tuple[str, list[dict[str, 
     resources: list[dict[str, Any]] = []
     remaining_chars, remaining_nodes = 12000, 30
     truncated = False
+    forwarded_recalled_ids: set[str] = set()
+    recalled_scan_nodes = 0
+
+    def collect_recalled(items: list[Any], depth: int) -> None:
+        nonlocal recalled_scan_nodes
+        if depth > 3 or recalled_scan_nodes >= 30:
+            return
+        for raw in items:
+            if recalled_scan_nodes >= 30:
+                return
+            if not isinstance(raw, dict):
+                continue
+            recalled_scan_nodes += 1
+            if _is_explicit_recalled(raw):
+                forwarded_recalled_ids.update(_raw_message_ids(raw))
+            for key in ("forwardMessages", "forwarded", "forward_messages"):
+                nested = raw.get(key)
+                if isinstance(nested, list):
+                    collect_recalled(nested, depth + 1)
+
+    collect_recalled(children, 1)
 
     def visit(items: list[Any], depth: int, inherited_conversation: str) -> None:
         nonlocal remaining_chars, remaining_nodes, truncated
@@ -759,6 +1084,8 @@ def _expand_forwarded_content(src: dict[str, Any]) -> tuple[str, list[dict[str, 
             if not isinstance(raw, dict):
                 continue
             remaining_nodes -= 1
+            if _is_explicit_recalled(raw) or _raw_message_ids(raw) & forwarded_recalled_ids:
+                continue
             sender = str(raw.get("sender") or raw.get("senderName") or "未知发送人")[:100]
             timestamp = normalize_dws_timestamp(raw.get("createTime") or raw.get("create_time"))
             body = _extract_text_from_stream_content(raw.get("text") or raw.get("content"), str(raw.get("messageType") or ""))
@@ -807,6 +1134,8 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
     """将 dws 单条消息投影清洗为统一内部结构。"""
     if not isinstance(item, dict):
         return None
+    if _is_explicit_recalled(item):
+        return None
 
     message_id = str(
         item.get("messageId") or item.get("openMessageId") or item.get("msgId") or ""
@@ -828,6 +1157,7 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         item.get("createTime") or item.get("createdAt") or item.get("sendTime")
     )
     resources = _extract_resources_from_dict(item)
+    message_aliases = _raw_message_ids(item)
 
     raw_text = ""
     if isinstance(item.get("text"), str):
@@ -867,6 +1197,7 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
     return {
         "message_id": message_id,
+        "message_ids": sorted(message_aliases),
         "conversation_id": conversation_id,
         "sender": sender,
         "sender_id": sender_id,
@@ -1757,6 +2088,62 @@ def _identify_current_dws_items(
     return matched_items, effective_ids
 
 
+def _unmatched_current_message_ids(
+    recent_dws_items: Sequence[dict[str, Any]],
+    incoming_messages: Sequence[Any],
+    current_message_ids: Sequence[str],
+    raw_user_content: str,
+    *,
+    restrict_ids: Collection[str] | None = None,
+) -> set[str]:
+    """逐条核对缓冲消息，找出仍未被 dws 近期窗口确认的触发 ID。"""
+    ordered_ids = [str(mid).strip() for mid in current_message_ids if str(mid).strip()]
+    allowed_ids = (
+        {str(mid).strip() for mid in restrict_ids if str(mid).strip()}
+        if restrict_ids is not None
+        else set(ordered_ids)
+    )
+    unmatched = set(allowed_ids)
+    if not incoming_messages:
+        unmatched.difference_update(
+            item.get("message_id")
+            for item in recent_dws_items
+            if item.get("message_id") in allowed_ids
+        )
+        return unmatched
+
+    for index, msg_obj in enumerate(incoming_messages):
+        object_id = str(getattr(msg_obj, "message_id", "") or "").strip()
+        candidate_id = (
+            object_id
+            if object_id in unmatched
+            else (ordered_ids[index] if index < len(ordered_ids) else object_id)
+        )
+        if not candidate_id:
+            continue
+        if candidate_id not in allowed_ids:
+            continue
+
+        lookup_ids = {candidate_id}
+        if object_id:
+            lookup_ids.add(object_id)
+        part_text = _extract_single_incoming_stream_text(
+            msg_obj,
+            fallback_text=raw_user_content if len(incoming_messages) == 1 else "",
+        )
+        matched, _ = _identify_current_dws_items(
+            recent_dws_items,
+            [msg_obj],
+            lookup_ids,
+            part_text,
+        )
+        if matched:
+            unmatched.discard(candidate_id)
+            if object_id:
+                unmatched.discard(object_id)
+    return unmatched
+
+
 def _build_restored_user_content(
     incoming_messages: Sequence[Any],
     matched_incoming_items: Sequence[dict[str, Any]],
@@ -1895,6 +2282,8 @@ async def fetch_dws_context_bundle(
 
     recent_dws_items: list[dict[str, Any]] = []
     dws_available = False
+    recalled_message_ids: set[str] = set()
+    incoming_explicitly_recalled = any(_is_explicit_recalled(msg_obj) for msg_obj in incoming_messages)
 
     # 2. 群聊开启且通过企业门禁时拉取近期群聊消息
     if dws_ready and conversation_id and (dws_only or (is_group and cfg.ENABLE_DWS_GROUP_CONTEXT)):
@@ -1913,7 +2302,13 @@ async def fetch_dws_context_bundle(
         )
         if payload is not None:
             dws_available = True
-            for raw_item in extract_messages_from_payload(payload):
+            raw_recent_items = extract_messages_from_payload(payload)
+            # 先收集整页撤回 ID，再清洗正文，避免同一 ID 的旧副本因排序
+            # 或重复投影重新进入历史窗口。
+            recalled_message_ids.update(_collect_recalled_message_ids(payload))
+            for raw_item in raw_recent_items:
+                if _raw_message_ids(raw_item) & recalled_message_ids:
+                    continue
                 cleaned = extract_clean_dws_item(raw_item)
                 if cleaned is not None:
                     recent_dws_items.append(cleaned)
@@ -1921,42 +2316,73 @@ async def fetch_dws_context_bundle(
     if dws_only and not dws_available:
         return DwsContextBundle(context_error="dws 会话读取失败，本次未调用模型。请稍后重试。")
 
-    # 3. 识别本次触发消息对应的 dws 记录（同时服务引用发现与 @他人 还原）
     raw_curr_id_set = {str(mid).strip() for mid in current_message_ids if str(mid).strip()}
+    if dws_only and (incoming_explicitly_recalled or raw_curr_id_set & recalled_message_ids):
+        return DwsContextBundle(context_error="当前消息已撤回或暂不可读取，本轮未调用模型。")
+
+    # 3. 识别本次触发消息对应的 dws 记录（同时服务引用发现与 @他人 还原）
     matched_incoming_items, curr_id_set = _identify_current_dws_items(
         recent_dws_items, incoming_messages, raw_curr_id_set, raw_user_content
     )
+    unmatched_current_ids = _unmatched_current_message_ids(
+        recent_dws_items,
+        incoming_messages,
+        current_message_ids,
+        raw_user_content,
+    )
     has_other_ats = _has_non_bot_at_users(incoming_messages, chatbot_user_id)
 
-    if (
-        dws_ready
-        and not matched_incoming_items
-        and raw_curr_id_set
-        and ((cfg.ENABLE_DWS_QUOTE_CONTEXT and not quotes) or has_other_ats)
-    ):
+    should_verify_missing_current = (
+        dws_only
+        or (
+            not matched_incoming_items
+            and ((cfg.ENABLE_DWS_QUOTE_CONTEXT and not quotes) or has_other_ats)
+        )
+    )
+    if dws_ready and unmatched_current_ids and should_verify_missing_current:
         mget_payload = await run_dws_readonly_json(
             [
                 "chat",
                 "+messages-mget",
                 "--msg-ids",
-                ",".join(sorted(raw_curr_id_set)),
+                ",".join(sorted(unmatched_current_ids)),
                 "--no-reactions",
                 "--no-threads",
                 "-f",
                 "json",
             ]
         )
-        if mget_payload is not None:
+        if mget_payload is None:
+            if dws_only:
+                return DwsContextBundle(context_error="当前消息暂不可读取，本轮未调用模型。")
+        else:
             dws_available = True
-            mget_cleaned = [
-                cleaned
-                for raw_item in extract_messages_from_payload(mget_payload)
-                if (cleaned := extract_clean_dws_item(raw_item)) is not None
-            ]
+            mget_recalled_ids = _collect_recalled_message_ids(mget_payload)
+            mget_not_returned_ids = _collect_not_returned_message_ids(mget_payload, unmatched_current_ids)
+            recalled_message_ids.update(mget_recalled_ids | mget_not_returned_ids)
+            mget_cleaned = []
+            for raw_item in extract_messages_from_payload(mget_payload):
+                if _raw_message_ids(raw_item) & recalled_message_ids:
+                    continue
+                cleaned = extract_clean_dws_item(raw_item)
+                if cleaned is not None:
+                    mget_cleaned.append(cleaned)
             mget_matched, curr_id_set = _identify_current_dws_items(
                 mget_cleaned, incoming_messages, curr_id_set, raw_user_content
             )
             matched_incoming_items.extend(mget_matched)
+            if dws_only and unmatched_current_ids & recalled_message_ids:
+                return DwsContextBundle(context_error="当前消息已撤回或暂不可读取，本轮未调用模型。")
+            if dws_only:
+                remaining_unverified_ids = _unmatched_current_message_ids(
+                    [*recent_dws_items, *mget_cleaned],
+                    incoming_messages,
+                    current_message_ids,
+                    raw_user_content,
+                    restrict_ids=unmatched_current_ids,
+                )
+                if remaining_unverified_ids:
+                    return DwsContextBundle(context_error="当前消息暂不可读取，本轮未调用模型。")
 
     if cfg.ENABLE_DWS_QUOTE_CONTEXT:
         for item in matched_incoming_items:
@@ -1973,13 +2399,34 @@ async def fetch_dws_context_bundle(
     # 3.5 补全每条被引用消息的完整正文、时间戳与媒体/文件资源元数据
     if cfg.ENABLE_DWS_QUOTE_CONTEXT and quotes:
         missing_q_ids: list[str] = []
+        unverified_dws_quote_indices: set[int] = set()
         for idx, q in enumerate(quotes):
-            _t_idx, target_it = _find_quote_target_in_items(recent_dws_items, q)
+            if q.message_id:
+                target_it = next(
+                    (item for item in recent_dws_items if item.get("message_id") == q.message_id),
+                    None,
+                )
+            else:
+                _t_idx, target_it = _find_quote_target_in_items(recent_dws_items, q)
             if target_it is not None:
-                quotes[idx] = _merge_same_quote_info(q, _item_to_quote_info(target_it))
-            elif dws_ready and _quote_needs_mget_hydration(q) and q.message_id not in missing_q_ids:
+                verified = _item_to_quote_info(target_it)
+                quotes[idx] = verified if dws_only else _merge_same_quote_info(q, verified)
+            elif dws_only:
+                if q.message_id:
+                    if q.message_id not in missing_q_ids:
+                        missing_q_ids.append(q.message_id)
+                else:
+                    unverified_dws_quote_indices.add(idx)
+            elif (
+                dws_ready
+                and q.message_id
+                and _quote_needs_mget_hydration(q)
+                and q.message_id not in missing_q_ids
+            ):
                 missing_q_ids.append(q.message_id)
 
+        if dws_only:
+            mget_verified_quotes: dict[str, DwsQuoteInfo] = {}
         if dws_ready and missing_q_ids:
             q_mget = await run_dws_readonly_json(
                 [
@@ -1995,13 +2442,54 @@ async def fetch_dws_context_bundle(
             )
             if q_mget is not None:
                 dws_available = True
+                q_recalled_ids = _collect_recalled_message_ids(q_mget)
+                q_not_returned_ids = _collect_not_returned_message_ids(q_mget, missing_q_ids)
+                recalled_message_ids.update(q_recalled_ids | q_not_returned_ids)
                 for raw_q in extract_messages_from_payload(q_mget):
+                    if _raw_message_ids(raw_q) & recalled_message_ids:
+                        continue
                     cleaned_q = extract_clean_dws_item(raw_q)
                     if cleaned_q is not None:
-                        _append_or_merge_quote(quotes, _item_to_quote_info(cleaned_q))
+                        raw_ids = _raw_message_ids(raw_q)
+                        verified_ids = raw_ids & set(missing_q_ids)
+                        if dws_only and verified_ids:
+                            verified_quote = _item_to_quote_info(cleaned_q)
+                            for verified_id in verified_ids:
+                                mget_verified_quotes[verified_id] = verified_quote
+                        elif not dws_only:
+                            _append_or_merge_quote(quotes, _item_to_quote_info(cleaned_q))
+
+        if dws_only:
+            # dws-only 的引用必须有当前 dws 可读来源：mget 失败、空结果、
+            # ID 不在返回集合或明确撤回时，均不能回退到 Stream 携带的旧正文/资源。
+            verified_quotes: list[DwsQuoteInfo] = []
+            for idx, quote in enumerate(quotes):
+                if idx in unverified_dws_quote_indices:
+                    continue
+                if quote.message_id in missing_q_ids:
+                    replacement = mget_verified_quotes.get(quote.message_id)
+                    if replacement is None:
+                        continue
+                    verified_quotes.append(replacement)
+                    continue
+                if quote.message_id and quote.message_id in recalled_message_ids:
+                    continue
+                verified_quotes.append(quote)
+            quotes = verified_quotes
 
         for idx, q in enumerate(quotes):
             quotes[idx] = _enrich_quote_from_history(q, history_messages)
+
+    if dws_only and recalled_message_ids:
+        # quote mget 可能在 recent list 之后发现同一消息的撤回别名；
+        # 此时仍处于历史构造前，先统一排除，避免正文从普通历史路径绕回模型。
+        recent_dws_items = [
+            item
+            for item in recent_dws_items
+            if not (_raw_message_ids(item) & recalled_message_ids)
+        ]
+        if curr_id_set & recalled_message_ids:
+            return DwsContextBundle(context_error="当前消息已撤回或暂不可读取，本轮未调用模型。")
 
     # Deprecated：旧库合并和入库模式；当前钉钉仅走后续 dws_only=True 分支。
     persistable_messages: list[dict[str, Any]] = []
@@ -2026,6 +2514,7 @@ async def fetch_dws_context_bundle(
         merged_history = fallback_history
 
     context_images: list[bytes] = []
+    context_image_messages: list[dict[str, Any]] = []
     context_media = []
     history_media_entries = {}
     if dws_only:
@@ -2041,7 +2530,7 @@ async def fetch_dws_context_bundle(
             if not text or item["message_type"] == "system":
                 continue
             merged_history.append({"role": "assistant" if own else "user", "content": text,
-                                   "timestamp": item["timestamp"], "sender_nick": item["sender"], "bot_id": cfg.BOT_ID if own else None})
+                                   "timestamp": item["timestamp"], "sender_nick": item["sender"], "message_id": item["message_id"], "bot_id": cfg.BOT_ID if own else None})
             context_media.append(_item_to_quote_info(item))
         merged_history = merged_history[-cfg.MAX_HISTORY_LENGTH:]
         context_media = context_media[-cfg.MAX_HISTORY_LENGTH:]
@@ -2059,10 +2548,15 @@ async def fetch_dws_context_bundle(
     valid_quotes = [q for q in quotes if q.text or q.message_id or q.resources]
     if cfg.ENABLE_DWS_QUOTE_CONTEXT and valid_quotes:
         quotes_with_neighbors: list[tuple[DwsQuoteInfo, list[str]]] = []
+        protected_context_ids = set(curr_id_set)
+        for item in recent_dws_items:
+            protected_context_ids.update(_raw_message_ids(item))
+        protected_context_ids.update(q.message_id for q in valid_quotes if q.message_id)
         for q in valid_quotes:
             neighbor_source_items = recent_dws_items
             target_conv = q.conversation_id or conversation_id
             if dws_ready and target_conv and q.create_time:
+                recalled_before_neighbors = set(recalled_message_ids)
                 target_idx_in_recent, _ = _find_quote_target_in_items(recent_dws_items, q)
                 has_enough_in_window = target_idx_in_recent >= 0 and (
                     target_idx_in_recent >= before_val or len(recent_dws_items) < limit_val
@@ -2110,15 +2604,41 @@ async def fetch_dws_context_bundle(
                     for sub_payload in (older_res, newer_res):
                         if sub_payload is not None:
                             dws_available = True
-                        for raw_m in extract_messages_from_payload(sub_payload):
+                        raw_around_items = extract_messages_from_payload(sub_payload)
+                        recalled_message_ids.update(_collect_recalled_message_ids(sub_payload))
+                        for raw_m in raw_around_items:
+                            if _raw_message_ids(raw_m) & recalled_message_ids:
+                                continue
                             cleaned_m = extract_clean_dws_item(raw_m)
                             if cleaned_m is not None:
                                 around_items.append(cleaned_m)
+                    if recalled_message_ids:
+                        around_items = [
+                            item
+                            for item in around_items
+                            if not (_raw_message_ids(item) & recalled_message_ids)
+                        ]
+                        recent_dws_items = [
+                            item
+                            for item in recent_dws_items
+                            if not (_raw_message_ids(item) & recalled_message_ids)
+                        ]
+                        if dws_only and raw_curr_id_set & recalled_message_ids:
+                            return DwsContextBundle(context_error="当前消息已撤回或暂不可读取，本轮未调用模型。")
+                    newly_recalled_ids = recalled_message_ids - recalled_before_neighbors
+                    if dws_only and newly_recalled_ids:
+                        affects_quote_context = bool(protected_context_ids & newly_recalled_ids)
+                        if affects_quote_context:
+                            return DwsContextBundle(
+                                context_error="引用上下文已撤回或暂不可读取，本轮未调用模型。"
+                            )
                     if around_items:
                         neighbor_source_items = around_items
 
             if dws_only and cutoff_at:
                 neighbor_source_items = [item for item in neighbor_source_items if item["timestamp"] and item["timestamp"] > cutoff_at]
+            if q.message_id and q.message_id in recalled_message_ids:
+                continue
             selected_neighbor_ids: set[str] = set()
             n_lines = _build_quote_neighbor_lines(
                 neighbor_items=neighbor_source_items,
@@ -2130,6 +2650,10 @@ async def fetch_dws_context_bundle(
                 selected_message_ids=selected_neighbor_ids,
             )
             quotes_with_neighbors.append((q, n_lines))
+            # 后续分页可能才返回撤回状态；先前已经构造的邻居文本也须受保护。
+            for item in neighbor_source_items:
+                if item["message_id"] in selected_neighbor_ids:
+                    protected_context_ids.update(_raw_message_ids(item))
             if dws_only:
                 for item in neighbor_source_items:
                     if (
@@ -2139,6 +2663,11 @@ async def fetch_dws_context_bundle(
                     ):
                         quote_neighbor_media.append(_item_to_quote_info(item))
 
+        valid_quotes = [
+            quote
+            for quote in valid_quotes
+            if not quote.message_id or quote.message_id not in recalled_message_ids
+        ]
         media_docs = await fetch_quoted_media_and_docs(
             quotes=valid_quotes,
             conversation_id=conversation_id,
@@ -2204,8 +2733,34 @@ async def fetch_dws_context_bundle(
                 first = len(context_images) + 1
                 context_images.extend(images)
                 remaining_images -= len(images)
+                if q.message_id in history_media_entries:
+                    history_entry = history_media_entries[q.message_id]
+                    history_entry.setdefault("images", []).extend(images)
+                else:
+                    context_image_messages.append(
+                        {
+                            "role": "user",
+                            "timestamp": q.create_time,
+                            "sender_nick": q.sender,
+                            "message_id": q.message_id,
+                            "content": (
+                                "[明确引用邻居消息] "
+                                f"{q.text or '[图片消息]'}\n"
+                                f"[引用邻居图片，{q.create_time}，发送人 {q.sender}] "
+                                "原图附在本条独立引用消息中。"
+                            ),
+                            "images": images,
+                        }
+                    )
                 supplements.append(
-                    f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。"
+                    (
+                        f"[历史图片{first}，{q.create_time}，发送人 {q.sender}] "
+                        + (
+                            "原图附在本条历史消息中。"
+                            if q.message_id in history_media_entries
+                            else "原图附在独立引用邻居消息中。"
+                        )
+                    )
                 )
             else:
                 supplements.append(
@@ -2249,6 +2804,7 @@ async def fetch_dws_context_bundle(
         quotes=valid_quotes,
         quoted_images=quoted_images,
         context_images=context_images,
+        context_image_messages=context_image_messages,
         members=members,
         members_complete=members_complete,
         quoted_documents=quoted_documents,

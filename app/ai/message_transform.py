@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """消息转换层：处理多 agent 角色重塑和连续相同 role 合并。"""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 def rewrite_roles_for_current_agent(
@@ -57,36 +57,43 @@ def _merge_content(a: Any, b: Any) -> Any:
     if isinstance(a, str) and isinstance(b, str):
         return f"{a}\n\n{b}"
 
-    a_text, a_other = _split_text_and_other(a)
-    b_text, b_other = _split_text_and_other(b)
-    merged_text = "\n\n".join(text for text in (a_text, b_text) if text)
+    parts = _content_to_parts(a) + _content_to_parts(b)
+    merged_parts = _merge_adjacent_text_parts(parts)
 
-    if not a_other and not b_other:
-        return merged_text
-
-    parts: List[Dict[str, Any]] = []
-    if merged_text:
-        parts.append({"type": "text", "text": merged_text})
-    parts.extend(a_other)
-    parts.extend(b_other)
-    return parts
+    if all(_is_text_part(part) for part in merged_parts):
+        return "\n\n".join(part.get("text", "") for part in merged_parts)
+    return merged_parts
 
 
-def _split_text_and_other(content: Any) -> Tuple[str, List[Dict[str, Any]]]:
-    """从 content 中拆出 text 和非 text part。"""
+def _content_to_parts(content: Any) -> List[Any]:
+    """将字符串或多模态内容转成有序 part 列表。"""
     if isinstance(content, str):
-        return content, []
+        return [{"type": "text", "text": content}]
 
     if isinstance(content, list):
-        text_parts: List[str] = []
-        other_parts: List[Dict[str, Any]] = []
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "text":
-                text_parts.append(part.get("text", ""))
-            else:
-                other_parts.append(part)
-        return "\n\n".join(text for text in text_parts if text), other_parts
+        return list(content)
 
-    return "", []
+    return []
+
+
+def _is_text_part(part: Any) -> bool:
+    return isinstance(part, dict) and part.get("type") == "text"
+
+
+def _merge_adjacent_text_parts(parts: List[Any]) -> List[Any]:
+    """只合并相邻 text，保持图片和其他 part 的原始相对顺序。"""
+    result: List[Any] = []
+    for part in parts:
+        if _is_text_part(part) and not part.get("text", ""):
+            continue
+        if _is_text_part(part) and result and _is_text_part(result[-1]):
+            previous = result[-1]
+            merged = dict(previous)
+            merged["text"] = f"{previous.get('text', '')}\n\n{part.get('text', '')}"
+            for key, value in part.items():
+                if key not in {"type", "text"}:
+                    merged.setdefault(key, value)
+            result[-1] = merged
+        else:
+            result.append(part)
+    return result
