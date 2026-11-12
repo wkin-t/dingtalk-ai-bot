@@ -121,3 +121,13 @@ async def test_failed_image_candidates_have_a_bounded_attempt_budget(monkeypatch
     result = await dws_files.fetch_quoted_media_and_docs(quotes=[quote], conversation_id="review",
         dws_ready=True, run_dws_fn=AsyncMock(), max_images=1, max_documents=0)
     assert not result.images and image.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_forwarded_image_without_identity_never_falls_back_to_outer_message(monkeypatch):
+    runner = AsyncMock()
+    result = await dws_files._fetch_single_quoted_image(
+        {"resourceType": "image", "resourceIdType": "mediaId", "resourceId": "picture", "forwardedResource": True},
+        quote_conv_id="outer-group", quote_msg_id="outer-message", dws_ready=True, run_dws_fn=runner)
+    assert result is None
+    runner.assert_not_awaited()

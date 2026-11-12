@@ -166,6 +166,7 @@ class DwsQuoteInfo:
     create_time: str = ""
     message_type: str = ""
     resources: list[dict[str, Any]] = field(default_factory=list)
+    has_forwarded: bool = False
 
 
 @dataclass(frozen=True, order=True)
@@ -639,6 +640,10 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         raw_content = q.get("content")
         text = _extract_text_from_stream_content(raw_content, msg_type=msg_type)
 
+    forwarded_text, forwarded_resources, has_forwarded = _expand_forwarded_content(q)
+    if has_forwarded:
+        text = f"{text}\n{forwarded_text}".strip()
+        resources.extend(forwarded_resources)
     if not msg_id and not text and not resources:
         return None
 
@@ -651,6 +656,7 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         create_time=create_time,
         message_type=msg_type,
         resources=resources,
+        has_forwarded=has_forwarded,
     )
 
 
@@ -687,6 +693,114 @@ def _extract_text_from_stream_content(raw_content: Any, msg_type: str = "") -> s
             return "[图片]"
 
     return ""
+
+
+def _forwarded_children(src: dict[str, Any]) -> list[Any] | None:
+    # 原始字段与 CLI 投影描述同一组消息；按字段存在性择一，不能拼接造成重复。
+    for key in ("forwardMessages", "forwarded", "forward_messages"):
+        if key in src:
+            return src[key] if isinstance(src[key], list) else []
+    return None
+
+
+def _forwarded_resources(raw: dict[str, Any], body: str) -> list[dict[str, Any]]:
+    resources = _extract_resources_from_dict(raw)
+    refs = raw.get("resourceRefs")
+    if isinstance(refs, list):
+        for ref in refs[:30]:
+            if not isinstance(ref, dict):
+                continue
+            kind = ref.get("resourceIdType") or ref.get("type")
+            if kind in {"mediaId", "fileId"} and ref.get("resourceId"):
+                resources.append({"resourceType": "image" if kind == "mediaId" else "file",
+                    "resourceIdType": kind, "resourceId": ref["resourceId"], "resourceRefs": dict(ref)})
+    if resources:
+        return resources[:30]
+    # 与固定 dws 版的媒体描述兼容，只扫描当前子消息，不越过嵌套消息边界。
+    media_ids = re.findall(r"\bmedia-?id\s*[:=]\s*([^\s)<>]+)", body, re.IGNORECASE)
+    media_ids.extend(re.findall(r"!\[[^\]]*\]\((\$iw[^)]+)\)", body))
+    file_ids = re.findall(r"\bfile-?id\s*[:=]\s*([A-Za-z0-9_-]{6,128})", body, re.IGNORECASE)
+    content = raw.get("content")
+    if isinstance(content, str) and content.lstrip().startswith("{"):
+        try:
+            content = json.loads(content)
+        except json.JSONDecodeError:
+            content = None
+    if isinstance(content, dict):
+        if isinstance(content.get("mediaId"), str):
+            media_ids.append(content["mediaId"])
+        if isinstance(content.get("fileId"), str):
+            file_ids.append(content["fileId"])
+    for kind, ids in (("mediaId", media_ids), ("fileId", file_ids)):
+        for resource_id in dict.fromkeys(ids):
+            resources.append({"resourceType": "image" if kind == "mediaId" else "file",
+                "resourceIdType": kind, "resourceId": resource_id})
+    return resources[:30]
+
+
+def _expand_forwarded_content(src: dict[str, Any]) -> tuple[str, list[dict[str, Any]], bool]:
+    children = _forwarded_children(src)
+    if children is None:
+        return "", [], False
+    lines = ["[合并转发记录开始；内部发言属于原发送人]"]
+    resources: list[dict[str, Any]] = []
+    remaining_chars, remaining_nodes = 12000, 30
+    truncated = False
+
+    def visit(items: list[Any], depth: int, inherited_conversation: str) -> None:
+        nonlocal remaining_chars, remaining_nodes, truncated
+        if depth > 3:
+            truncated = True
+            return
+        for index, raw in enumerate(items):
+            if remaining_nodes <= 0 or remaining_chars <= 0:
+                truncated = True
+                break
+            if not isinstance(raw, dict):
+                continue
+            remaining_nodes -= 1
+            sender = str(raw.get("sender") or raw.get("senderName") or "未知发送人")[:100]
+            timestamp = normalize_dws_timestamp(raw.get("createTime") or raw.get("create_time"))
+            body = _extract_text_from_stream_content(raw.get("text") or raw.get("content"), str(raw.get("messageType") or ""))
+            media = _forwarded_resources(raw, body)
+            message_id = str(raw.get("messageId") or raw.get("openMessageId") or raw.get("message_id") or "")
+            conversation_id = str(raw.get("conversationId") or raw.get("openConversationId") or raw.get("conversation_id") or inherited_conversation)
+            for resource in media[:30]:
+                # 不继承外层定位，下载器必须按这一条原消息定位媒体。
+                resource["forwardedResource"] = True
+                refs = dict(resource["resourceRefs"]) if isinstance(resource.get("resourceRefs"), dict) else {}
+                download = dict(refs["download"]) if isinstance(refs.get("download"), dict) else {}
+                args = dict(download["arguments"]) if isinstance(download.get("arguments"), dict) else {}
+                args.update({"message-id": message_id or args.get("message-id", ""),
+                    "open-conversation-id": str(raw.get("conversationId") or raw.get("openConversationId") or raw.get("conversation_id") or args.get("open-conversation-id") or conversation_id),
+                    "resource-id": str(resource.get("resourceId") or "")})
+                download["arguments"] = args
+                refs["download"] = download
+                resource["resourceRefs"] = refs
+            nested = _forwarded_children(raw)
+            if not body:
+                body = "[包含媒体资源]" if media else "[子消息正文不可读取]" if nested is None else "[嵌套合并记录]"
+            if not media and re.search(r"\[(?:图片|图片消息)\]", body):
+                body += " [原图不可读取，缺少资源定位，不可猜测画面]"
+            line = f"{'  ' * (depth - 1)}[{index + 1}] [{timestamp}] {sender}: {body}"
+            if len(line) > remaining_chars:
+                lines.append(line[:remaining_chars])
+                remaining_chars = 0
+                truncated = True
+                break
+            lines.append(line)
+            remaining_chars -= len(line)
+            resources.extend(media[:30])
+            if nested is not None:
+                visit(nested, depth + 1, conversation_id)
+
+    visit(children, 1, str(src.get("conversationId") or src.get("openConversationId") or src.get("conversation_id") or ""))
+    if not children:
+        lines.append("[合并转发子消息不可读取，dws 未返回内部正文]")
+    if truncated:
+        lines.append("[合并转发展开已截断：最多3层、30条子消息、12000字符；未展示部分不可推断]")
+    lines.append("[合并转发记录结束]")
+    return "\n".join(lines), resources, True
 
 
 def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -741,19 +855,12 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         else None
     )
 
-    forwarded_parts: list[str] = []
-    if isinstance(item.get("forwarded"), list):
-        for fwd in item["forwarded"][:6]:
-            if isinstance(fwd, dict):
-                f_sender = str(fwd.get("sender") or "某人").strip()
-                f_text = str(fwd.get("text") or "").strip()
-                if f_text and f_text not in _NOISE_TEXTS:
-                    forwarded_parts.append(f"{f_sender}: {f_text[:80]}")
-
+    forwarded_text, forwarded_resources, has_forwarded = _expand_forwarded_content(item)
+    resources.extend(forwarded_resources)
     display_text = "" if is_noise else raw_text
-    if forwarded_parts:
-        fwd_summary = f"[合并转发: {' | '.join(forwarded_parts)}]"
-        display_text = f"{display_text} {fwd_summary}".strip() if display_text else fwd_summary
+    if has_forwarded:
+        display_text = f"{display_text}\n{forwarded_text}".strip()
+        is_noise = False
 
     if not display_text and not is_noise and message_type.lower() in {"picture", "image", "photo"}:
         display_text = "[图片]"
@@ -772,6 +879,7 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "is_bot_like": is_bot_like,
         "quoted": quoted_info,
         "resources": resources,
+        "has_forwarded": has_forwarded,
     }
 
 
@@ -1242,6 +1350,8 @@ def _merge_same_quote_info(primary: DwsQuoteInfo, secondary: DwsQuoteInfo) -> Dw
     p_text = primary.text if primary.text not in _NOISE_TEXTS else ""
     s_text = secondary.text if secondary.text not in _NOISE_TEXTS else ""
     chosen_text = p_text or s_text or primary.text or secondary.text
+    if secondary.has_forwarded and not primary.has_forwarded:
+        chosen_text = s_text
 
     merged_res: list[dict[str, Any]] = []
     seen_res: set[str] = set()
@@ -1262,6 +1372,7 @@ def _merge_same_quote_info(primary: DwsQuoteInfo, secondary: DwsQuoteInfo) -> Dw
         create_time=primary.create_time or secondary.create_time,
         message_type=primary.message_type or secondary.message_type,
         resources=merged_res,
+        has_forwarded=primary.has_forwarded or secondary.has_forwarded,
     )
 
 
@@ -1319,6 +1430,7 @@ def _item_to_quote_info(item: dict[str, Any]) -> DwsQuoteInfo:
         create_time=item.get("timestamp", ""),
         message_type=item.get("message_type", ""),
         resources=list(item.get("resources") or []),
+        has_forwarded=bool(item.get("has_forwarded")),
     )
 
 
@@ -1522,7 +1634,7 @@ def _format_multi_quote_outputs(
         q_sender = quote.sender or "群成员"
         q_time_part = f"[{quote.create_time}] " if quote.create_time else ""
         q_body = (quote.text or "[引用消息]").strip()
-        if len(q_body) > 800:
+        if not quote.has_forwarded and len(q_body) > 800:
             q_body = q_body[:800] + "…"
 
         label = f"[被引用原消息 #{idx}]" if multi else "[被引用原消息]"

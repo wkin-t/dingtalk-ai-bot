@@ -359,8 +359,8 @@ async def _fetch_single_quoted_image(
         if isinstance(cand_args, dict):
             dl_args = cand_args
 
-    conv_id = str(dl_args.get("open-conversation-id") or quote_conv_id or "").strip()
-    msg_id = str(dl_args.get("message-id") or quote_msg_id or "").strip()
+    conv_id = str(dl_args.get("open-conversation-id") or ("" if res.get("forwardedResource") else quote_conv_id) or "").strip()
+    msg_id = str(dl_args.get("message-id") or ("" if res.get("forwardedResource") else quote_msg_id) or "").strip()
     res_id = str(dl_args.get("resource-id") or res.get("resourceId") or "").strip()
     if not (conv_id and msg_id and res_id):
         return None
