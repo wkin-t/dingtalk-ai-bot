@@ -20,7 +20,7 @@ def parse_members(payload):
         if not isinstance(row, dict):
             continue
         uid = row.get("openDingtalkId")
-        name = row.get("memberGroupNick") or row.get("name") or row.get("memberEmpName") or row.get("nick")
+        name = row.get("memberGroupNick") or row.get("memberNick") or row.get("nick") or row.get("name") or row.get("memberEmpName")
         if isinstance(uid, str) and uid and isinstance(name, str) and name:
             members[uid] = {"id": uid, "name": name}
     return list(members.values()), data.get("complete") is True
@@ -54,20 +54,27 @@ def resolve_mentions(text, members):
     return _MENTION.sub(replace, text), targets
 
 
-async def send_mentions(conversation_id, targets, members):
+async def send_mentions(conversation_id, targets, members, *, content):
     allowed = {m["id"] for m in members}
     targets = list(dict.fromkeys(targets))
     if not targets or len(targets) > 3 or any(t not in allowed or "," in t for t in targets):
         raise ValueError("提醒目标必须来自本轮群成员列表，且最多3人")
+    if not content.strip():
+        raise ValueError("定向提醒必须包含实际回复内容")
+    # Bot Markdown 要求正文中的裸 @openDingtalkId 与目标参数同时存在。
+    body = " ".join("@" + uid for uid in targets) + "\n\n" + content
+    if len(body.encode("utf-8")) > 256 * 1024:
+        raise ValueError("定向提醒正文超过 dws 输入上限")
     # 发送前的企业校验由调用层提供的本轮消息企业约束执行。
     args = [cfg.DWS_BIN, "chat", "+messages-send", "--as", "bot", "--robot-code", cfg.DINGTALK_CLIENT_ID,
-            "--group", conversation_id, "--text", "助手在本轮回复中提到了你，请查看上方回复。",
+            "--group", conversation_id, "--markdown", "-", "--body-stdin", "--title", "助手回复",
             "--at-open-dingtalk-ids", ",".join(targets), "--client-id", cfg.DINGTALK_CLIENT_ID,
             "--client-secret", cfg.DINGTALK_CLIENT_SECRET, "--yes", "-f", "json"]
     env = {k: v for k, v in os.environ.items() if k.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}}
-    proc = await asyncio.create_subprocess_exec(*args, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    proc = await asyncio.create_subprocess_exec(*args, env=env, stdin=asyncio.subprocess.PIPE,
+                                               stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        stdout, _ = await asyncio.wait_for(proc.communicate(input=body.encode("utf-8")), timeout=15)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()

@@ -49,6 +49,16 @@ def test_members_mentions_only_resolve_current_group_ids():
     assert targets == ["real"]
 
 
+def test_parse_members_prefers_group_nickname_then_personal_nickname():
+    from app.dws_members import parse_members
+
+    members, _ = parse_members({"complete": True, "users": [
+        {"openDingtalkId": "member-1", "name": "陈一", "memberNick": "我司陈工"},
+        {"openDingtalkId": "member-2", "name": "李四", "memberNick": "小李", "memberGroupNick": "值班李工"},
+    ]})
+    assert [member["name"] for member in members] == ["我司陈工", "值班李工"]
+
+
 @pytest.mark.asyncio
 async def test_mentions_send_is_scoped_to_bot_and_current_group():
     from app.dws_members import send_mentions
@@ -56,15 +66,32 @@ async def test_mentions_send_is_scoped_to_bot_and_current_group():
     proc = MagicMock(returncode=0)
     proc.communicate = AsyncMock(return_value=(b'{"success":true}', b''))
     with patch("app.dws_members.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc) as spawn:
-        await send_mentions("group-current", ["member"], [{"id": "member", "name": "甲"}])
+        await send_mentions("group-current", ["member"], [{"id": "member", "name": "甲"}], content="这是本次回复的实际内容。")
         args = spawn.await_args.args
         assert args[args.index("--as") + 1] == "bot"
         assert args[args.index("--group") + 1] == "group-current"
         assert args[args.index("--at-open-dingtalk-ids") + 1] == "member"
         assert "--at-all" not in args
+        assert args[args.index("--markdown") + 1] == "-"
+        assert "--body-stdin" in args
+        body = proc.communicate.await_args.kwargs["input"].decode()
+        assert "@member" in body
+        assert "这是本次回复的实际内容。" in body
+        assert "请查看上方回复" not in body
     with patch("app.dws_members.asyncio.create_subprocess_exec", new_callable=AsyncMock) as spawn:
         with pytest.raises(ValueError):
-            await send_mentions("group-current", ["outsider"], [{"id": "member", "name": "甲"}])
+            await send_mentions("group-current", ["outsider"], [{"id": "member", "name": "甲"}], content="实际回复")
+        spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [" ", "正" * 90000], ids=["empty", "oversized"])
+async def test_mentions_rejects_empty_or_oversized_body_before_sending(content):
+    from app.dws_members import send_mentions
+
+    with patch("app.dws_members.asyncio.create_subprocess_exec", new_callable=AsyncMock) as spawn:
+        with pytest.raises(ValueError):
+            await send_mentions("group", ["member"], [{"id": "member", "name": "甲"}], content=content)
         spawn.assert_not_awaited()
 
 

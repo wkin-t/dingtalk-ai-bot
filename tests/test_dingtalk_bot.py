@@ -183,7 +183,7 @@ async def _run_dingtalk_consumer(chunks, members=None):
         )
 
     if members:
-        send.assert_awaited_once_with("conversation-test", [members[0]["id"]], members)
+        send.assert_awaited_once_with("conversation-test", [members[0]["id"]], members, content="请 @同事甲 帮忙核对。")
     return handler.card_helper.update_card.await_args_list[-1].args[1]
 
 

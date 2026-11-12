@@ -1784,7 +1784,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 corp = await check_dws_corp_access(expected_corp_ids=[DWS_EXPECTED_CORP_ID, getattr(incoming_message, "chatbot_corp_id", "")])
                 if corp.allowed:
                     try:
-                        await send_mentions(conversation_id, mention_targets, dws_bundle.members)
+                        await send_mentions(conversation_id, mention_targets, dws_bundle.members, content=card_response)
                     except (RuntimeError, ValueError, OSError):
                         final_content += "\n\n⚠️ 定向 @ 提醒未确认成功，请手动确认对方是否收到。"
                 else:
