@@ -1690,6 +1690,8 @@ async def fetch_dws_context_bundle(
     after_val = quote_after if quote_after is not None else cfg.DWS_QUOTE_CONTEXT_AFTER
     if dws_only:
         history_messages = []
+        # dws 窗口必须覆盖本 bot 的历史预算，并给当前触发消息留出去重余量。
+        limit_val = min(100, max(limit_val, cfg.MAX_HISTORY_LENGTH + len(current_message_ids)))
 
     # 1. 提取钉钉 Stream 自带的引用线索（支持 2s 窗口多条引用独立保存）与机器人归属企业 CorpId
     quotes: list[DwsQuoteInfo] = []
@@ -1862,6 +1864,7 @@ async def fetch_dws_context_bundle(
 
     context_images: list[bytes] = []
     context_media = []
+    history_media_entries = {}
     if dws_only:
         merged_history = []
         persistable_messages = []
@@ -1878,6 +1881,8 @@ async def fetch_dws_context_bundle(
                                    "timestamp": item["timestamp"], "sender_nick": item["sender"], "bot_id": cfg.BOT_ID if own else None})
             context_media.append(_item_to_quote_info(item))
         merged_history = merged_history[-cfg.MAX_HISTORY_LENGTH:]
+        context_media = context_media[-cfg.MAX_HISTORY_LENGTH:]
+        history_media_entries = {q.message_id: message for q, message in zip(context_media, merged_history)}
 
     # 5. 若存在引用消息（含单聊与群聊），提取前后邻居上下文、只读图片字节与只读文档正文
     quote_prompt_block = ""
@@ -1989,16 +1994,23 @@ async def fetch_dws_context_bundle(
             media_candidates.append(q)
         for q in reversed(media_candidates[:max(0, cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images))]):
             context_docs = await fetch_quoted_media_and_docs(quotes=[q], conversation_id=conversation_id, dws_ready=dws_ready, run_dws_fn=run_dws_readonly_json)
+            supplements = []
             remaining = cfg.DWS_MAX_QUOTE_IMAGES - len(quoted_images) - len(context_images)
             images = context_docs.images[:max(0, remaining)]
             if images:
                 first = len(context_images) + 1
                 context_images.extend(images)
-                merged_history.append({"role": "user", "content": f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。"})
+                supplements.append(f"[群历史图片{first}，{q.create_time}，发送人 {q.sender}] 原图附在本轮群历史图片列表中。")
             elif any(r.get("resourceIdType") == "mediaId" or r.get("resourceType") in {"image", "picture", "photo", "emotion"} for r in q.resources):
-                merged_history.append({"role": "user", "content": f"[{q.create_time} {q.sender} 的图片未能读取原图，不可据占位文本猜测画面]"})
+                supplements.append(f"[{q.create_time} {q.sender} 的图片未能读取原图，不可据占位文本猜测画面]")
             for doc in context_docs.documents:
-                merged_history.append({"role": "user", "content": f"[群历史文档: {doc.name}]\n{doc.content or doc.note}"})
+                supplements.append(f"[群历史文档: {doc.name}]\n{doc.content or doc.note}")
+            if supplements:
+                supplement = "\n".join(supplements)
+                if q.message_id in history_media_entries:
+                    history_media_entries[q.message_id]["content"] += "\n" + supplement
+                else:
+                    quote_prompt_block += "\n" + supplement
 
     members = []
     members_complete = False

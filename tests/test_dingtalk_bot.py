@@ -21,6 +21,42 @@ async def _iter_consumer_chunks(chunks):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["text", "richText"])
+async def test_bare_mention_enters_normal_buffered_context_flow(kind):
+    from app.dingtalk_bot import GeminiBotHandler
+
+    handler = object.__new__(GeminiBotHandler)
+    incoming = SimpleNamespace(message_id=None, message_type=kind, text=SimpleNamespace(content=" "),
+        rich_text_content=SimpleNamespace(rich_text_list=[{"text": " "}]),
+        conversation_id="conv", conversation_type="2", sender_id="u", sender_staff_id="u",
+        sender_nick="甲", at_users=[], is_in_at_list=True)
+    buffers = {}
+    def schedule(coroutine):
+        coroutine.close()
+        return MagicMock()
+    with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
+         patch("app.dingtalk_bot.message_buffer", buffers), \
+         patch("app.dingtalk_bot.asyncio.create_task", side_effect=schedule) as spawn:
+        await handler.process(SimpleNamespace(data={}))
+    spawn.assert_called_once()
+    entry = next(iter(buffers.values()))
+    assert "当前可见" in entry["content"][0]
+    assert entry["incoming_messages"] == [incoming]
+
+
+@pytest.mark.asyncio
+async def test_empty_unmentioned_group_message_stays_silent():
+    from app.dingtalk_bot import GeminiBotHandler
+
+    incoming = SimpleNamespace(message_id=None, message_type="text", text=SimpleNamespace(content=" "),
+                               conversation_type="2", is_in_at_list=False)
+    with patch("app.dingtalk_bot.dingtalk_stream.ChatbotMessage.from_dict", return_value=incoming), \
+         patch("app.dingtalk_bot.asyncio.create_task") as spawn:
+        await object.__new__(GeminiBotHandler).process(SimpleNamespace(data={}))
+    spawn.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_field", ["quoted_images", "context_images"])
 async def test_dws_turn_integrates_history_mentions_and_quoted_images(image_field):
     from app.dingtalk_bot import GeminiBotHandler

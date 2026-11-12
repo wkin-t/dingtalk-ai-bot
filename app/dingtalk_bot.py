@@ -2073,8 +2073,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                             summary = tool_res.get("summary") if isinstance(tool_res, dict) else None
                         content = (summary or "").strip() or f"已收到文件：{file_name}，但解析失败，请稍后重试。"
             
+            content = content.strip()
             if not content and not image_data_list:
-                return AckMessage.STATUS_OK, 'OK'
+                if msg_type in {"text", "richText"} and incoming_message.is_in_at_list:
+                    content = ("用户本轮只 @ 了你，没有附加文字。请根据当前可见的群聊上下文自然接话，"
+                               "优先回应最近尚未解决的问题或被引用的消息；如果没有足够上下文，简短询问用户需要什么帮助。"
+                               "不要猜测已清空或未读取到的内容。")
+                else:
+                    return AckMessage.STATUS_OK, 'OK'
 
             sender_id = incoming_message.sender_staff_id or incoming_message.sender_id
             conversation_id = incoming_message.conversation_id

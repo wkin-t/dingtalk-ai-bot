@@ -92,6 +92,7 @@ main.py                      # 入口: Monkey patch + Flask + 多平台启动
 - **会话隔离**: 钉钉 `dingtalk_{conversation_id}`，企业微信 `wecom_{user_id}`；群聊共享上下文，单聊独立。Soul 文件命名 `{BOT_ID}__{cid}.md`（双下划线），防止多容器共享 soul（群聊 cid 跨容器相同）。
 - **旧路径数据降级**: Redis+MySQL 与本地文件 (`data/history/`) 保留给 Deprecated 的企业微信等旧路径；钉钉会话不使用这套存储。
 - **钉钉会话唯一来源（2026-11-12）**：钉钉主链路仅从 dws 读取近期会话、引用、图片和文档，不读写 Redis/MySQL/文件对话历史，不合并旧库，不使用 `previous_response_id` 续接。dws 不可用时明确报错；单聊同样读取 dws。`/since`、`/resume`、`/soul evolve` 使用同一来源；`/clear` 仅保存本机器人可见起点。旧数据库保留，统计、Soul、采样配置继续由应用管理。dws 只能返回占位的互动卡片会标注正文不可读，不能从旧库恢复。
+- **各 bot 的可见范围**：`MAX_HISTORY_LENGTH` 仍按容器独立控制历史消息条数；dws 拉取窗口至少覆盖此预算及当前消息的去重余量（单次最多100条），不能被默认 `DWS_CONTEXT_LIMIT=40` 缩短。先按本 bot 的 `/clear` 起点过滤，再取最近 N 条；历史媒体只补全这 N 条内的消息，图片说明和文档正文归入原消息。显式引用仍可展开引用及其邻居。纯 @ 无文字时按当前可见上下文接话，无足够上下文时简短询问，走同一缓冲、企业校验和模型链路。
 - **群成员与定向 @**：通过只读 `chat +chat-members-list` 获取名单与完整性状态，模型以 `[[at:编号]]` 选择本轮名单成员。程序校验目标后通过独立、有界的 dws bot 发送入口发送定向提醒，每轮最多3人；同名成员要求澄清，不允许 @所有人，结果未知不重发。普通 dws 查询白名单仍禁止发送命令。
 - **OpenClaw 多 Agent 路由（⚠️ Deprecated，不再维护）**: `OPENCLAW_GROUP_AGENT_MAPPING` 按 conversationId 映射到不同 agent，严格模式 (`OPENCLAW_STRICT_ROUTING=true`) 下未映射的群拒绝访问。
 

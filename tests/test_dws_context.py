@@ -11,6 +11,99 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
+@pytest.fixture
+def read_dws_only_window():
+    from app.dws_context import fetch_dws_context_bundle, DwsCorpCheckResult
+    from app.dws_files import QuotedMediaAndDocsResult
+
+    async def read(rows, *, cutoff=None, current_ids=()):
+        async def query(args, **kwargs):
+            return {"messages": rows[-int(args[args.index("--limit") + 1]):]}
+        with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
+             patch("app.dws_context.run_dws_readonly_json", side_effect=query) as fetch, \
+             patch("app.dws_context.fetch_quoted_media_and_docs", new_callable=AsyncMock, return_value=QuotedMediaAndDocsResult(images=[b"image"])) as media:
+            bundle = await fetch_dws_context_bundle(conversation_id="conv", is_group=False, incoming_messages=[],
+                current_message_ids=current_ids, raw_user_content="怎么看", history_messages=[], cutoff_at=cutoff, dws_only=True)
+        return bundle, media
+    return read
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [25, 50])
+async def test_dws_only_keeps_each_bot_history_budget(budget, monkeypatch, read_dws_only_window):
+    from datetime import datetime, timedelta
+    monkeypatch.setattr("app.dws_context.cfg.MAX_HISTORY_LENGTH", budget)
+    monkeypatch.setattr("app.dws_context.cfg.DWS_CONTEXT_LIMIT", 40)
+    rows = [{"messageId": str(i), "sender": "甲", "text": f"历史{i}",
+             "createTime": str(datetime(2026, 11, 12, 10) + timedelta(seconds=i))} for i in range(71)]
+    bundle, _ = await read_dws_only_window(rows, current_ids=["70"])
+    assert len(bundle.merged_history) == budget
+    assert bundle.merged_history[0]["content"] == f"历史{70-budget}"
+    assert bundle.merged_history[-1]["content"] == "历史69"
+
+
+@pytest.mark.asyncio
+async def test_history_budget_excludes_older_media(monkeypatch, read_dws_only_window):
+    monkeypatch.setattr("app.dws_context.cfg.MAX_HISTORY_LENGTH", 2)
+    rows = [
+        {"messageId": "old", "sender": "甲", "text": "[图片消息](mediaId=old)", "createTime": "2026-11-12 10:00:00"},
+        {"messageId": "one", "sender": "甲", "text": "最新1", "createTime": "2026-11-12 10:00:01"},
+        {"messageId": "two", "sender": "甲", "text": "最新2", "createTime": "2026-11-12 10:00:02"},
+    ]
+    bundle, media = await read_dws_only_window(rows)
+    assert [m["content"] for m in bundle.merged_history] == ["最新1", "最新2"]
+    assert bundle.context_images == []
+    media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_history_media_annotation_stays_in_original_message(monkeypatch, read_dws_only_window):
+    monkeypatch.setattr("app.dws_context.cfg.MAX_HISTORY_LENGTH", 1)
+    rows = [{"messageId": "image", "sender": "甲", "text": "[图片消息](mediaId=new)", "createTime": "2026-11-12 10:00:02"}]
+    bundle, _ = await read_dws_only_window(rows)
+    assert len(bundle.merged_history) == 1
+    assert "原图附在本轮" in bundle.merged_history[0]["content"]
+    assert bundle.context_images == [b"image"]
+
+
+@pytest.mark.asyncio
+async def test_dws_only_cutoff_excludes_old_text_and_media(read_dws_only_window):
+    rows = [
+        {"messageId": "old", "sender": "甲", "text": "[图片消息](mediaId=old)", "createTime": "2026-11-12 10:00:00"},
+        {"messageId": "new", "sender": "甲", "text": "清空后", "createTime": "2026-11-12 10:00:02"},
+    ]
+    bundle, media = await read_dws_only_window(rows, cutoff="2026-11-12 10:00:01")
+    assert [m["content"] for m in bundle.merged_history] == ["清空后"]
+    media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clear_and_resume_keep_bot_views_independent(tmp_path, monkeypatch, read_dws_only_window):
+    from datetime import datetime
+    from app import clear_cutoff
+
+    monkeypatch.setattr(clear_cutoff, "CUTOFF_DIR", str(tmp_path))
+    monkeypatch.setattr(clear_cutoff, "datetime", SimpleNamespace(now=lambda tz: datetime(2026, 11, 12, 10, 0, 1)))
+    monkeypatch.setattr("app.responses_state.clear_response_id", lambda _: None)
+    monkeypatch.setattr(clear_cutoff, "BOT_ID", "anthropic")
+    clear_cutoff.set_cutoff("same-group", set_by="u", set_by_nick="甲")
+    rows = [
+        {"messageId": "old", "sender": "甲", "text": "[图片消息](mediaId=old)", "createTime": "2026-11-12 10:00:00"},
+        {"messageId": "new", "sender": "甲", "text": "新消息", "createTime": "2026-11-12 10:00:02"},
+    ]
+    for bot, budget in [("gemini", 50), ("openai", 50), ("anthropic", 25)]:
+        monkeypatch.setattr(clear_cutoff, "BOT_ID", bot)
+        monkeypatch.setattr("app.dws_context.cfg.MAX_HISTORY_LENGTH", budget)
+        cutoff = clear_cutoff.get_cutoff("same-group")
+        bundle, _ = await read_dws_only_window(rows, cutoff=cutoff)
+        assert len(bundle.merged_history) == (1 if bot == "anthropic" else 2)
+        assert bool(bundle.context_images) is (bot != "anthropic")
+    clear_cutoff.reset_cutoff("same-group")
+    bundle, _ = await read_dws_only_window(rows, cutoff=clear_cutoff.get_cutoff("same-group"))
+    assert len(bundle.merged_history) == 2
+    assert bundle.context_images == [b"image"]
+
+
 @pytest.mark.asyncio
 async def test_dws_only_history_includes_bots_and_media_without_local_history():
     from app.dws_context import fetch_dws_context_bundle, DwsCorpCheckResult
