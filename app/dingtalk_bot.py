@@ -1418,6 +1418,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
+        from app.ai.backend import resolve_thinking_for_route
+        thinking_level = resolve_thinking_for_route(AI_BACKEND, target_model, thinking_level)
+
         if not image_data_list:
             complexity["need_image_edit"] = False
 
@@ -1810,6 +1813,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             card_response, _ = resolve_mentions(card_response, dws_bundle.members, card=True)
             history_response, _ = resolve_mentions(history_response, dws_bundle.members)
+
+            if AI_BACKEND in {"gemini", "openrouter"} and usage_info and usage_info.get("thinking_level"):
+                thinking_level = usage_info["thinking_level"]
 
             # 构建状态栏：只有 thinking 时才显示摘要，避免重复显示内容
             status_text = ""

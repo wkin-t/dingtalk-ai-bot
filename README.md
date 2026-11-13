@@ -50,11 +50,34 @@ Claude 生产模型配置（2026-11-12 已验证，来自 `.env.anthropic` 的�
 路由分析在**卡片创建前**完成，卡片一出现就能显示正确的思考文字。路由由轻量模型 `MODEL_ROUTER` 执行，输出：
 
 - 档位：`lite`（简单问候）/ `fast`（日常问答，默认）/ `pro`（复杂推理）
-- `thinking_level`：minimal / low / medium / high
+- `thinking_level`：按所选实际模型支持的档位选择，独立于模型别名后缀
 - `temperature`：precise / balanced / creative → 0.1 / 0.7 / 0.9
 - `need_search` / `need_image_gen` / `need_image_edit`
 
 路由模型不可用时，降级为 `app/ai/router.py` 的关键词匹配。
+
+Gemini 生产配置（2026-11-13）：`MODEL_ROUTER` 和 `MODEL_LITE` 使用 `gemini-4-hydrogen-low`，`MODEL_FAST` 保持 `gemini-4-argon-high`，`MODEL_PRO` 保持 `gemini-4-carbon-high`；模型别名后缀不代表实际深度。
+
+### 按模型区分思考深度
+
+模型名中的 `-low` / `-high` 等属于中转站别名，不能据此判断实际思考深度。`app/ai/thinking_policy.py` 统一生成路由能力提示，并在路由结果和客户端发送前校验独立字段：
+
+| 当前模型 / 通道 | 支持的深度 | 能否完全关闭思考 |
+|---|---|---|
+| Gemini 4 Hydrogen | `low / medium / high / xhigh` | 不支持，最低 `low` |
+| Gemini 4 Argon / Carbon | `low / medium / high` | 不支持，最低 `low` |
+| Claude Sonnet / Opus 5.5，中转 Responses | `low / medium / high / xhigh / max` | 不支持完全关闭 |
+| GPT-6 Luna、GPT-6 Sol、GPT-6.1 Terra，中转 Responses | `none / low / medium / high / xhigh / max` | 支持请求 `none` |
+| GPT-6.1 Sol、GPT-6 Astra，中转 Responses | `low / medium / high / xhigh / max` | 不支持，最低 `low` |
+| 未知型号、原生 OpenRouter | 默认保守使用 `low / medium / high` | 不擅自假定支持关闭 |
+
+简单问候与短确认选择最低可用档；只有支持 `none` 的模型才会明确下发 `reasoning.effort="none"`，不通过省略字段伪装关闭。`minimal` 仅作为旧输入兼容：支持关闭时映射到 `none`，否则映射到最低支持档。`include_thoughts=False` 只控制是否回传思考摘要，不等于关闭思考。
+
+先确认最终模型档位（包括带图时从 lite 升级到 fast），再校验深度；Gemini 更换 fallback 模型时重新校验。不支持的高档位降至该模型支持且不高于请求的最高档，并记录归一化；不会统一降成 `low`。状态栏使用实际可下发的深度，未开启传输能力声明时显示 `default`，不声称已经关闭。
+
+中转站可覆盖单个别名的能力：`THINKING_LEVEL_OVERRIDES` 是 JSON 对象，键为完整模型名或 `backend:模型名`，值为从浅到深的非空档位列表；后端限定键优先。例如 `{"openai:custom-model":["none","low","medium","high"]}`。仅在确认上游支持后添加 `none`；非法、重复或乱序列表会在启动时拒绝，不打印配置正文。
+
+上表的关闭能力依据 [Gemini 思考文档](https://aistudio.google.com/docs/thinking)、[Claude 思考文档](https://platform.claude.com/docs/en/build-with-claude/thinking) 和 [GPT-6 迁移说明](https://developers.openai.com/api/docs/guides/latest-model)。它描述模型协议能力；SDK 最终请求的离线捕获不等于中转站真实执行验收，上游额度不足时不声称已验证执行。
 
 ### AI 特性
 
@@ -210,6 +233,7 @@ python main.py                     # 默认端口 35000
 | `BOT_ID` | **多容器必填** | 机器人实例标识，默认等于 `AI_BACKEND`。多个容器共用同一 `AI_BACKEND` 时必须显式设置不同值，否则角色重塑失效。它还是历史归属、Soul 文件、cutoff 的持久化键，改名须同步迁移数据 |
 | `CHAT_COMPLETIONS_BEARER_TOKEN` | **是** | `/v1/chat/completions` 鉴权。fail-closed：未配置时该端点拒绝服务 |
 | `MODEL_ROUTER` / `MODEL_LITE` / `MODEL_FAST` / `MODEL_PRO` | 否 | 路由模型与三档模型，所有后端通用；默认值按 `AI_BACKEND` 选择（见下表） |
+| `THINKING_LEVEL_OVERRIDES` | 否 | JSON 对象，按完整模型名或 `backend:模型名` 覆盖支持档位；默认使用模型能力表，详见“按模型区分思考深度” |
 | `GEMINI_API_KEY` | 视后端 | Google 直连 key。Gemini 后端需要；生图 / 改图也始终直连 Google |
 | `GEMINI_API_BASE` / `GEMINI_API_BASE_KEY` | 否 | Gemini 走中转站时的 `/v1beta` 原生协议地址（不带路径后缀）与 key |
 | `OPENAI_API_BASE` / `OPENAI_API_KEY` | `openai` 后端 | OpenAI 兼容端点与 key |

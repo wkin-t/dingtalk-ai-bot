@@ -21,7 +21,13 @@ from app.config import (
     get_litellm_model_config,
     get_route_key,
 )
+from app import config as app_config
 from app.ai.router import ROUTER_IMAGE_GEN_FALSE_HINT
+from app.ai.thinking_policy import (
+    normalize_thinking_level,
+    supported_thinking_levels,
+    thinking_capabilities_prompt,
+)
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
 from app.gemini_client import google_search
 from app.error_safety import safe_model_name
@@ -34,11 +40,13 @@ from app.antigravity_search import (
 )
 from app.config import ANTIGRAVITY_CLAUDE_BRIDGE_THINKING_LEVELS
 EFFORT_MAPPING = {
-    "minimal": "none",
-    "low": "none",
+    "none": "none",
+    "minimal": "low",
+    "low": "low",
     "medium": "medium",
     "high": "high",
     "xhigh": "xhigh",
+    "max": "max",
 }
 
 RESPONSES_REASONING_DELTA_EVENTS = frozenset({
@@ -534,7 +542,7 @@ async def _stream_via_claude_bridge(
         effort = EFFORT_MAPPING.get(thinking_level)
         if thinking_level == "low":
             effort = "low"
-        if config["supports_reasoning"] and effort and effort != "none":
+        if config["supports_reasoning"] and effort:
             request["reasoning"] = {"effort": effort}
         if with_tool:
             request["tools"] = [build_search_tool()]
@@ -1065,6 +1073,18 @@ async def call_openai_stream(
     config = get_litellm_model_config(route_key)
     model_name = config["model"]
 
+    normalized_thinking_level = normalize_thinking_level(
+        thinking_level,
+        model_name,
+        backend="openai",
+    )
+    if normalized_thinking_level != thinking_level:
+        print(
+            f"⚙️ [OpenAI] thinking_level {thinking_level!r} → "
+            f"{normalized_thinking_level!r}（按模型能力）"
+        )
+    thinking_level = normalized_thinking_level
+
     is_claude = _is_claude_model(model_name)
     clamp_provider = "openclaw" if is_claude else "openai"
     clamped_temp = clamp_temperature(temperature, clamp_provider)
@@ -1218,7 +1238,7 @@ async def _stream_via_chat_completions(
         extra_params["top_p"] = top_p
 
     effort = EFFORT_MAPPING.get(thinking_level)
-    if config["supports_reasoning"] and effort and effort != "none":
+    if config["supports_reasoning"] and effort:
         extra_params["extra_body"] = {"reasoning": {"effort": effort}}
 
     processed_messages: Any = messages if config["supports_vision"] else _strip_images(messages)
@@ -1374,11 +1394,7 @@ async def _stream_via_responses(
             kw["top_p"] = top_p
 
         effort = EFFORT_MAPPING.get(thinking_level)
-        # 当前只有 Claude Responses 的生产证据证明 low 可用；GPT 与 Gemini
-        # 请求保持历史行为，避免扩大 35002 canary 之外的费用和延迟变化。
-        if thinking_level == "low" and _is_claude_model(model_name):
-            effort = "low"
-        if config["supports_reasoning"] and effort and effort != "none":
+        if config["supports_reasoning"] and effort:
             kw["reasoning"] = {"effort": effort}
 
         if enable_search and config.get("supports_search"):
@@ -1576,6 +1592,15 @@ async def _stream_via_responses(
     }
 
 
+def _router_reasoning_options() -> Dict[str, Any]:
+    """路由自己的模型与能力独立于 lite slot。"""
+    enabled = app_config.OPENAI_ROUTER_SUPPORTS_REASONING
+    if enabled is None:
+        base = MODEL_ROUTER.lower().split("/")[-1]
+        enabled = base.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4", "claude-", "gemini-3", "gemini-4"))
+    return {"reasoning_effort": supported_thinking_levels(MODEL_ROUTER, "openai")[0]} if enabled else {}
+
+
 async def call_openai_simple(prompt: str, max_tokens: Optional[int] = None) -> str:
     """用于 Soul 进化等后台轻量文本生成任务（非流式）。
 
@@ -1591,6 +1616,7 @@ async def call_openai_simple(prompt: str, max_tokens: Optional[int] = None) -> s
         }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        kwargs.update(_router_reasoning_options())
         response = await client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
     except Exception as e:
@@ -1609,6 +1635,14 @@ async def analyze_complexity_with_openai(
     """
     soul_instruction = f"你的性格设定: {soul_text[:100]}\n   请让思考短语符合这个性格。\n   " if soul_text else ""
 
+    model_options = {
+        slot: get_litellm_model_config(slot).get("model", "")
+        for slot in ("lite", "fast", "pro")
+    }
+    thinking_capabilities = thinking_capabilities_prompt(
+        "openai",
+        model_options,
+    )
     analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
 
 问题: {content[:300]}
@@ -1621,10 +1655,8 @@ async def analyze_complexity_with_openai(
    - "pro": 仅用于复杂数学证明、学术研究、系统架构设计
 
 2. thinking_level:
-   - "minimal": 简单问候如"你好"、"谢谢"
-   - "low": 普通问答、事实查询
-   - "medium": 需要一定推理、代码问题
-   - "high": 复杂分析、算法设计
+   只从下方模型能力允许的档位中选择；这是独立字段，不要根据模型名后缀猜测思考深度。
+{thinking_capabilities}
 
 3. need_search:
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期）
@@ -1658,6 +1690,7 @@ async def analyze_complexity_with_openai(
             model=MODEL_ROUTER,
             messages=[{"role": "user", "content": analysis_prompt}],
             temperature=0.1,
+            **_router_reasoning_options(),
         )
         result_text = response.choices[0].message.content or ""
         if not result_text:
@@ -1672,14 +1705,19 @@ async def analyze_complexity_with_openai(
             result = json.loads(json_match.group())
             if result.get("model") not in ["lite", "fast", "pro"]:
                 result["model"] = "fast"
-            if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
-                result["thinking_level"] = "low"
+            if has_images and result.get("model") == "lite":
+                result["model"] = "fast"
+            selected_model = get_litellm_model_config(result["model"]).get("model", "")
+            result["thinking_level"] = normalize_thinking_level(
+                result.get("thinking_level", "low"),
+                selected_model,
+                backend="openai",
+            )
             result.setdefault("need_search", False)
             result.setdefault("need_image_gen", False)
             result.setdefault("need_image_edit", False)
             result.setdefault("temperature", "balanced")
-            if has_images and result.get("model") == "lite":
-                result["model"] = "fast"
+            result["route_slot"] = result["model"]
             print(f"🤖 [OpenAI路由] 结果: {result}")
             return result
         print(f"⚠️ [OpenAI路由] 无法提取 JSON: {result_text}")

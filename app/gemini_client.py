@@ -14,6 +14,11 @@ from google.genai import types
 from app import gemini_sse_patch
 gemini_sse_patch.apply()
 from app.ai.router import ROUTER_IMAGE_GEN_FALSE_HINT
+from app.ai.thinking_policy import (
+    normalize_thinking_level,
+    supported_thinking_levels,
+    thinking_capabilities_prompt,
+)
 from app.ai.sampling_clamp import clamp_top_p
 from app.error_safety import safe_error_summary, safe_display_text, safe_model_name
 from app.config import (
@@ -25,6 +30,7 @@ from app.config import (
     DEFAULT_MODEL,
     GEMINI_MODEL_LITE,
     GEMINI_MODEL_FAST,
+    MODEL_LITE,
     MODEL_ROUTER_FALLBACK,
     MODEL_LITE_FALLBACK,
     MODEL_FAST_FALLBACK,
@@ -125,6 +131,42 @@ def _select_fallback_model(primary_model: str, route_slot: Optional[str] = None)
     return overrides.get(route_slot, "") or primary_model
 
 
+def _route_models() -> Dict[str, str]:
+    """返回 Gemini 路由档位到实际模型名的映射。
+
+    后缀只属于中转站模型别名，不能从中推断 thinking level；能力判断统一交给
+    ``thinking_policy``，这里仅维护当前容器的档位配置。
+    """
+    return {
+        "lite": MODEL_LITE,
+        "fast": GEMINI_MODEL_FAST,
+        "pro": DEFAULT_MODEL,
+    }
+
+
+def _normalize_route_result(result: Dict[str, Any], has_images: bool = False) -> Dict[str, Any]:
+    """校验路由模型、档位和思考深度，并按最终模型能力校正思考深度。"""
+    models = _route_models()
+    model_to_slot = {model: slot for slot, model in models.items() if model}
+    requested_model = result.get("model")
+    route_slot = result.get("route_slot")
+    if route_slot not in models:
+        route_slot = model_to_slot.get(requested_model)
+    if route_slot not in models:
+        route_slot = "lite" if result.get("thinking_level") == "minimal" else "fast"
+    if has_images and route_slot == "lite":
+        route_slot = "fast"
+    result["route_slot"] = route_slot
+    # route_slot 是下游真实调用的唯一档位来源，避免模型输出越过配置选择别的模型。
+    result["model"] = models[route_slot]
+    result["thinking_level"] = normalize_thinking_level(
+        result.get("thinking_level", "low"),
+        result["model"],
+        backend="gemini",
+    )
+    return result
+
+
 async def _is_circuit_open_safe() -> bool:
     """熔断状态读取失败时按未熔断处理，不能反向阻断主请求。"""
     try:
@@ -189,13 +231,14 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     Returns:
         {
             "model": "gemini-3-flash-preview" or "gemini-3.1-pro-preview",
-            "thinking_level": "minimal" | "low" | "medium" | "high",
+            "thinking_level": "minimal" | "low" | "medium" | "high" | "xhigh",
             "need_search": true | false,
             "reason": "分析原因"
         }
     """
     import json
 
+    route_models = _route_models()
     if analysis_model is None:
         analysis_model = GEMINI_MODEL_LITE
 
@@ -207,6 +250,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     if soul_text:
         soul_instruction = f"你的性格设定: {soul_text[:100]}\n   请让思考短语符合这个性格。\n   "
 
+    capability_hint = thinking_capabilities_prompt("gemini", route_models)
     analysis_prompt = f"""分析用户问题，返回 JSON 路由建议。
 
 问题: {content[:300]}
@@ -214,21 +258,25 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 
 选择规则:
 1. model:
-   - "{GEMINI_MODEL_FAST}": 日常问答、代码、一般分析 (默认)
-   - "{DEFAULT_MODEL}": 仅用于复杂数学证明、学术研究、系统架构设计
+   - "{route_models['lite']}": 简单问候、短确认
+   - "{route_models['fast']}": 日常问答、代码、一般分析 (默认)
+   - "{route_models['pro']}": 仅用于复杂数学证明、学术研究、系统架构设计
 
 2. thinking_level:
-   - "minimal": 简单问候如"你好"、"谢谢"
-   - "low": 普通问答、事实查询
+   - "low": 简单问候、普通问答、事实查询；Gemini 4 不支持关闭思考
    - "medium": 需要一定推理、代码问题
    - "high": 复杂分析、算法设计
+   - "xhigh": 仅当所选模型能力表允许时使用；模型名后缀不是思考深度
+
+模型能力表（必须以所选档位的实际模型为准，不要按模型名后缀猜测）：
+{capability_hint}
 
 3. need_search:
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期、现在是几年、今年是哪年）
    - false: 不需要联网（默认）
 
 4. route_slot:
-   - "lite": 简单问候、短确认，通常配合 minimal thinking
+   - "lite": 简单问候、短确认，使用该模型能力表中的最低档
    - "fast": 日常问答、代码、一般分析
    - "pro": 复杂数学证明、学术研究、系统架构设计
 
@@ -260,18 +308,24 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
 重要: 如果问题涉及"今年"、"现在"、"当前时间"等，设置 need_search=true
 
 只返回JSON:
-{{"model":"{GEMINI_MODEL_FAST}","route_slot":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
+{{"model":"{route_models['fast']}","route_slot":"fast","thinking_level":"low","need_search":false,"temperature":"balanced","need_image_gen":false,"need_image_edit":false,"reason":"简短原因","thinking_text":"正在思考"}}"""
 
     async def _collect_analysis(active_client: genai.Client, model: str) -> str:
         """收集完整预分析流；任意 provider iterator 异常都回给 fallback 边界。"""
         raw_parts = []
         try:
+            analysis_config = types.GenerateContentConfig(temperature=0.1)
+            if any(family in model.lower() for family in ("gemini-3", "gemini-4", "thinking")):
+                analysis_config.thinking_config = types.ThinkingConfig(
+                    thinking_level=supported_thinking_levels(model, "gemini")[0],
+                    include_thoughts=False,
+                )
             response = await active_client.aio.models.generate_content_stream(
                 model=model,
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])],
                 # 不设 max_output_tokens：思考模型的思考 token 计入输出上限，
                 # 设 300 时实测 10 次里 9 次被思考吃光、JSON 被截断，路由静默降级
-                config=types.GenerateContentConfig(temperature=0.1),
+                config=analysis_config,
             )
             iterator = response.__aiter__()
         except asyncio.CancelledError:
@@ -344,18 +398,8 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
         json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
-            # 验证和修正字段
-            if result.get("model") not in [GEMINI_MODEL_FAST, DEFAULT_MODEL]:
-                result["model"] = GEMINI_MODEL_FAST
-            if result.get("thinking_level") not in ["minimal", "low", "medium", "high"]:
-                result["thinking_level"] = "low"
-            route_slot = result.get("route_slot")
-            if route_slot not in {"lite", "fast", "pro"}:
-                if result.get("thinking_level") == "minimal":
-                    route_slot = "lite"
-                else:
-                    route_slot = "fast"
-            result["route_slot"] = route_slot
+            # 验证和修正字段；先确定最终档位/模型，再按该模型能力校正思考深度。
+            result = _normalize_route_result(result, has_images=has_images)
             if "need_search" not in result:
                 result["need_search"] = False
             if "need_image_gen" not in result:
@@ -378,9 +422,11 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
     # 降级：返回保守的默认值
     print("⚠️ 使用降级默认配置")
     return {
-        "model": GEMINI_MODEL_FAST,
+        "model": route_models["fast"],
         "route_slot": "fast",
-        "thinking_level": "low",
+        "thinking_level": normalize_thinking_level(
+            "low", route_models["fast"], backend="gemini"
+        ),
         "need_search": False,
         "reason": "预分析失败，使用默认配置",
         "thinking_text": "正在思考 💭"
@@ -543,26 +589,39 @@ async def call_gemini_stream(
             if clamped_top_p != top_p:
                 print(f"⚠️ [Gemini] top_p {top_p} → clamp 到 {clamped_top_p}")
             config_kwargs["top_p"] = clamped_top_p
-        config = types.GenerateContentConfig(**config_kwargs)
-        print(f"🌡️ [Gemini] 实际下发 temperature={clamped_temp}, top_p={config_kwargs.get('top_p', 'default(unset)')}")
+        def _build_generation_config(active_model: str):
+            """按实际请求模型重新构建配置，尤其要重新校正 fallback 的 thinking level。"""
+            active_kwargs = dict(config_kwargs)
+            config = types.GenerateContentConfig(**active_kwargs)
+            requested_level = (
+                thinking_level.strip().lower()
+                if isinstance(thinking_level, str)
+                else ""
+            )
+            normalized_level = normalize_thinking_level(
+                thinking_level if ENABLE_THINKING else "low", active_model, backend="gemini"
+            )
+            print(
+                f"🌡️ [Gemini] 实际下发 temperature={clamped_temp}, "
+                f"top_p={active_kwargs.get('top_p', 'default(unset)')}"
+            )
 
-        # Gemini 3/4 使用 thinking_level；保留旧 thinking 别名的兼容性。
-        # thinking_level: minimal (最快) | low | medium | high (最深度)
-        if any(name in target_model.lower() for name in ('gemini-3', 'gemini-4', 'thinking')):
-            if ENABLE_THINKING and thinking_level != "minimal":
-                config.thinking_config = types.ThinkingConfig(
-                    thinking_level=thinking_level,
-                    include_thoughts=True
-                )
-                print(f"🧠 已启用 Thinking 模式 (level={thinking_level})")
-            else:
-                # gemini-3.8 系列不支持 minimal/none（400 THINKING_LEVEL_MINIMAL），
-                # low 是被支持档位里最轻量的一档，用它替代
-                config.thinking_config = types.ThinkingConfig(
-                    thinking_level="low",
-                    include_thoughts=False
-                )
-                print("⚡ Thinking 模式 (level=low, 快速响应)")
+            # Gemini 3/4 使用独立 thinking_level；模型别名后缀不改变该字段。
+            if any(name in active_model.lower() for name in ('gemini-3', 'gemini-4', 'thinking')):
+                if ENABLE_THINKING and requested_level != "minimal":
+                    config.thinking_config = types.ThinkingConfig(
+                        thinking_level=normalized_level,
+                        include_thoughts=True
+                    )
+                    print(f"🧠 已启用 Thinking 模式 (level={normalized_level})")
+                else:
+                    # Gemini provider 不接受 minimal；用该模型支持的最低 low，且不回传思考内容。
+                    config.thinking_config = types.ThinkingConfig(
+                        thinking_level=normalized_level,
+                        include_thoughts=False
+                    )
+                    print(f"⚡ Thinking 模式 (level={normalized_level}, 不回传思考摘要)")
+            return config
 
         async def _iterate_attempt(
             active_client: genai.Client,
@@ -582,7 +641,7 @@ async def call_gemini_stream(
                 response = await active_client.aio.models.generate_content_stream(
                     model=active_model,
                     contents=contents,
-                    config=config,
+                    config=_build_generation_config(active_model),
                 )
                 iterator = response.__aiter__()
             except asyncio.CancelledError:
@@ -682,6 +741,9 @@ async def call_gemini_stream(
                 "output_tokens": output_tokens,
                 "cached_tokens": cached_tokens,
                 "latency_ms": latency_ms,
+                "thinking_level": normalize_thinking_level(
+                    thinking_level if ENABLE_THINKING else "low", active_model, "gemini"
+                ),
             }
             if fallback_used:
                 usage_payload.update({

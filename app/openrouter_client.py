@@ -19,6 +19,7 @@ except ImportError:
 
 from app.ai.router import ROUTER_IMAGE_GEN_FALSE_HINT
 from app.ai.sampling_clamp import clamp_temperature, clamp_top_p
+from app.ai.thinking_policy import normalize_thinking_level, normalize_thinking_for_models, thinking_capabilities_prompt
 from app.config import (
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
@@ -28,11 +29,13 @@ from app.config import (
 )
 
 EFFORT_MAPPING = {
-    "minimal": "none",
-    "low": "none",
+    "none": "none",
+    "minimal": "low",
+    "low": "low",
     "medium": "medium",
     "high": "high",
-    "xhigh": "high",
+    "xhigh": "xhigh",
+    "max": "max",
 }
 
 
@@ -137,6 +140,8 @@ async def call_openrouter_stream(
             print(f"⚠️ [OpenRouter] top_p {top_p} → clamp 到 {clamped_top_p}")
         top_p = clamped_top_p
 
+    thinking_level = normalize_thinking_level(thinking_level, model, backend="openrouter")
+    thinking_level = normalize_thinking_for_models(thinking_level, [model] + config.get("fallbacks", []), "openrouter")
     print(f"📡 [OpenRouter] 请求模型: {model} (路由: {route_key}, thinking: {thinking_level})")
     print(f"🌡️ [OpenRouter] 实际下发 temperature={temperature}, top_p={top_p if top_p is not None else 'default(unset)'}")
 
@@ -165,7 +170,7 @@ async def call_openrouter_stream(
         # ── Reasoning effort ──
         reasoning_param = None
         effort = EFFORT_MAPPING.get(thinking_level)
-        if config.get("supports_reasoning") and effort and effort != "none":
+        if config.get("supports_reasoning") and effort:
             reasoning_param = Reasoning(effort=effort)
 
         # ── Web search via plugins ──
@@ -280,6 +285,7 @@ async def call_openrouter_stream(
                 "output_tokens": output_tokens,
                 "cached_tokens": cached_tokens,
                 "latency_ms": latency_ms,
+                "thinking_level": thinking_level if config.get("supports_reasoning") else "default",
             }
         }
 
@@ -338,10 +344,7 @@ async def analyze_complexity_with_openrouter(
    - "pro": 仅用于复杂数学证明、学术研究、系统架构设计、复杂图片分析
 
 2. thinking_level:
-   - "minimal": 简单问候如"你好"、"谢谢"、"再见"
-   - "low": 普通问答、事实查询
-   - "medium": 需要推理、代码问题
-   - "high": 复杂分析、算法设计
+{thinking_capabilities_prompt("openrouter", {slot: config["model"] for slot, config in OPENROUTER_MODEL_CONFIG.items()})}
 
 3. need_search:
    - true: 需要实时信息（天气、新闻、股价、最新事件、当前日期）
@@ -386,9 +389,13 @@ async def analyze_complexity_with_openrouter(
         json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
+            if result.get("model") not in {"lite", "fast", "pro"}:
+                result["model"] = "fast"
             if has_images and result.get("model") == "lite":
                 result["model"] = "fast"
                 result["reason"] = result.get("reason", "") + " [图片升级→fast]"
+            model = OPENROUTER_MODEL_CONFIG.get(result["model"], OPENROUTER_MODEL_CONFIG["fast"])["model"]
+            result["thinking_level"] = normalize_thinking_level(result.get("thinking_level", "low"), model, backend="openrouter")
             print(f"🔄 [OR路由] 分析: {result.get('model')} / {result.get('thinking_level')} / reason={result.get('reason')}")
             return result
     except Exception as e:

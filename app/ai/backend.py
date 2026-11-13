@@ -8,6 +8,30 @@ def _get_backend_name() -> str:
     return cfg.AI_BACKEND
 
 
+def resolve_thinking_for_route(backend: str, target_model: str, level: str) -> str:
+    """路由别名先解析为实际模型，卡片与 SDK 使用同一能力约束。"""
+    from app.ai.thinking_policy import normalize_thinking_level, normalize_thinking_for_models
+
+    if backend == "openclaw":
+        return level
+    actual_model = target_model
+    if backend == "openai":
+        config = cfg.get_litellm_model_config(cfg.get_route_key(target_model))
+        if not config.get("supports_reasoning"):
+            return "default"
+        actual_model = config["model"]
+    elif backend == "openrouter":
+        slot = cfg.get_route_key(target_model)
+        config = cfg.OPENROUTER_MODEL_CONFIG.get(slot, cfg.OPENROUTER_MODEL_CONFIG["fast"])
+        if not config.get("supports_reasoning"):
+            return "default"
+        actual_model = config["model"]
+        return normalize_thinking_for_models(level, [actual_model] + config.get("fallbacks", []), "openrouter")
+    elif backend == "gemini" and not cfg.ENABLE_THINKING:
+        level = "low"
+    return normalize_thinking_level(level, actual_model, backend=backend)
+
+
 def resolve_enable_search(backend: str, target_model: str, requested: bool) -> bool:
     """全自主搜索策略（SEARCH_AUTONOMOUS）：路由显式要求搜索时原样放行；否则
     fast/pro 档只要当前路径原生支持搜索工具就强制挂载，让模型自决是否搜索
@@ -89,6 +113,7 @@ async def create_backend_stream(
         {"content": "...", "thinking": "...", "reasoning_details": [...], "usage": {...}, "error": "..."}
     """
     backend = cfg.AI_BACKEND
+    thinking_level = resolve_thinking_for_route(backend, target_model, thinking_level)
 
     # 全自主模式下 enable_search 会被 resolve_enable_search 强制为 True（fast/pro
     # 档无条件挂搜索工具，模型自决），这个被强制后的值不能代表"用户/路由真的要搜索"。

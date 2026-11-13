@@ -580,14 +580,148 @@ async def test_responses_claude_low_sends_low_reasoning_effort(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name,thinking_level",
+    [
+        ("claude-sonnet-5-5-low", "max"),
+        ("gpt-5.6-terra", "xhigh"),
+    ],
+)
 @patch("app.responses_state.get_response_id", return_value=None)
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
 @patch("app.openai_client.AsyncOpenAI")
-async def test_responses_gpt_low_keeps_reasoning_omitted(
+async def test_responses_preserves_high_reasoning_levels(
+    mock_openai_cls,
+    mock_get_config,
+    mock_set_rid,
+    mock_get_rid,
+    model_name,
+    thinking_level,
+):
+    """Claude/GPT 的 max、xhigh 是独立思考字段，不能因模型别名后缀被改掉。"""
+    mock_get_config.return_value = _model_config(model_name, supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level=thinking_level,
+    ):
+        pass
+
+    assert mock_client.responses.create.call_args.kwargs["reasoning"] == {
+        "effort": thinking_level
+    }
+
+
+@pytest.mark.asyncio
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_gemini_hydrogen_xhigh_uses_thinking_field_not_model_suffix(
+    mock_openai_cls, mock_get_config,
+):
+    """Hydrogen 别名的 low 后缀不能把独立的 xhigh thinking_level 降级。"""
+    mock_get_config.return_value = _model_config(
+        "gemini-4-hydrogen-low", supports_reasoning=True
+    )
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create = AsyncMock(return_value=_make_async_stream([]))
+
+    async for _ in call_openai_stream(
+        [{"role": "user", "content": "hi"}],
+        target_model="fast",
+        thinking_level="xhigh",
+    ):
+        pass
+
+    assert mock_client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "reasoning": {"effort": "xhigh"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_router_prompt_and_result_use_selected_model_capabilities(monkeypatch):
+    """路由提示列出实际模型能力，返回值按最终 slot 的模型再做一次能力校验。"""
+    import app.openai_client as oc
+
+    configs = {
+        "lite": _model_config("claude-sonnet-5-5-low", supports_reasoning=True),
+        "fast": _model_config("gpt-5.6-terra", supports_reasoning=True),
+        "pro": _model_config("claude-opus-5-5-low", supports_reasoning=True),
+    }
+    captured = {}
+
+    def get_config(slot):
+        return configs[slot]
+
+    response = type("Response", (), {})()
+    response.choices = [
+        type("Choice", (), {})()
+    ]
+    response.choices[0].message = type("Message", (), {})()
+    response.choices[0].message.content = json.dumps({
+        "model": "fast",
+        "thinking_level": "max",
+        "need_search": False,
+        "temperature": "balanced",
+    })
+    client = MagicMock()
+
+    async def create(**kwargs):
+        captured.update(kwargs)
+        return response
+
+    client.chat.completions.create = create
+    monkeypatch.setattr(oc, "get_litellm_model_config", get_config)
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+
+    result = await oc.analyze_complexity_with_openai("复杂问题")
+
+    assert result["thinking_level"] == "max"
+    assert "gpt-5.6-terra" in captured["messages"][0]["content"]
+    assert "max" in captured["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_router_uses_minimum_effort_and_validates_after_image_upgrade(monkeypatch):
+    from types import SimpleNamespace
+    import app.openai_client as oc
+
+    configs = {"lite": _model_config("gpt-6-luna", supports_reasoning=True), "fast": _model_config("gpt-6.1-sol", supports_reasoning=True), "pro": _model_config("gpt-6.1-sol", supports_reasoning=True)}
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"model": "lite", "thinking_level": "none"})))]))
+    monkeypatch.setattr(oc, "MODEL_ROUTER", "gpt-6-luna")
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda slot: configs[slot])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+    result = await oc.analyze_complexity_with_openai("这张图是什么", has_images=True)
+    assert client.chat.completions.create.call_args.kwargs["reasoning_effort"] == "none"
+    assert result["model"] == "fast" and result["route_slot"] == "fast"
+    assert result["thinking_level"] == "low"
+
+
+@pytest.mark.parametrize("router,lite_capable,expected", [("gpt-6-luna", False, {"reasoning_effort": "none"}), ("unrecognized-router", True, {})])
+def test_router_reasoning_is_independent_of_lite_capability(monkeypatch, router, lite_capable, expected):
+    import app.openai_client as oc
+
+    monkeypatch.setattr(oc, "MODEL_ROUTER", router)
+    monkeypatch.setattr(oc.app_config, "OPENAI_ROUTER_SUPPORTS_REASONING", None)
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: {"supports_reasoning": lite_capable})
+    assert oc._router_reasoning_options() == expected
+
+
+@pytest.mark.asyncio
+@patch("app.responses_state.get_response_id", return_value=None)
+@patch("app.responses_state.set_response_id")
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_gpt_low_explicitly_sends_reasoning(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """Claude 专属 low 修复不能改变 GPT Responses 的既有请求参数。"""
+    """GPT 的 low 必须明确下发，省略字段不能代表低档或关闭。"""
     mock_get_config.return_value = _model_config("gpt-5.6-sol", supports_reasoning=True)
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
@@ -600,16 +734,30 @@ async def test_responses_gpt_low_keeps_reasoning_omitted(
     ):
         pass
 
-    assert "reasoning" not in mock_client.responses.create.call_args.kwargs
+    assert mock_client.responses.create.call_args.kwargs["reasoning"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,expected", [("gpt-6-luna", "none"), ("gpt-6.1-terra", "none"), ("gpt-6.1-sol", "low"), ("claude-sonnet-5-5-low", "low")])
+async def test_none_is_explicit_and_only_used_for_models_supporting_off(model, expected):
+    with patch("app.openai_client.get_litellm_model_config", return_value=_model_config(model, supports_reasoning=True)), \
+         patch("app.openai_client.AsyncOpenAI") as client_class, \
+         patch("app.responses_state.get_response_id", return_value=None), \
+         patch("app.responses_state.set_response_id"):
+        client = client_class.return_value
+        client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+        async for _ in call_openai_stream([{"role": "user", "content": "hi"}], target_model="fast", thinking_level="none"):
+            pass
+        assert client.responses.create.call_args.kwargs["reasoning"] == {"effort": expected}
 
 
 @pytest.mark.asyncio
 @patch("app.openai_client.get_litellm_model_config")
 @patch("app.openai_client.AsyncOpenAI")
-async def test_chat_completions_gemini_low_keeps_reasoning_omitted(
+async def test_chat_completions_gemini_low_explicitly_sends_reasoning(
     mock_openai_cls, mock_get_config,
 ):
-    """Claude Responses 修复不能改变 Gemini Chat Completions 的 low 参数。"""
+    """Gemini 兼容路径同样显式发送独立的 low 字段。"""
     mock_get_config.return_value = _model_config(
         "gemini-3.6-flash-tiered", supports_reasoning=True
     )
@@ -624,7 +772,7 @@ async def test_chat_completions_gemini_low_keeps_reasoning_omitted(
     ):
         pass
 
-    assert "extra_body" not in mock_client.chat.completions.create.call_args.kwargs
+    assert mock_client.chat.completions.create.call_args.kwargs["extra_body"] == {"reasoning": {"effort": "low"}}
 
 
 @pytest.mark.asyncio
@@ -632,10 +780,10 @@ async def test_chat_completions_gemini_low_keeps_reasoning_omitted(
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
 @patch("app.openai_client.AsyncOpenAI")
-async def test_responses_minimal_omits_reasoning(
+async def test_responses_legacy_minimal_uses_low_instead_of_claiming_off(
     mock_openai_cls, mock_get_config, mock_set_rid, mock_get_rid,
 ):
-    """minimal 继续代表关闭 reasoning，不应下发 reasoning 参数。"""
+    """旧 minimal 在无法确认支持关闭的 Claude 上映射 low，不能假装关闭。"""
     mock_get_config.return_value = _model_config(
         "anthropic/claude-opus-4-6-thinking", supports_reasoning=True
     )
@@ -650,7 +798,7 @@ async def test_responses_minimal_omits_reasoning(
     ):
         pass
 
-    assert "reasoning" not in mock_client.responses.create.call_args.kwargs
+    assert mock_client.responses.create.call_args.kwargs["reasoning"] == {"effort": "low"}
 
 
 @pytest.mark.asyncio

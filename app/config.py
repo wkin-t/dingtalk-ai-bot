@@ -266,6 +266,34 @@ MODEL_LITE   = os.getenv("MODEL_LITE",   _md["lite"])    # lite 档（简单问�
 MODEL_FAST   = os.getenv("MODEL_FAST",   _md["fast"])    # fast 档（日常问答）
 MODEL_PRO    = os.getenv("MODEL_PRO",    _md["pro"])     # pro 档（复杂推理）
 
+
+def _get_thinking_level_overrides() -> dict:
+    """拒绝非法能力配置，避免拼错档位后静默改变调用预算。"""
+    message = "THINKING_LEVEL_OVERRIDES 必须是模型名到非空、有序、无重复合法思考档位列表的 JSON 对象"
+    try:
+        overrides = json.loads(os.getenv("THINKING_LEVEL_OVERRIDES", "{}"))
+    except (TypeError, ValueError):
+        raise ValueError(message) from None
+    levels = ("none", "low", "medium", "high", "xhigh", "max")
+    if not isinstance(overrides, dict):
+        raise ValueError(message)
+    for model, supported in overrides.items():
+        if not isinstance(model, str) or not model.strip() or not isinstance(supported, list) or not supported:
+            raise ValueError(message)
+        if any(not isinstance(level, str) or level not in levels for level in supported):
+            raise ValueError(message)
+        if supported != sorted(set(supported), key=levels.index):
+            raise ValueError(message)
+    return overrides
+
+
+THINKING_LEVEL_OVERRIDES = _get_thinking_level_overrides()
+# 路由模型可与 lite 不同；未显式声明时由客户端识别已知支持深度字段的家族。
+OPENAI_ROUTER_SUPPORTS_REASONING = (
+    _get_bool("OPENAI_ROUTER_SUPPORTS_REASONING", False)
+    if os.getenv("OPENAI_ROUTER_SUPPORTS_REASONING") is not None else None
+)
+
 # Vertex fallback 模型名仅作为显式 route slot 的可选 override；空值沿用主模型名。
 MODEL_ROUTER_FALLBACK = os.getenv("MODEL_ROUTER_FALLBACK", "").strip()
 MODEL_LITE_FALLBACK = os.getenv("MODEL_LITE_FALLBACK", "").strip()

@@ -187,6 +187,16 @@ def _make_analysis_chunk(text: str):
 class TestAnalyzeComplexity:
     """智能路由分析测试"""
 
+    def test_actual_lite_model_is_independent_of_router_and_images_upgrade_before_depth(self):
+        from app import gemini_client as gc
+
+        with patch.object(gc, "MODEL_LITE", "gemini-4-hydrogen-low"), patch.object(gc, "GEMINI_MODEL_LITE", "gemini-4-carbon-high"), patch.object(gc, "GEMINI_MODEL_FAST", "gemini-4-argon-high"):
+            lite = gc._normalize_route_result({"route_slot": "lite", "thinking_level": "xhigh"})
+            assert lite["model"] == "gemini-4-hydrogen-low" and lite["thinking_level"] == "xhigh"
+            upgraded = gc._normalize_route_result({"route_slot": "lite", "thinking_level": "xhigh"}, has_images=True)
+            assert upgraded["route_slot"] == "fast" and upgraded["model"] == "gemini-4-argon-high"
+            assert upgraded["thinking_level"] == "high"
+
     @pytest.mark.asyncio
     async def test_normal_analysis(self):
         """正常分析返回结果"""
@@ -201,6 +211,18 @@ class TestAnalyzeComplexity:
         assert result["thinking_level"] == "low"
         assert result["need_search"] is False
         assert result["route_slot"] == "fast"
+
+    @pytest.mark.asyncio
+    async def test_analysis_explicitly_uses_low_instead_of_provider_default(self):
+        from app.gemini_client import analyze_complexity_with_model
+
+        with patch("app.gemini_client.client") as mock_client:
+            chunk = _make_analysis_chunk('{"route_slot":"lite","thinking_level":"low"}')
+            mock_client.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter([chunk]))
+            await analyze_complexity_with_model("你好", analysis_model="gemini-4-hydrogen-low")
+            config = mock_client.aio.models.generate_content_stream.call_args.kwargs["config"]
+            assert config.thinking_config.thinking_level == "LOW"
+            assert config.thinking_config.include_thoughts is False
 
     @pytest.mark.asyncio
     async def test_complex_question_routes_to_pro(self):
@@ -344,6 +366,49 @@ class TestAnalyzeComplexity:
 
         assert result["thinking_level"] == "low"
 
+    @pytest.mark.asyncio
+    async def test_route_slot_uses_configured_lite_model_and_hydrogen_xhigh(self):
+        """路由按最终档位使用配置模型，并保留 Hydrogen 独有 xhigh。"""
+        from app import gemini_client
+
+        with patch.object(gemini_client, "MODEL_LITE", "gemini-4-hydrogen-low"), \
+             patch.object(gemini_client, "GEMINI_MODEL_FAST", "gemini-4-argon-high"), \
+             patch.object(gemini_client, "DEFAULT_MODEL", "gemini-4-carbon-high"), \
+             patch.object(gemini_client, "client") as mock_client:
+            chunk = _make_analysis_chunk(
+                '{"model":"invalid","route_slot":"lite","thinking_level":"xhigh",'
+                '"need_search":false,"reason":"Hydrogen"}'
+            )
+            mock_client.aio.models.generate_content_stream = AsyncMock(
+                return_value=_async_iter([chunk])
+            )
+            result = await gemini_client.analyze_complexity_with_model("复杂问题")
+
+        assert result["model"] == "gemini-4-hydrogen-low"
+        assert result["route_slot"] == "lite"
+        assert result["thinking_level"] == "xhigh"
+
+    @pytest.mark.asyncio
+    async def test_route_downgrades_xhigh_for_non_hydrogen_model_to_high(self):
+        """Argon/Carbon 不支持 xhigh 时降到该模型最高档 high，而非 low。"""
+        from app import gemini_client
+
+        with patch.object(gemini_client, "MODEL_LITE", "gemini-4-argon-low"), \
+             patch.object(gemini_client, "GEMINI_MODEL_FAST", "gemini-4-argon-high"), \
+             patch.object(gemini_client, "DEFAULT_MODEL", "gemini-4-carbon-high"), \
+             patch.object(gemini_client, "client") as mock_client:
+            chunk = _make_analysis_chunk(
+                '{"model":"gemini-4-argon-high","route_slot":"fast","thinking_level":"xhigh",'
+                '"need_search":false,"reason":"unsupported xhigh"}'
+            )
+            mock_client.aio.models.generate_content_stream = AsyncMock(
+                return_value=_async_iter([chunk])
+            )
+            result = await gemini_client.analyze_complexity_with_model("复杂问题")
+
+        assert result["model"] == "gemini-4-argon-high"
+        assert result["thinking_level"] == "high"
+
 
 # ─── call_gemini_stream 测试 ─────────────────────────────────────
 
@@ -378,6 +443,54 @@ class TestCallGeminiStream:
         assert thinking is not None
         assert thinking.thinking_level.lower() == expected_level
         assert thinking.include_thoughts is include_thoughts
+
+    @pytest.mark.asyncio
+    async def test_hydrogen_xhigh_reaches_sdk_as_independent_depth(self):
+        """Hydrogen 的 xhigh 作为 thinking_level 独立字段下发。"""
+        from app import gemini_client
+
+        with patch.object(gemini_client, "ENABLE_THINKING", True), \
+             patch.object(gemini_client, "client") as mock_client:
+            generate = AsyncMock(return_value=_async_iter([self._make_chunk("答案")]))
+            mock_client.aio.models.generate_content_stream = generate
+            results = [item async for item in gemini_client.call_gemini_stream(
+                messages=[{"role": "user", "content": "复杂问题"}],
+                target_model="gemini-4-hydrogen-low", thinking_level="xhigh",
+            )]
+
+        assert any(item.get("content") == "答案" for item in results)
+        thinking = generate.call_args.kwargs["config"].thinking_config
+        assert thinking.thinking_level.lower() == "xhigh"
+        assert thinking.include_thoughts is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_rebuilds_thinking_config_for_fallback_model(self):
+        """主模型 Hydrogen 失败切到 Argon 时，xhigh 必须按 Argon 校正为 high。"""
+        from app import gemini_client
+
+        primary_client = MagicMock()
+        fallback_client = MagicMock()
+        primary_client.aio.models.generate_content_stream = AsyncMock(
+            side_effect=RuntimeError("primary unavailable")
+        )
+        fallback_generate = AsyncMock(
+            return_value=_async_iter([self._make_chunk("保底答案")])
+        )
+        fallback_client.aio.models.generate_content_stream = fallback_generate
+        with patch.object(gemini_client, "client", primary_client), \
+             patch.object(gemini_client, "fallback_client", fallback_client), \
+             patch.object(gemini_client, "_select_fallback_model", return_value="gemini-4-argon-high"), \
+             patch.object(gemini_client, "_is_circuit_open_safe", AsyncMock(return_value=False)), \
+             patch.object(gemini_client, "_open_circuit_safe", AsyncMock()), \
+             patch.object(gemini_client, "ENABLE_THINKING", True):
+            results = [item async for item in gemini_client.call_gemini_stream(
+                messages=[{"role": "user", "content": "复杂问题"}],
+                target_model="gemini-4-hydrogen-low", thinking_level="xhigh",
+            )]
+
+        assert any(item.get("content") == "保底答案" for item in results)
+        thinking = fallback_generate.call_args.kwargs["config"].thinking_config
+        assert thinking.thinking_level.lower() == "high"
 
     def _make_chunk(self, text, is_thought=False, usage=None, finish_reason=None):
         """构造模拟的 Gemini chunk"""

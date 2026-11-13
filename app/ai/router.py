@@ -2,7 +2,7 @@
 """
 智能路由模块 - 从 dingtalk_bot.py 抽取
 """
-from app.config import GEMINI_MODEL_FAST, DEFAULT_MODEL
+from app.config import GEMINI_MODEL_FAST, DEFAULT_MODEL, MODEL_LITE
 
 # 复杂度关键词
 COMPLEX_KEYWORDS = [
@@ -79,15 +79,17 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
 
     # 默认值
     model = GEMINI_MODEL_FAST
+    route_slot = "fast"
     thinking_level = "low"
     reason = "普通问题"
 
     # 1. 检查是否是简单问候/闲聊
-    if content_len < 20:
+    if content_len < 20 and not has_images:
         for kw in SIMPLE_KEYWORDS:
             if kw in content_lower:
                 return {
-                    "model": GEMINI_MODEL_FAST,
+                    "model": MODEL_LITE,
+                    "route_slot": "lite",
                     "thinking_level": "minimal",
                     "reason": "简单问候"
                 }
@@ -104,12 +106,14 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     # 超复杂问题 → Pro + high
     if pro_count >= 2 or (pro_count >= 1 and complex_count >= 3):
         model = DEFAULT_MODEL
+        route_slot = "pro"
         thinking_level = "high"
         reason = f"深度推理 (Pro关键词={pro_count}, 复杂={complex_count})"
 
     # 复杂问题 + 长文本 → Pro + high
     elif complex_count >= 4 and content_len > 300:
         model = DEFAULT_MODEL
+        route_slot = "pro"
         thinking_level = "high"
         reason = f"复杂长文 (关键词={complex_count}, 长度={content_len})"
 
@@ -147,6 +151,7 @@ def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
 
     return {
         "model": model,
+        "route_slot": route_slot,
         "thinking_level": thinking_level,
         "need_search": should_force_search(content),
         "reason": reason
