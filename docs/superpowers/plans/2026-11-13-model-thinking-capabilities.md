@@ -40,3 +40,11 @@
 - 更新 GPT 的 OPENAI_LITE_SUPPORTS_REASONING / OPENAI_FLASH_SUPPORTS_REASONING 与 Claude 的 OPENAI_LITE_SUPPORTS_REASONING 为 true，其他环境配置经解析比对保持一致。
 - 回滚：deployment-backups/20261113-thinking-capabilities/ 备份源码和修改前环境文件，运行镜像保留各 backend-before-thinking-20261113；新运行镜像为 thinking-capabilities-20261113 的三份后端标签。旧环境备份保留已切换的 Gemini Hydrogen 模型分工。
 - 验证边界：未以额度不足的真实上游做 none/xhigh/max 执行验收；离线请求捕获证明字段已序列化，不证明中转站内部执行或实际节省的 token 数。
+
+## 交付与文档入口
+
+- 实现提交：[0c67ecf](https://github.com/wkin-t/dingtalk-ai-bot/commit/0c67ecfb9b3f397d23b96ab45dd0c5da1bc2d61b)，已推送 origin/master；[GitHub CI](https://github.com/wkin-t/dingtalk-ai-bot/actions/runs/43343674970) 通过。
+- 产品行为、当前三机器人模型分工、完整能力矩阵：[README](../../../README.md#按模型区分思考深度)。
+- 部署开关、精确覆盖示例、验证层级及环境/镜像共同回滚：[部署指南](../../../DEPLOY.md#思考深度配置与验收)。
+- 维护入口：[CLAUDE.md](../../../CLAUDE.md)，按修改思考深度、关闭模式或接入新模型的场景跳转到上述文档。
+- 2026-05 的旧设计保留为历史记录，其“minimal → 省略字段”的行为不代表当前逻辑，也不证明关闭思考。

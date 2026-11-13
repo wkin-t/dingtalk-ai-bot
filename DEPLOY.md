@@ -22,7 +22,7 @@
 |---|---|---|
 | OpenAI 兼容中转站（如自建 sub2api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
 | SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 生图 / 改图始终直连 Google，需要 `SOCKS_PROXY` |
-| dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取，定向 @ 发送 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。登录企业须与机器人企业一致 |
+| dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。成员提及在同一张流式卡片内渲染，不另发提醒；登录企业须与机器人企业一致 |
 | Redis / MySQL | 统计、采样等应用状态及旧路径存储 | 钉钉会话不再读写此处的历史，也不会回退到 `data/history/` |
 | 腾讯云 COS | 生图存储 | 可选，生图功能需要 |
 
@@ -47,7 +47,7 @@ cp .env.anthropic.example .env.anthropic    # Claude
   - GPT / Claude：`OPENAI_API_BASE` + `OPENAI_API_KEY`
   - 三档模型：`MODEL_ROUTER` / `MODEL_LITE` / `MODEL_FAST` / `MODEL_PRO`
 
-> 使用中转站时模型名裸写，不带 provider 前缀（如 `gpt-5.5`、`claude-sonnet-4-6`）。中转站的账号池和模型别名会变化，改模型名前先用 `curl {OPENAI_API_BASE}/models` 核对，改完做一次端到端对话验证。
+> 使用中转站时模型名裸写，不带 provider 前缀（如 `gpt-6.1-sol`、`claude-sonnet-5-5-low`）。中转站的账号池和模型别名会变化，改模型名前先核对对应分组的 `/models`，改完在额度允许时做一次端到端对话验证；暂不可调用时明确记录未完成上游执行验收。
 
 ### 2. 构建并启动
 
@@ -100,6 +100,48 @@ docker exec dingtalk-ai-bot-anthropic dws auth status --readonly -f json
 | `SEARCH_FALLBACK_PROVIDER` | 默认 `none`。设为 `gemini` 会启用旧的"Gemini 搜索摘要注入"兼容路径 |
 | `OPENROUTER_PROVIDER_ORDER` | 仅原生 `AI_BACKEND=openrouter` 使用，默认 `Anthropic`；改成其他 provider 时 prompt cache 可能被静默忽略 |
 | `GEMINI_API_BASE_FALLBACK` / `GEMINI_API_BASE_FALLBACK_KEY` | Gemini 主路径熔断后的保底路径，需要显式配置独立 key，见 `docs/deploy/gemini-circuit-breaker-rollout.md` |
+
+## 思考深度配置与验收
+
+当前模型分工和支持档位以 [README 生产配置](README.md#当前生产部署) 与 [能力表](README.md#按模型区分思考深度) 为准。模型别名的 `-low` / `-high` 后缀不会决定实际请求深度，不能只改模型名就声称已关闭思考。
+
+### 允许客户端实际下发字段
+
+GPT 与 Claude 生产容器均使用 `AI_BACKEND=openai`，独立字段由下面的 capability 声明控制。2026-11-13 已在两个容器启用三档的 reasoning 声明；这些是生产部署值，不代表所有上游都默认接受该参数。
+
+```dotenv
+OPENAI_LITE_SUPPORTS_REASONING=true
+OPENAI_FLASH_SUPPORTS_REASONING=true
+OPENAI_PRO_SUPPORTS_REASONING=true
+```
+
+`FLASH` 对应 `MODEL_FAST`。设为 false 时，客户端不发送该档位的思考字段，卡片显示 `default`；这意味着交给上游默认处理，不是“关闭思考”。支持关闭的模型须实际发送 `reasoning.effort="none"`。Gemini 原生协议使用 `ThinkingConfig.thinking_level`；`include_thoughts=False` 只控制摘要回传。
+
+`MODEL_ROUTER` 的能力不复用 lite 声明。可用 `OPENAI_ROUTER_SUPPORTS_REASONING=true/false` 单独声明；不设置时，客户端识别已知支持思考字段的家族，未知模型不自动加字段。启用后路由分析与后台简单调用使用该模型支持的最低档；不要把这里的参数误当成业务回复的固定深度。
+
+### 覆盖单个模型的能力
+
+仅在确认所用中转通道支持后，才在对应 `.env*` 添加覆盖。示例中的 `custom-model` 是配置格式示例，不是可直接调用的生产型号：
+
+```dotenv
+THINKING_LEVEL_OVERRIDES='{"openai:custom-model":["none","low","medium","high","xhigh","max"]}'
+```
+
+- `backend:完整模型名` 优先于不带后端的完整模型名；不会模糊匹配相似别名。
+- 列表必须非空、无重复，并按 `none → low → medium → high → xhigh → max` 排序；不接受 `minimal` 作为能力声明。
+- 已知模型默认不支持的档位也可以由受信运维配置覆盖，因此不能仅凭模型列表里有 `-disabled` 别名就添加 `none`。模型返回内容不能修改这份配置。
+- 不支持的高档位会降到该模型支持且不高于请求的最高档；不支持关闭时使用最低支持档，不能标成已关闭。
+
+### 应用、验证与回滚
+
+1. 先备份对应 `.env*` 和当前镜像，只查看模型名、能力布尔值与覆盖规则，避免输出密钥。
+2. 只改配置时用对应 compose 的 `up -d --no-deps --no-build --pull never <服务名>` 重新创建容器；修改代码则先构建镜像。`docker restart` 不读取新环境文件。
+3. 核对运行中的模型分工和 capability 声明，再检查健康端点。字段被禁用时的 `default` 不能作为 none/low 生效证据。
+4. 请求层回归：`python -m pytest -q tests/test_thinking_policy.py tests/test_thinking_config.py tests/test_thinking_dispatch.py tests/test_thinking_wire.py`。覆盖 Gemini Hydrogen xhigh、其他 Gemini 4 降级、GPT 显式 none、Claude/GPT max，以及能力开关。
+5. 上游额度允许时，再做一次实际调用确认中转站接受并执行参数。额度耗尽时仅完成离线 HTTP 请求捕获与配置验证，记录未验证边界，不循环消耗额度探测。
+6. 回滚时恢复环境备份、旧源码与旧镜像标签，再用相同 compose 定向 recreate；只回滚镜像不会撤销环境文件变更。
+
+2026-11-13 的源码与环境回滚点为服务器项目下 `deployment-backups/20261113-thinking-capabilities/`，旧镜像标签为 `dingtalk-ai-bot:{gemini,openai,anthropic}-before-thinking-20261113`。Gemini 的 Hydrogen 模型分工已经包含在这份回滚点中。完整测试、部署和离线验收记录见 [本轮实施记录](docs/superpowers/plans/2026-11-13-model-thinking-capabilities.md)。
 
 ## 更新
 

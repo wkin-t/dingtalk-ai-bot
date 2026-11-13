@@ -34,16 +34,15 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 容器名表示接入的**模型家族**，`AI_BACKEND` 表示使用的**协议**。Claude 容器走 OpenAI 兼容中转站的 Responses API，不经过 OpenRouter。该容器 2026-08-25 前名为 `openrouter`，改名是为了消除这个误解。
 
-Claude 生产模型配置（2026-11-12 已验证，来自 `.env.anthropic` 的显式覆盖）：
+生产模型分工（2026-11-13 已核对，来自各 `.env*` 的显式覆盖）：
 
-| 用途 | 配置项 | 模型名 |
-|---|---|---|
-| 路由分析 / Soul 等后台任务 | `MODEL_ROUTER` | `claude-sonnet-5-5-low` |
-| 简单回复 | `MODEL_LITE` | `claude-sonnet-5-5-low` |
-| 日常回复 | `MODEL_FAST` | `claude-sonnet-5-5-low` |
-| 复杂回复 | `MODEL_PRO` | `claude-opus-5-5-low` |
+| 机器人 | `MODEL_ROUTER` / `MODEL_LITE` | `MODEL_FAST` | `MODEL_PRO` |
+|---|---|---|---|
+| Gemini | `gemini-4-hydrogen-low` | `gemini-4-argon-high` | `gemini-4-carbon-high` |
+| GPT | `gpt-6-luna` | `gpt-6.1-terra` | `gpt-6.1-sol` |
+| Claude | `claude-sonnet-5-5-low` | `claude-sonnet-5-5-low` | `claude-opus-5-5-low` |
 
-模型名统一使用中转站的 `low` 后缀；该后缀不用于决定应用下发的思考深度。此次切换只改上述四个变量，现有路由规则、能力配置和 `thinking_level` 参数保持原样。中转站模型别名可能调整，后续切换前需用对应分组的凭据查询 `/v1/models`，切换后验证实际调用。
+模型别名与思考深度字段独立；Claude 别名统一用 `low` 后缀，不代表请求固定使用 low。中转站模型别名可能调整，后续切换前需用对应分组的凭据查询 `/v1/models`。关闭能力与深度规则见下文，部署开关与验收步骤见 [DEPLOY.md](DEPLOY.md#思考深度配置与验收)。
 
 ### 三档智能路由
 
@@ -55,8 +54,6 @@ Claude 生产模型配置（2026-11-12 已验证，来自 `.env.anthropic` 的�
 - `need_search` / `need_image_gen` / `need_image_edit`
 
 路由模型不可用时，降级为 `app/ai/router.py` 的关键词匹配。
-
-Gemini 生产配置（2026-11-13）：`MODEL_ROUTER` 和 `MODEL_LITE` 使用 `gemini-4-hydrogen-low`，`MODEL_FAST` 保持 `gemini-4-argon-high`，`MODEL_PRO` 保持 `gemini-4-carbon-high`；模型别名后缀不代表实际深度。
 
 ### 按模型区分思考深度
 
@@ -234,6 +231,7 @@ python main.py                     # 默认端口 35000
 | `CHAT_COMPLETIONS_BEARER_TOKEN` | **是** | `/v1/chat/completions` 鉴权。fail-closed：未配置时该端点拒绝服务 |
 | `MODEL_ROUTER` / `MODEL_LITE` / `MODEL_FAST` / `MODEL_PRO` | 否 | 路由模型与三档模型，所有后端通用；默认值按 `AI_BACKEND` 选择（见下表） |
 | `THINKING_LEVEL_OVERRIDES` | 否 | JSON 对象，按完整模型名或 `backend:模型名` 覆盖支持档位；默认使用模型能力表，详见“按模型区分思考深度” |
+| `OPENAI_ROUTER_SUPPORTS_REASONING` | 否 | 单独声明 `MODEL_ROUTER` 是否接受思考字段，不复用 lite 开关；不设置时识别已知模型家族，未知型号不自动加字段 |
 | `GEMINI_API_KEY` | 视后端 | Google 直连 key。Gemini 后端需要；生图 / 改图也始终直连 Google |
 | `GEMINI_API_BASE` / `GEMINI_API_BASE_KEY` | 否 | Gemini 走中转站时的 `/v1beta` 原生协议地址（不带路径后缀）与 key |
 | `OPENAI_API_BASE` / `OPENAI_API_KEY` | `openai` 后端 | OpenAI 兼容端点与 key |

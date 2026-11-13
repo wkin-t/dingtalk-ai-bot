@@ -1,5 +1,7 @@
 # LiteLLM OpenAI 兼容后端 实现计划
 
+> ⚠️ **历史文档说明（2026-05）**：本文记录 2026-05 阶段的设计，不作为当前生产参数依据。文中的 `minimal` → 省略参数不能证明已关闭思考；该做法已于 2026-11-13 被按模型能力策略取代。当前规则请参阅：[README.md#按模型区分思考深度](../../../README.md#按模型区分思考深度) 和 [DEPLOY.md#思考深度配置与验收](../../../DEPLOY.md#思考深度配置与验收)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 新增 `AI_BACKEND=openai` 后端，通过 LiteLLM SDK 接入任意 OpenAI 兼容模型。

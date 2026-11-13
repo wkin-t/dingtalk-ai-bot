@@ -1,5 +1,7 @@
 # Vertex AI Claude 集成实施计划
 
+> ⚠️ **历史文档说明（2026-05）**：本文记录 2026-05 阶段的设计，不作为当前生产参数依据。文中的 `minimal` → 省略参数不能证明已关闭思考；该做法已于 2026-11-13 被按模型能力策略取代。当前规则请参阅：[README.md#按模型区分思考深度](../../../README.md#按模型区分思考深度) 和 [DEPLOY.md#思考深度配置与验收](../../../DEPLOY.md#思考深度配置与验收)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 通过 LiteLLM 路由接入 Vertex AI 上的 Claude Sonnet 4 和 Opus 4.1，作为 OpenAI 后端的 provider 选项。
