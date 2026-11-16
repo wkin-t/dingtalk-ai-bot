@@ -49,6 +49,7 @@ from app.ai.handler import TEMPERATURE_MAP
 from app.ai.router import should_force_search
 from app.ai.sampling_clamp import clamp_temperature
 from app.dingtalk_card import DingTalkCardHelper
+from app.card_body import prepare_card_body, confirm_card_body
 from app.gemini_client import (
     analyze_complexity_with_model as _analyze_with_gemini,
     call_gemini_sync,
@@ -1847,6 +1848,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 status_text += f"\n\n<font color='#808080' size='2'>{model_status} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
 
             final_content = card_response
+            card_body_draft = prepare_card_body(
+                corp_id=dws_bundle.corp_id, conversation_id=conversation_id,
+                sender_id=dws_bundle.bot_sender_id,
+                out_track_id=out_track_id, body=history_response,
+            )
+            if card_body_draft is not None:
+                status_text += f"\n\n<font color='#aaaaaa' size='2'>{card_body_draft.footer}</font>"
 
             # Soul 自主进化（异步后台，不阻塞响应）
             try:
@@ -1881,12 +1889,16 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if status_text:
                     final_content += "\n\n---\n" + status_text
                 
-                await self.card_helper.stream_update(
+                fallback_success = await self.card_helper.stream_update(
                     out_track_id,
                     final_content,
                     is_finalize=True,
                     content_key="msgContent"
                 )
+                success = bool(fallback_success)
+
+            if success and card_body_draft is not None:
+                await confirm_card_body(card_body_draft)
             
             print(f"✅ [DingTalk Stream] AI 卡片流式响应完成")
 

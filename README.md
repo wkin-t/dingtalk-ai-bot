@@ -87,14 +87,14 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 ### 多机器人协作
 
-- **消息身份区分**：dws 历史按发送者区分本机器人的 `assistant` 回复与其他成员 / 机器人的 `user` 消息，保留发送人和时间；共享角色重塑层继续处理带 `bot_id` 的其他来源消息
+- **消息身份区分**：dws 历史按发送者区分本机器人的 `assistant` 回复与其他成员 / 机器人的 `user` 消息，保留发送人和时间。本机器人 sender 以 dws 的 `openDingtalkId` 为准；Stream 的 `chatbotUserId` 与它不属于同一身份域，群聊须从当前同企业、同会话（cid）的完整机器人名单按服务端 `DINGTALK_CLIENT_ID` 精确唯一匹配 `robotCode`，不按昵称匹配；共享角色重塑层继续处理带 `bot_id` 的其他来源消息
 - **软清空**：`/clear` 只记录当前机器人的上下文起点，不删数据，也不影响其他机器人
 - **采样覆盖**：`/temp`、`/top_p` 按会话手动设置，24 小时后自动失效；Claude 温度上限 1.0，超出自动截断
 - **System Prompt 分块缓存**：拆成稳定 / 半稳定 / 变动三段，分别标注 `cache_control`
 
 ### 对话管理
 
-- **dws 会话上下文**：群聊和单聊统一从 dws 读取近期消息、引用及媒体资源，不再读写应用自己的 Redis / MySQL / 文件对话历史；旧数据保留
+- **dws 会话上下文**：群聊和单聊统一从 dws 读取近期消息、引用及媒体资源，不再读写应用自己的 Redis / MySQL / 文件对话历史；旧数据保留。dws 仍唯一决定可见范围、顺序、撤回、`/clear` 和历史条数。Stream 的 `chatbotUserId` 与 dws 的 `sender.openDingtalkId` 不属于同一身份域，群聊正文补全须从当前同企业、同会话（cid）的完整机器人名单按服务端 `DINGTALK_CLIENT_ID` 精确匹配唯一 `robotCode`，得到 dws `openDingtalkId`；`bundle.bot_sender_id` 以此值用于角色归属和 preparecard，不按昵称匹配，名单缺失、重复或不完整时不写新缓存。业务发送成功后为确认可见性，dws 查询最多尝试 3 次并受 5 秒查询预算约束，不承诺端到端 5 秒内完成；只有当前查询唯一确定精确 `messageId` 才会为本机器人卡片写入 Redis 短期正文记录。后续只按不可变 `messageId`、企业、会话、该 dws 发送者、精确 footer 引用码和正文摘要匹配来补回原始 Markdown；footer 绑定失败或记录不可用时保留 dws 投影，不扩大 dws 可见范围，也不作为 dws 失败时的回退。单聊当前拿不到机器人名单，不新写正文缓存，但 dws 当前可见且已有缓存记录时仍可恢复
 - **各机器人独立窗口**：继续读取各自 `.env*` 的 `MAX_HISTORY_LENGTH`，先按本机器人的 `/clear` 起点过滤，再取最近 N 条历史消息
 - **纯 @ 接话**：只 @机器人、不加文字，也会读取当前可见上下文并接话；上下文不足时简短询问
 - **群成员与卡片内 @**：通过 dws 获取当前群成员，优先识别群昵称 / 个人昵称；在同一张流式卡片内显示成员提及，不另发提醒消息，不承诺触发通知
@@ -125,7 +125,7 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 钉钉消息由 `app/dingtalk_bot.py::handle_ai_stream` 处理。`app/ai/handler.py` 的 `AIHandler` 只服务企业微信（Deprecated），两条路径共享 `app/ai/` 下的工具函数。
 
-dws 提供会话、引用、资源和成员读取。应用负责上下文截取、媒体解析、模型调用、流式卡片展示和卡片内成员提及；Soul、统计、采样配置仍由应用管理。钉钉会话每轮提交当前可见历史，不使用 `previous_response_id` 续接。
+dws 提供会话、引用、资源和成员读取。应用负责上下文截取、媒体解析、模型调用、流式卡片展示和卡片内成员提及；Soul、统计、采样配置仍由应用管理。钉钉会话每轮提交当前可见历史，不使用 `previous_response_id` 续接。为保留卡片 Markdown 的完整表达，群聊必须先从同企业、同会话的完整机器人名单按 `DINGTALK_CLIENT_ID` 唯一解析 dws `openDingtalkId`，再在业务发送成功后由 dws 可见性查询唯一确认精确 `messageId`；发送后的查询最多 3 次、受 5 秒查询预算约束，不承诺端到端 5 秒。通过校验后本机器人正文才会写入共享 Redis 72 小时；三个生产 bot 共用最多 1024 条，单条最多 64 KiB。后续只按该不可变 `messageId` 及企业、会话、dws 发送者、footer 引用码和正文摘要精确匹配，名单缺失、重复或不完整、记录或 footer 绑定失败时保留 dws 原样投影。`bundle.bot_sender_id` 用于角色归属和 preparecard；单聊不新写缓存，但已有缓存的当前可见记录仍可恢复。`ENABLE_CARD_BODY_RESTORE=false` 时禁用保存和恢复。
 
 ## 项目结构
 
@@ -243,6 +243,7 @@ python main.py                     # 默认端口 35000
 | `MAX_HISTORY_LENGTH` | 否 | 当前容器的历史消息条数上限，默认 50；各 `.env*` 可独立设置，不是 token / 字符总量限制。dws 单次读取安全上限 100 条，含当前消息去重余量 |
 | `DWS_CONTEXT_LIMIT` | 否 | dws 基础读取窗口，默认 40；钉钉主链路会扩大到足以覆盖当前 bot 的历史预算及去重余量，不会把 50 条配置缩成 40 条 |
 | `DWS_EXPECTED_CORP_ID` | 否 | 可显式绑定企业；未设置时使用钉钉 Stream 消息中的机器人企业。无法确认企业或企业不一致时不读取会话 |
+| `ENABLE_CARD_BODY_RESTORE` | 否 | 默认 `true`；设为 `false` 同时禁用卡片正文保存和恢复，dws 可见性、撤回、`/clear` 与普通历史过滤不变 |
 | `DWS_MAX_QUOTE_IMAGES` | 否 | 自动补全的历史图与引用图总上限，默认 4；本轮用户上传图片另行处理 |
 | `DWS_MAX_DOC_BYTES` / `DWS_MAX_DOC_CHARS` | 否 | 单文档大小 / 正文截取上限，默认 10 MiB / 12000 字符 |
 | `REDIS_*` / `MYSQL_*` | 否 | 用于统计、采样等应用状态及旧路径；钉钉对话历史不再通过它们持久化或降级 |
@@ -263,7 +264,7 @@ python main.py                     # 默认端口 35000
 
 > 旧变量 `GEMINI_MODEL`、`OPENAI_MODEL_FLASH`、`OPENROUTER_MODEL_*` 自 2026-05-20 起不再读取。
 
-**Feature flags**（默认均为 `true`，可以单独关闭回滚）：`ENABLE_ROLE_REWRITE`、`ENABLE_CACHE_BLOCKS`、`ENABLE_TOP_P_PIPELINE`、`ENABLE_SAMPLE_OVERRIDE`、`SEARCH_AUTONOMOUS`。
+**Feature flags**（默认均为 `true`，可以单独关闭回滚）：`ENABLE_ROLE_REWRITE`、`ENABLE_CACHE_BLOCKS`、`ENABLE_TOP_P_PIPELINE`、`ENABLE_SAMPLE_OVERRIDE`、`SEARCH_AUTONOMOUS`、`ENABLE_CARD_BODY_RESTORE`。关闭 `ENABLE_CARD_BODY_RESTORE` 会同时禁用卡片正文保存和恢复。
 
 `CLAUDE_SEARCH_BRIDGE_ENABLED` 默认 `false`（与上面相反），是 Claude 搜索桥接的总开关，见上文"Claude 搜索暂时禁用"。
 
@@ -310,9 +311,9 @@ python main.py                     # 默认端口 35000
 
 公网文件下载逐跳校验目标地址；跨 origin（协议、主机或端口变化）会移除自定义鉴权头，HTTPS 不允许降级到 HTTP。下载失败只提供固定错误摘要，不把临时签名 URL、响应正文或底层异常交给模型。
 
-`/clear` 按 `(BOT_ID, 会话)` 保存起点，不删除钉钉记录，也不改变其他机器人的可见范围。例如只对 Claude 执行 `/clear` 后，Gemini / GPT 仍可以读取各自窗口内的旧消息。`/since` 可以查看当前实际可见条数、最早时间和清空状态；`/resume` 取消起点过滤，但不会加载无限历史。清空前的消息如果被用户重新显式引用，会作为本轮提供的内容处理。
+`/clear` 按 `(BOT_ID, 会话)` 保存起点，不删除钉钉记录，也不改变其他机器人的可见范围。例如只对 Claude 执行 `/clear` 后，Gemini / GPT 仍可以读取各自窗口内的旧消息。普通历史先过滤当前 bot 的 `/clear` 起点，再对剩余 dws 可读消息尝试正文补全。`/since` 可以查看当前实际可见条数、最早时间和清空状态；`/resume` 取消起点过滤，但不会加载无限历史。清空前的消息如果被用户重新显式引用，仍沿用既有引用规则，仅在 dws 当前确认可读时作为本轮提供的内容处理。
 
-dws 登录或会话读取失败时，助手明确提示失败并停止该轮模型调用，不会回退旧数据库。部分互动卡片在 dws 中只有占位内容，会标记正文不可读取；不能把占位信息当作完整回复，也不能据图片占位文字猜测画面。
+dws 登录或会话读取失败时，助手明确提示失败并停止该轮模型调用，不会回退旧数据库或 Redis 正文记录。部分互动卡片在 dws 中只有占位内容，会标记正文不可读取；只有当前 dws 可读且 `messageId`、企业、会话、dws `sender.openDingtalkId`、精确 footer 引用码及正文摘要都匹配时，才补回已成功发送的本机器人 Markdown；不能把占位信息当作完整回复，也不能据图片占位文字猜测画面。单聊没有当前机器人名单时不新写缓存，但已有缓存且当前 dws 可见的记录仍可按上述不可变身份条件恢复。2026-11-16 之前已经发送、没有对应正文记录的历史消息不会自动补回。
 
 ### 动态上下文与缓存
 
@@ -333,8 +334,8 @@ dws 查询本身不会使模型缓存失效；能否复用缓存取决于实际�
 | 企业微信接入 | `app/wecom/`、`main.register_wecom_webhook`、`app.ai.handler.AIHandler` | 2026-07-08 起不再维护；生产使用 `app.dingtalk_bot` |
 | OpenClaw Gateway / Tools | `app/openclaw_client.py`、`app/openclaw_tools_client.py`，以及后端分派、配置和钉钉内的 OpenClaw 分支 | 保留旧 HTTP / WebSocket / ASR / 文件工具兼容；当前钉钉历史图片和文档走 dws。语音 / 直接文件消息的旧 Tools 分支尚未迁移 |
 | 旧多平台缓冲器 | `app.ai.buffer.MessageBuffer` | 保留兼容导出；钉钉使用 `GeminiBotHandler.process_buffered_messages` |
-| Redis / MySQL / 文件对话历史 | `app.memory` 的历史读写函数、`app.database.HistoryStorage` / `DistributedLock`、`app.agent_history` | 钉钉改用 dws；`get_session_key`、数据库连接、使用统计、Token 缓存继续使用 |
-| dws 与旧库混合模式 | `fetch_dws_context_bundle(dws_only=False)`、旧历史合并 / 消息入库 / 卡片正文补全，以及 `render_since(history=None)` | 钉钉始终使用 `dws_only=True`，`/since` 显式传入 dws 历史 |
+| Redis / MySQL / 文件对话历史 | `app.memory` 的历史读写函数、`app.database.HistoryStorage` / `DistributedLock`、`app.agent_history` | 钉钉不使用这些组件作为会话历史；`get_session_key`、数据库连接、使用统计、Token 缓存继续使用。卡片正文短期补全使用独立 Redis 记录，不恢复旧历史 |
+| dws 与旧库混合模式 | `fetch_dws_context_bundle(dws_only=False)`、旧历史合并 / 消息入库，以及 `render_since(history=None)` | 钉钉仍使用 `dws_only=True` 决定可见范围；卡片正文补全须先由 dws 唯一确认不可变 `messageId`，再按当前可见性和身份校验短期恢复，不是旧库混合 |
 | 旧历史配置 | `MAX_STORAGE_LENGTH`、`HISTORY_TTL`、`ENABLE_DWS_GROUP_CONTEXT`、`DWS_PERSIST_GROUP_MESSAGES`、`DWS_IGNORE_SENDERS` | 仅服务旧历史 / 混合模式；当前钉钉历史条数由 `MAX_HISTORY_LENGTH` 控制 |
 | 钉钉 Responses 服务端续接 | `app.responses_state` 与 `app.openai_client` 内的 `previous_response_id` 兼容分支 | 仅钉钉会话弃用续接；通用客户端能力、清理旧状态的逻辑仍保留 |
 | 旧搜索摘要注入 | `app.gemini_client.google_search`、`_build_search_fallback_summary`、`SEARCH_FALLBACK_PROVIDER` | 仅保留显式兼容回滚，默认 `none`；后端原生搜索继续使用 |
@@ -344,7 +345,7 @@ dws 查询本身不会使模型缓存失效；能否复用缓存取决于实际�
 
 ### 卡片
 
-卡片保留流式正文、成员提及和底部状态栏，不再显示清空、重试、总结、翻译快捷按钮；卡片全量更新失败时也不会把这些链接追加到正文。`/clear` 等文字指令继续可用。
+卡片保留流式正文、成员提及和底部状态栏，不再显示清空、重试、总结、翻译快捷按钮；卡片全量更新失败时也不会把这些链接追加到正文。为让 dws 能精确关联本机器人原始 Markdown，最终状态栏会附带短期 `ref:cb1-...` 引用码及正文摘要；它不改写正文、不限制引用块、列表、表格或代码块等 Markdown 生成。`/clear` 等文字指令继续可用。
 
 状态栏示例：
 

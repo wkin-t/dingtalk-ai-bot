@@ -11,6 +11,100 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified_sender", ["dws-bot-id", ""])
+async def test_bot_sender_uses_verified_robot_code_mapping_instead_of_stream_id(verified_sender):
+    from app.dws_context import DwsAuthIdentity, DwsCorpCheckResult, fetch_dws_context_bundle
+
+    row = {"messageId": "card", "conversationId": "conv", "senderId": "dws-bot-id" if verified_sender else "stream-bot-id",
+           "sender": "GPT小助手", "sendType": "robot", "text": "已发送的卡片"}
+    incoming = SimpleNamespace(chatbot_user_id="stream-bot-id", chatbot_corp_id="corp", at_users=[{"dingtalk_id": "stream-bot-id"}],
+                              text=SimpleNamespace(content="继续", extensions={}), extensions={})
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock,
+               return_value=DwsCorpCheckResult(allowed=True, identity=DwsAuthIdentity(corp_id="corp"))), \
+         patch("app.dws_context.cfg.DINGTALK_CLIENT_ID", "trusted-robot-code"), \
+         patch("app.dws_context.resolve_card_sender_id", new_callable=AsyncMock,
+               return_value=verified_sender, create=True) as resolve, \
+         patch("app.dws_context._has_non_bot_at_users", return_value=False) as has_other, \
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value={"messages": [row]}):
+        bundle = await fetch_dws_context_bundle(conversation_id="conv", is_group=True,
+            incoming_messages=[incoming], current_message_ids=[], raw_user_content="继续", history_messages=[], dws_only=True)
+    resolve.assert_awaited_once_with(corp_id="corp", conversation_id="conv", robot_code="trusted-robot-code")
+    has_other.assert_called_once_with([incoming], "stream-bot-id")
+    assert bundle.bot_sender_id == verified_sender
+    assert bundle.merged_history[0]["role"] == ("assistant" if verified_sender else "user")
+
+
+@pytest.mark.asyncio
+async def test_card_body_completion_runs_only_for_selected_visible_history():
+    from app.dws_context import DwsAuthIdentity, DwsCorpCheckResult, fetch_dws_context_bundle
+    rows = [
+        {"messageId": str(i), "conversationId": "conv", "senderId": "bot", "sender": "机器人",
+         "text": "投影正文\nref:token", "createTime": f"2026-11-16 10:00:0{i}"}
+        for i in range(1, 6)
+    ]
+    async def restore(items, **scope):
+        assert scope == {"corp_id": "corp", "conversation_id": "conv"}
+        assert [item["message_id"] for item in items] == ["3", "4"]
+        return [{**item, "display_text": "> 完整引用"} for item in items]
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock,
+               return_value=DwsCorpCheckResult(allowed=True, identity=DwsAuthIdentity(corp_id="corp"))), \
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value={"messages": rows}), \
+         patch("app.dws_context.restore_card_bodies", side_effect=restore, create=True) as complete, \
+         patch("app.dws_context.cfg.MAX_HISTORY_LENGTH", 2):
+        bundle = await fetch_dws_context_bundle(conversation_id="conv", is_group=False,
+            incoming_messages=[], current_message_ids=["5"], raw_user_content="怎么看", history_messages=[],
+            cutoff_at="2026-11-16 10:00:01", dws_only=True)
+    assert bundle.corp_id == "corp"
+    assert [m["message_id"] for m in bundle.merged_history] == ["3", "4"]
+    assert [m["content"] for m in bundle.merged_history] == ["> 完整引用", "> 完整引用"]
+    complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recalled_card_never_reaches_body_completion():
+    from app.dws_context import DwsAuthIdentity, DwsCorpCheckResult, fetch_dws_context_bundle
+    row = {"messageId": "old", "conversationId": "conv", "senderId": "bot", "text": "ref:token", "isRecalled": True}
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock,
+               return_value=DwsCorpCheckResult(allowed=True, identity=DwsAuthIdentity(corp_id="corp"))), \
+         patch("app.dws_context.run_dws_readonly_json", new_callable=AsyncMock, return_value={"messages": [row]}), \
+         patch("app.dws_context.restore_card_bodies", new_callable=AsyncMock, create=True) as complete:
+        bundle = await fetch_dws_context_bundle(conversation_id="conv", is_group=False,
+            incoming_messages=[], current_message_ids=[], raw_user_content="怎么看", history_messages=[], dws_only=True)
+    assert bundle.merged_history == []
+    complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["recent", "mget", "not_returned"])
+async def test_card_quote_body_requires_current_dws_readability(source):
+    from app.dws_context import DwsAuthIdentity, DwsCorpCheckResult, fetch_dws_context_bundle
+    current = {"messageId": "current", "conversationId": "conv", "sender": "甲", "text": "怎么看"}
+    target = {"messageId": "quoted", "conversationId": "conv", "senderId": "bot", "sender": "机器人",
+              "text": "投影正文\nref:token"}
+    incoming = SimpleNamespace(message_id="current", sender_nick="甲", chatbot_user_id="bot", chatbot_corp_id="corp",
+        text=SimpleNamespace(extensions={"repliedMsg": {"messageId": "quoted", "text": "旧回调不可恢复"}}))
+    async def query(args, **kwargs):
+        if args[:2] == ["chat", "+messages-mget"]:
+            return {"messages": [target]} if source == "mget" else {"messages": [], "notFoundMessageIds": ["quoted"]}
+        return {"messages": [target, current] if source == "recent" else [current]}
+    async def restore(items, **scope):
+        return [{**item, "display_text": "> 完整引用 SECRET"} if item["message_id"] == "quoted" else item for item in items]
+    with patch("app.dws_context.check_dws_corp_access", new_callable=AsyncMock,
+               return_value=DwsCorpCheckResult(allowed=True, identity=DwsAuthIdentity(corp_id="corp"))), \
+         patch("app.dws_context.run_dws_readonly_json", side_effect=query), \
+         patch("app.dws_context.restore_card_bodies", side_effect=restore) as complete:
+        bundle = await fetch_dws_context_bundle(conversation_id="conv", is_group=False, incoming_messages=[incoming],
+            current_message_ids=["current"], raw_user_content="怎么看", history_messages=[], dws_only=True)
+    assert "旧回调不可恢复" not in bundle.quote_prompt_block
+    if source == "not_returned":
+        assert bundle.quotes == []
+        complete.assert_not_awaited()
+    else:
+        assert bundle.quotes[0].text == "> 完整引用 SECRET"
+        assert "完整引用 SECRET" in bundle.quote_prompt_block
+
+
 @pytest.fixture
 def read_dws_only_window():
     from app.dws_context import fetch_dws_context_bundle, DwsCorpCheckResult
@@ -230,7 +324,7 @@ async def test_dws_only_history_includes_bots_and_media_without_local_history():
         result = await fetch_dws_context_bundle(conversation_id="conv", is_group=False, incoming_messages=[SimpleNamespace(chatbot_user_id="bot")], current_message_ids=[], raw_user_content="怎么看", history_messages=[{"role": "user", "content": "旧库残留"}], dws_only=True)
     assert result.dws_available
     assert all("旧库残留" not in m["content"] for m in result.merged_history)
-    assert any(m["role"] == "assistant" and m["content"] == "之前的回答" for m in result.merged_history)
+    assert any(m["role"] == "user" and m["content"] == "之前的回答" for m in result.merged_history)
     assert result.context_images == [b"png"]
     assert media.await_args.kwargs["quotes"][0].message_id == "p"
 

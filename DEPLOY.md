@@ -22,8 +22,8 @@
 |---|---|---|
 | OpenAI 兼容中转站（如自建 sub2api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
 | SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 生图 / 改图始终直连 Google，需要 `SOCKS_PROXY` |
-| dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。成员提及在同一张流式卡片内渲染，不另发提醒；登录企业须与机器人企业一致 |
-| Redis / MySQL | 统计、采样等应用状态及旧路径存储 | 钉钉会话不再读写此处的历史，也不会回退到 `data/history/` |
+| dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。dws 决定会话可见范围、顺序、撤回、`/clear` 和历史条数；群聊还需返回当前同企业、同会话的完整机器人名单，供 `DINGTALK_CLIENT_ID` 精确匹配唯一 `robotCode` 到 dws `openDingtalkId`；成员提及在同一张流式卡片内渲染，不另发提醒；登录企业须与机器人企业一致 |
+| Redis / MySQL | 统计、采样等应用状态及旧路径存储；卡片正文短期补全 | 钉钉会话不从 Redis / MySQL 恢复旧历史，也不在 dws 失败时回退；Stream `chatbotUserId` 不直接当作 dws sender；群聊身份名单缺失、重复或不完整时不写新缓存。业务发送成功后，dws 可见性查询最多尝试 3 次并受 5 秒查询预算约束，只有当前查询唯一确定精确 `messageId` 才写入本机器人卡片正文；读取只匹配不可变 `messageId` 和 dws `openDingtalkId`，footer 绑定失败时保留 dws 投影 |
 | 腾讯云 COS | 生图存储 | 可选，生图功能需要 |
 
 ## 部署步骤
@@ -68,7 +68,7 @@ curl http://localhost:35001/
 curl http://localhost:35002/
 ```
 
-最后在钉钉里分别验证 `@机器人 + 问题`、纯 `@机器人` 和 `/since`。涉及成员提醒时确认正文完整、@ 可点击；涉及 `/clear` 时确认只改变被指定机器人的可见范围，`/resume` 后仍受其历史条数上限限制。只看到容器启动成功，不代表会话读取、模型调用或客户端展示可用。
+最后在钉钉里分别验证 `@机器人 + 问题`、纯 `@机器人` 和 `/since`。群聊正文补全测试先确认当前同企业、同会话的完整机器人名单能按服务端 `DINGTALK_CLIENT_ID` 唯一解析 dws `openDingtalkId`；名单缺失、重复或不完整时应不写新缓存。涉及成员提醒时确认正文完整、@ 可点击；涉及 Markdown 引用、列表、表格或代码块时，从 dws 回读同一条卡片并确认关键文字完整进入下一轮模型输入，发送后可见性查询最多 3 次且受 5 秒查询预算约束，不以此承诺端到端 5 秒；涉及 `/clear` 时确认普通历史先过滤起点再尝试补全，同时验证清空前的消息经 dws 当前确认可读后仍可按既有规则通过显式引用供本轮使用；`/resume` 后仍受其历史条数上限限制。只看到容器启动成功，不代表会话读取、模型调用、正文补全或客户端展示可用。
 
 旧历史表初始化会尝试补齐 `external_msg_id` 列和幂等唯一索引。仅 MySQL 的重复列（1060）和重复索引（1061）视为已完成；其他迁移错误会让数据库初始化返回失败，并保留原有降级处理，不能据此宣称旧历史表已升级成功。MySQL DDL 可能部分落地，例如列已添加但索引失败；排查权限、锁等待或索引冲突后可幂等重试，代码回滚不会撤销已完成的 DDL。先备份再处理数据库，不手工忽略错误。钉钉 dws 历史不会因此回退到旧库。
 
@@ -82,6 +82,12 @@ docker exec dingtalk-ai-bot-anthropic dws auth status --readonly -f json
 
 没有有效登录态时，通过 dws 官方登录流程登录与机器人一致的企业。镜像使用 `/app/data-dws/config` 和 `/app/data-dws/keychain`，三个容器共享同一挂载目录；这些目录含登录凭据，不提交、不打入镜像。`DWS_EXPECTED_CORP_ID` 可显式固定企业，未设置时逐请求使用 Stream 自带的 `chatbot_corp_id` 校验。
 
+### 卡片 Markdown 正文回读验收
+
+2026-11-16 起，卡片正文继续按模型生成的 Markdown 原样发送，不把引用块、列表、表格或代码块降级为普通文本。Stream 的 `chatbotUserId` 与 dws 的 `sender.openDingtalkId` 不属于同一身份域；仅群聊从当前同企业、同会话（cid）的完整机器人名单按服务端配置 `DINGTALK_CLIENT_ID` 精确匹配唯一 `robotCode`，得到 dws `openDingtalkId`，不按昵称匹配。`bundle.bot_sender_id` 使用该身份值供角色归属和 preparecard 使用；名单缺失、重复或不完整时不写新缓存。业务发送成功后，为确认可见性最多查询 dws 3 次并受 5 秒查询预算约束；这是查询预算，不承诺端到端 5 秒内完成。只有 dws 当前查询唯一确定精确 `messageId`，才能把本机器人正文及 72 小时有效的 `ref:cb1-...` footer 引用码写入共享 Redis；读取只匹配这条不可变 `messageId`、dws sender 和其他精确绑定条件，不能用同一发送者的旧 footer 或时间近似重放。三个生产 bot 共用最多 1024 条记录，单条正文上限 64 KiB；footer 绑定失败、Redis 不可用、消息撤回、超出 `/clear` 或历史窗口时继续使用 dws 投影，不恢复旧数据库历史。单聊当前拿不到机器人名单，不新写缓存，但 dws 当前可见且已有缓存记录时仍可恢复。`ENABLE_CARD_BODY_RESTORE=false` 时同时禁用保存和恢复。
+
+验收至少包含一条群聊中带多行 Markdown 引用和一条普通段落的测试卡片：先确认机器人名单完整并唯一解析 dws sender，再检查钉钉显示仍保留原排版，用 `dws chat message list` 或 `dws chat +messages-mget` 读取同一消息，确认引用文字进入下一轮实际模型输入。单聊当前不应新写正文缓存，但已有缓存且当前 dws 可见的消息仍可按不可变 `messageId` 恢复。旧消息若没有对应正文记录，不应声称可以恢复；仅有容器健康或卡片接口 200 也不算正文回读验收通过。
+
 各 bot 的 Soul、采样文件和 `/clear` 起点仍位于各自 `/app/data` 挂载中。升级时保留 `data/`、`data-openai/`、`data-anthropic/` 和 `data-dws/`，不需要把旧 Redis / MySQL 历史导入 dws。
 
 ## 环境变量要点
@@ -94,6 +100,7 @@ docker exec dingtalk-ai-bot-anthropic dws auth status --readonly -f json
 | `MAX_HISTORY_LENGTH` | 各 `.env*` 独立设置历史消息条数。2026-11-12 生产值：Gemini 50、GPT 50、Claude 25。先应用当前 bot 的 `/clear` 过滤，再取最近 N 条；不是 token 总量上限 |
 | `DWS_CONTEXT_LIMIT` | 默认 40。钉钉主链路会按 `MAX_HISTORY_LENGTH` 和当前消息去重余量扩大窗口，单次读取最多 100 条；保持现有 50 / 50 / 25 配置即可 |
 | `DWS_EXPECTED_CORP_ID` | 可选企业绑定。登录不可用或企业无法确认时停止读取，不使用旧库兜底；不要混用其他企业的共享登录态 |
+| `ENABLE_CARD_BODY_RESTORE` | 默认 `true`。设为 `false` 同时禁用卡片正文保存和恢复；dws 可见性、撤回、`/clear` 和普通历史过滤不变 |
 | `GEMINI_API_BASE` | 填中转站的 Gemini 原生协议入口，SDK 会自动拼接 `/v1beta`。**路径前缀取决于中转站**：sub2api 需要带 `/antigravity`（如 `https://<中转站域名>/antigravity`），不带会返回 400 `API key group platform is not gemini`；标准 `/v1beta` 协议层的中转站则不能带后缀。中转站在公网时用 `https`，`http` 会被 302 跳转导致 POST 失败 |
 | `GEMINI_API_KEY` | 保持为 Google 直连 key。生图的 `:predict` 端点中转站不覆盖，始终直连 |
 | `OPENAI_{FLASH,PRO}_SUPPORTS_SEARCH` | 只有上游真正执行 Responses `web_search` 时才会有搜索效果。不同中转站对不同上游的处理不一样（如 sub2api 上的 Claude 会在服务端搜索并把结果拼进正文，但不产生标准搜索事件），换中转站后需要重新实测 |

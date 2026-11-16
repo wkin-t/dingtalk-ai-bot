@@ -549,7 +549,8 @@ class DingTalkCardHelper:
                 )
 
                 if response.status_code == 200:
-                    return True
+                    body = response.body
+                    return bool(body is not None and body.success is True and body.result is True)
 
                 if response.status_code in (401, 403):
                     return "401"
@@ -645,6 +646,10 @@ class DingTalkCardHelper:
                 )
 
                 if response.status_code == 200:
+                    body = response.body
+                    if body is None or body.success is not True or body.result is not True:
+                        print("⚠️ 卡片更新未取得业务成功回执")
+                        return False
                     print(f"✅ 卡片更新成功: {out_track_id}")
                     return True
 

@@ -21,6 +21,7 @@ from typing import Any, Collection, Sequence
 
 from app import config as cfg
 from app.ai.history_format import get_bot_source_name
+from app.card_body import restore_card_bodies, resolve_card_sender_id
 from app.dws_files import QuotedDocExtract, fetch_quoted_media_and_docs
 
 _SHANGHAI_TZ = timezone(timedelta(hours=8))
@@ -485,7 +486,9 @@ class DwsContextBundle:
     """单次请求由 dws 与 Stream 解析出的群聊历史、引用上下文、媒体文档与还原文本包。"""
 
     dws_available: bool = False
+    corp_id: str = ""
     context_error: str = ""
+    bot_sender_id: str = ""
     context_images: list[bytes] = field(default_factory=list)
     # 明确引用到、但不在可见历史窗口内的图片消息；调用层应将其作为独立
     # 多模态 user 消息附在当前输入之前，避免把邻居图片伪装成本轮上传。
@@ -1765,6 +1768,17 @@ def _item_to_quote_info(item: dict[str, Any]) -> DwsQuoteInfo:
     )
 
 
+async def _restore_readable_card_quotes(quotes: list[DwsQuoteInfo], corp_id: str, conversation_id: str) -> None:
+    items = [
+        {"message_id": q.message_id, "conversation_id": q.conversation_id or conversation_id,
+         "sender_id": q.sender_id, "display_text": q.text}
+        for q in quotes
+    ]
+    completed = await restore_card_bodies(items, corp_id=corp_id, conversation_id=conversation_id)
+    for quote, item in zip(quotes, completed):
+        quote.text = item["display_text"]
+
+
 def _enrich_quote_from_history(
     quote: DwsQuoteInfo,
     history_messages: Sequence[dict[str, Any]],
@@ -2268,6 +2282,7 @@ async def fetch_dws_context_bundle(
     # 1.5 企业一致性门禁（严格 fail-closed）
     need_dws = dws_only or (is_group and bool(conversation_id) and cfg.ENABLE_DWS_GROUP_CONTEXT) or cfg.ENABLE_DWS_QUOTE_CONTEXT
     dws_ready = False
+    verified_corp_id = ""
     if need_dws:
         corp_check = await check_dws_corp_access(expected_corp_ids=expected_corp_ids)
         if corp_check.corp_mismatch_error:
@@ -2277,8 +2292,17 @@ async def fetch_dws_context_bundle(
                 corp_mismatch_error=corp_check.corp_mismatch_error,
             )
         dws_ready = corp_check.allowed
+        if dws_ready and corp_check.identity is not None:
+            verified_corp_id = corp_check.identity.corp_id
     if dws_only and not dws_ready:
         return DwsContextBundle(context_error="dws 登录或企业校验不可用，无法读取会话。请管理员检查登录状态。")
+
+    bot_sender_id = ""
+    if dws_only and dws_ready and is_group and conversation_id and cfg.DINGTALK_CLIENT_ID:
+        bot_sender_id = await resolve_card_sender_id(
+            corp_id=verified_corp_id, conversation_id=conversation_id,
+            robot_code=cfg.DINGTALK_CLIENT_ID,
+        )
 
     recent_dws_items: list[dict[str, Any]] = []
     dws_available = False
@@ -2480,6 +2504,9 @@ async def fetch_dws_context_bundle(
         for idx, q in enumerate(quotes):
             quotes[idx] = _enrich_quote_from_history(q, history_messages)
 
+        if dws_only and verified_corp_id and quotes:
+            await _restore_readable_card_quotes(quotes, verified_corp_id, conversation_id)
+
     if dws_only and recalled_message_ids:
         # quote mget 可能在 recent list 之后发现同一消息的撤回别名；
         # 此时仍处于历史构造前，先统一排除，避免正文从普通历史路径绕回模型。
@@ -2520,10 +2547,11 @@ async def fetch_dws_context_bundle(
     if dws_only:
         merged_history = []
         persistable_messages = []
+        history_body_items = []
         for item in recent_dws_items:
             if item["message_id"] in curr_id_set or (cutoff_at and item["timestamp"] and item["timestamp"] <= cutoff_at):
                 continue
-            own = bool(chatbot_user_id and item["sender_id"] == chatbot_user_id)
+            own = bool(bot_sender_id and item["sender_id"] == bot_sender_id)
             text = item["display_text"] or ("[钉钉卡片正文不可读取]" if item["is_bot_like"] else "")
             if item["is_noise"] and item["is_bot_like"]:
                 text = "[钉钉卡片正文不可读取]"
@@ -2531,9 +2559,19 @@ async def fetch_dws_context_bundle(
                 continue
             merged_history.append({"role": "assistant" if own else "user", "content": text,
                                    "timestamp": item["timestamp"], "sender_nick": item["sender"], "message_id": item["message_id"], "bot_id": cfg.BOT_ID if own else None})
+            history_body_items.append(item)
             context_media.append(_item_to_quote_info(item))
         merged_history = merged_history[-cfg.MAX_HISTORY_LENGTH:]
         context_media = context_media[-cfg.MAX_HISTORY_LENGTH:]
+        history_body_items = history_body_items[-cfg.MAX_HISTORY_LENGTH:]
+        if verified_corp_id and history_body_items:
+            completed = await restore_card_bodies(
+                history_body_items, corp_id=verified_corp_id, conversation_id=conversation_id,
+            )
+            for message, quote, original, item in zip(merged_history, context_media, history_body_items, completed):
+                if item["display_text"] != original["display_text"]:
+                    message["content"] = item["display_text"]
+                    quote.text = item["display_text"]
         history_media_entries = {q.message_id: message for q, message in zip(context_media, merged_history)}
 
     # 5. 若存在引用消息（含单聊与群聊），提取前后邻居上下文、只读图片字节与只读文档正文
@@ -2649,6 +2687,15 @@ async def fetch_dws_context_bundle(
                 after_count=after_val,
                 selected_message_ids=selected_neighbor_ids,
             )
+            if dws_only and verified_corp_id and selected_neighbor_ids:
+                selected_items = [item for item in neighbor_source_items if item["message_id"] in selected_neighbor_ids]
+                completed = await restore_card_bodies(selected_items, corp_id=verified_corp_id, conversation_id=conversation_id)
+                completed_by_id = {item["message_id"]: item for item in completed}
+                neighbor_source_items = [completed_by_id.get(item["message_id"], item) for item in neighbor_source_items]
+                n_lines = _build_quote_neighbor_lines(
+                    neighbor_items=neighbor_source_items, history_messages=history_messages, quote=q,
+                    current_message_ids=curr_id_set, before_count=before_val, after_count=after_val,
+                )
             quotes_with_neighbors.append((q, n_lines))
             # 后续分页可能才返回撤回状态；先前已经构造的邻居文本也须受保护。
             for item in neighbor_source_items:
@@ -2797,6 +2844,8 @@ async def fetch_dws_context_bundle(
 
     return DwsContextBundle(
         dws_available=dws_available,
+        corp_id=verified_corp_id,
+        bot_sender_id=bot_sender_id,
         merged_history=merged_history,
         persistable_messages=persistable_messages,
         restored_user_content=restored_user_content,

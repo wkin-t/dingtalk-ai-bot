@@ -4,9 +4,30 @@
 import json
 import asyncio
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["stream", "full"])
+@pytest.mark.parametrize("business_success,business_result,expected", [(True, True, True), (False, True, False), (True, False, False)])
+async def test_card_update_requires_business_ack(operation, business_success, business_result, expected):
+    import app.dingtalk_card as dc
+    from types import SimpleNamespace
+
+    helper = dc.DingTalkCardHelper("robot-test", "secret-test")
+    helper.get_access_token = AsyncMock(return_value="test-token")
+    helper.access_token = "test-token"
+    response = SimpleNamespace(status_code=200, body=SimpleNamespace(success=business_success, result=business_result))
+    if operation == "stream":
+        helper.card_client.streaming_update_with_options = MagicMock(return_value=response)
+        actual = await helper.stream_update("track", "> 原始正文", is_finalize=True)
+    else:
+        helper.card_client.update_card_with_options = MagicMock(return_value=response)
+        actual = await helper.update_card("track", {"msgContent": "> 原始正文"})
+    assert actual is expected
 
 
 def _make_helper(dc, token="access-token-test"):

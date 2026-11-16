@@ -688,6 +688,8 @@ async def _run_dingtalk_consumer(
     full_update_success=True,
     typing_task_factory=None,
     observed_stream_updates=None,
+    card_corp_id="",
+    stream_update_success=True,
 ):
     """运行真实 DingTalk handler 收尾逻辑，返回最终卡片全量更新数据。"""
     from app.dingtalk_bot import GeminiBotHandler
@@ -697,7 +699,7 @@ async def _run_dingtalk_consumer(
     handler.card_helper = MagicMock()
     handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
     handler.card_helper.create_and_deliver = AsyncMock(return_value="track-test")
-    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.stream_update = AsyncMock(return_value=stream_update_success)
     if observed_stream_updates is not None:
         handler.card_helper.stream_update.side_effect = lambda *args, **kwargs: observed_stream_updates.append((args, kwargs))
     handler.card_helper.update_card = AsyncMock(return_value=full_update_success)
@@ -706,6 +708,7 @@ async def _run_dingtalk_consumer(
         sender_nick="测试用户",
         conversation_id="conversation-test",
         conversation_type="2" if members else "1",
+        chatbot_user_id="stream-bot-sender-test",
     )
 
     route_result = {
@@ -719,7 +722,7 @@ async def _run_dingtalk_consumer(
     soul_hook = MagicMock(return_value=None)
 
     from app.dws_context import DwsContextBundle, DwsCorpCheckResult
-    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True, members=members or [], members_complete=True)), \
+    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True, members=members or [], members_complete=True, corp_id=card_corp_id, bot_sender_id="bot-sender-test" if card_corp_id else "")), \
          patch("app.dingtalk_bot.check_dws_corp_access", new_callable=AsyncMock, return_value=DwsCorpCheckResult(allowed=True)), \
          patch("app.dws_members.send_mentions", new_callable=AsyncMock) as send, \
          patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
@@ -753,6 +756,39 @@ async def _run_dingtalk_consumer(
     if return_soul_hook:
         return result, soul_hook
     return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_success,stream_success,confirmed", [(True, True, True), (False, True, True), (False, False, False)])
+async def test_final_card_body_is_confirmed_only_after_ack(full_success, stream_success, confirmed):
+    body = "> 原始引用\n\n```text\na > b\n```"
+    draft = SimpleNamespace(footer="ref:cb1-test.reference")
+    with patch("app.dingtalk_bot.prepare_card_body", return_value=draft) as prepare, \
+         patch("app.dingtalk_bot.confirm_card_body", new_callable=AsyncMock, return_value=True) as confirm:
+        result, updates = await _run_dingtalk_consumer(
+            [{"content": body}], card_corp_id="corp-test", full_update_success=full_success,
+            stream_update_success=stream_success, return_stream_updates=True,
+        )
+    assert result["msgContent"] == body
+    assert draft.footer in result["statusText"]
+    assert prepare.call_args.kwargs == {
+        "corp_id": "corp-test", "conversation_id": "conversation-test", "sender_id": "bot-sender-test",
+        "out_track_id": "track-test", "body": body,
+    }
+    assert confirm.await_count == int(confirmed)
+    if not full_success:
+        body_updates = [call for call in updates if call.kwargs.get("content_key") == "msgContent"]
+        assert draft.footer in body_updates[-1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_card_body_restore_skips_unverified_corp():
+    with patch("app.dingtalk_bot.prepare_card_body", return_value=None) as prepare, \
+         patch("app.dingtalk_bot.confirm_card_body", new_callable=AsyncMock) as confirm:
+        result = await _run_dingtalk_consumer([{"content": "> 保留引用"}])
+    assert result["msgContent"] == "> 保留引用"
+    assert prepare.call_args.kwargs["corp_id"] == ""
+    confirm.assert_not_awaited()
 
 
 @pytest.mark.asyncio
