@@ -11,7 +11,7 @@ gunicorn
 # 钉钉 Stream 模式 SDK (官方 PyPI 包)
 dingtalk-stream==0.24.3
 # 钉钉 OpenAPI SDK
-alibabacloud_dingtalk==2.2.65
+alibabacloud_dingtalk==2.2.67
 # 异步 HTTP 客户端
 aiohttp
 # aiohttp/websockets SOCKS 支持
