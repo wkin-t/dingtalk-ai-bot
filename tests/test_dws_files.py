@@ -125,6 +125,134 @@ async def test_failed_image_candidates_have_a_bounded_attempt_budget(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_media_deduplicates_same_bytes_from_alias_resource_ids(monkeypatch):
+    monkeypatch.setattr(dws_files.cfg, "DWS_QUOTE_FETCH_MEDIA", True)
+    monkeypatch.setattr(dws_files.cfg, "DWS_MAX_QUOTE_IMAGES", 4)
+    image = AsyncMock(return_value=b"same-image")
+    monkeypatch.setattr(dws_files, "_fetch_single_quoted_image", image)
+    quote = SimpleNamespace(conversation_id="review", message_id="mixed", text="", resources=[
+        {"resourceType": "image", "resourceIdType": "mediaId", "resourceId": "alias-a",
+         "forwardedResource": True, "resourceRefs": {"download": {"arguments": {
+             "message-id": "child", "open-conversation-id": "source", "resource-id": "alias-a"}}}},
+        {"resourceType": "image", "resourceIdType": "mediaId", "resourceId": "alias-b",
+         "forwardedResource": True, "resourceRefs": {"download": {"arguments": {
+             "message-id": "child", "open-conversation-id": "source", "resource-id": "alias-b"}}}},
+    ])
+
+    result = await dws_files.fetch_quoted_media_and_docs(
+        quotes=[quote], conversation_id="review", dws_ready=True,
+        run_dws_fn=AsyncMock(), max_images=2, max_documents=0,
+    )
+
+    assert result.images == [b"same-image"]
+    assert image.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forwarded_alias_attempts_have_a_hard_bound(monkeypatch):
+    monkeypatch.setattr(dws_files.cfg, "DWS_QUOTE_FETCH_MEDIA", True)
+    monkeypatch.setattr(dws_files.cfg, "DWS_MAX_QUOTE_IMAGES", 4)
+    image = AsyncMock(return_value=b"same-image")
+    monkeypatch.setattr(dws_files, "_fetch_single_quoted_image", image)
+    resources = [
+        {
+            "resourceType": "image",
+            "resourceIdType": "mediaId",
+            "resourceId": f"alias-{index}",
+            "forwardedResource": True,
+            "resourceRefs": {"download": {"arguments": {
+                "message-id": "child",
+                "open-conversation-id": "source",
+                "resource-id": f"alias-{index}",
+            }}},
+        }
+        for index in range(30)
+    ]
+    quote = SimpleNamespace(
+        conversation_id="parent-conversation",
+        message_id="parent-message",
+        text="",
+        resources=resources,
+    )
+
+    result = await dws_files.fetch_quoted_media_and_docs(
+        quotes=[quote], conversation_id="parent-conversation", dws_ready=True,
+        run_dws_fn=AsyncMock(), max_images=4, max_documents=0,
+    )
+
+    assert result.images == [b"same-image"]
+    assert image.await_count == 8
+
+
+@pytest.mark.asyncio
+async def test_forwarded_bytes_are_not_deduplicated_across_parent_scopes(monkeypatch):
+    monkeypatch.setattr(dws_files.cfg, "DWS_QUOTE_FETCH_MEDIA", True)
+    monkeypatch.setattr(dws_files.cfg, "DWS_MAX_QUOTE_IMAGES", 4)
+    image = AsyncMock(return_value=b"same-image")
+    monkeypatch.setattr(dws_files, "_fetch_single_quoted_image", image)
+
+    def resource(resource_id):
+        return {
+            "resourceType": "image",
+            "resourceIdType": "mediaId",
+            "resourceId": resource_id,
+            "forwardedResource": True,
+            "resourceRefs": {"download": {"arguments": {
+                "message-id": "child",
+                "open-conversation-id": "source",
+                "resource-id": resource_id,
+            }}},
+        }
+
+    quotes = [
+        SimpleNamespace(conversation_id="parent-conversation", message_id=f"parent-{index}", text="", resources=[resource("same-resource")])
+        for index in range(2)
+    ]
+    result = await dws_files.fetch_quoted_media_and_docs(
+        quotes=quotes, conversation_id="parent-conversation", dws_ready=True,
+        run_dws_fn=AsyncMock(), max_images=4, max_documents=0,
+    )
+
+    assert result.images == [b"same-image", b"same-image"]
+    assert image.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forwarded_same_resource_id_from_different_children_is_not_deduplicated(monkeypatch):
+    monkeypatch.setattr(dws_files.cfg, "DWS_QUOTE_FETCH_MEDIA", True)
+    monkeypatch.setattr(dws_files.cfg, "DWS_MAX_QUOTE_IMAGES", 4)
+    image = AsyncMock(return_value=b"same-image")
+    monkeypatch.setattr(dws_files, "_fetch_single_quoted_image", image)
+
+    def resource(child_id):
+        return {
+            "resourceType": "image",
+            "resourceIdType": "mediaId",
+            "resourceId": "same-resource",
+            "forwardedResource": True,
+            "resourceRefs": {"download": {"arguments": {
+                "message-id": child_id,
+                "open-conversation-id": "source-group",
+                "resource-id": "same-resource",
+            }}},
+        }
+
+    quote = SimpleNamespace(
+        conversation_id="parent-conversation",
+        message_id="parent-message",
+        text="",
+        resources=[resource("child-a"), resource("child-b")],
+    )
+    result = await dws_files.fetch_quoted_media_and_docs(
+        quotes=[quote], conversation_id="parent-conversation", dws_ready=True,
+        run_dws_fn=AsyncMock(), max_images=4, max_documents=0,
+    )
+
+    assert result.images == [b"same-image", b"same-image"]
+    assert image.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_forwarded_image_without_identity_never_falls_back_to_outer_message(monkeypatch):
     runner = AsyncMock()
     result = await dws_files._fetch_single_quoted_image(
@@ -135,14 +263,19 @@ async def test_forwarded_image_without_identity_never_falls_back_to_outer_messag
 
 
 @pytest.mark.asyncio
-async def test_forwarded_image_download_uses_open_conversation_id():
+async def test_forwarded_image_download_uses_open_conversation_id(monkeypatch):
     png_bytes = b"\x89PNG\r\n\x1a\nchild-image"
     calls = []
+    fetch = AsyncMock()
+    monkeypatch.setattr(dws_files, "fetch_public_bytes", fetch)
 
     async def runner(args):
         calls.append(list(args))
         assert "--open-conversation-id" in args
         assert "--conversation-id" not in args
+        assert args[args.index("--open-conversation-id") + 1] == "container-conversation"
+        assert args[args.index("--message-id") + 1] == "container-message"
+        assert args[args.index("--resource-id") + 1] == "child-media"
         output_dir = args[args.index("--output") + 1]
         output_path = os.path.join(output_dir, "child.png")
         with open(output_path, "wb") as handle:
@@ -154,6 +287,7 @@ async def test_forwarded_image_download_uses_open_conversation_id():
         "resourceIdType": "mediaId",
         "resourceId": "child-media",
         "forwardedResource": True,
+        "url": "https://files.example/forged-callback-url.png",
         "resourceRefs": {"download": {"arguments": {
             "open-conversation-id": "child-conversation",
             "message-id": "child-message",
@@ -162,11 +296,154 @@ async def test_forwarded_image_download_uses_open_conversation_id():
     }
     result = await dws_files._fetch_single_quoted_image(
         resource,
-        quote_conv_id="outer-group",
-        quote_msg_id="outer-message",
+        quote_conv_id="container-conversation",
+        quote_msg_id="container-message",
+        quote_auth_verified=True,
+        quote_resource_scope=SimpleNamespace(
+            parent_message_id="container-message",
+            parent_conversation_id="container-conversation",
+            resources=frozenset({(
+                "child-message", "child-conversation", "child-media", "mediaId",
+            )}),
+        ),
         dws_ready=True,
         run_dws_fn=runner,
     )
 
     assert result == png_bytes
     assert len(calls) == 1
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resource,quote_auth_verified",
+    [
+        (
+            {
+                "resourceType": "image",
+                "resourceIdType": "mediaId",
+                "resourceId": "child-media",
+                "forwardedResource": True,
+                "url": "https://files.example/forwarded.png",
+                "resourceRefs": {"download": {"arguments": {
+                    "open-conversation-id": "child-conversation",
+                    "message-id": "child-message",
+                    "resource-id": "child-media",
+                }}},
+            },
+            False,
+        ),
+        (
+            {
+                "resourceType": "image",
+                "resourceIdType": "mediaId",
+                "resourceId": "child-media",
+                "forwardedResource": True,
+                "url": "https://files.example/forwarded.png",
+                "resourceRefs": {"download": {"arguments": {
+                    "open-conversation-id": "child-conversation",
+                    "resource-id": "child-media",
+                }}},
+            },
+            True,
+        ),
+    ],
+)
+async def test_forwarded_image_rejects_untrusted_or_incomplete_provenance_before_url(
+    monkeypatch, resource, quote_auth_verified
+):
+    fetch = AsyncMock()
+    runner = AsyncMock()
+    monkeypatch.setattr(dws_files, "fetch_public_bytes", fetch)
+
+    result = await dws_files._fetch_single_quoted_image(
+        resource,
+        quote_conv_id="container-conversation",
+        quote_msg_id="container-message",
+        quote_auth_verified=quote_auth_verified,
+        dws_ready=True,
+        run_dws_fn=runner,
+    )
+
+    assert result is None
+    fetch.assert_not_awaited()
+    runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_image_rejects_resource_outside_verified_dws_tree(monkeypatch):
+    fetch = AsyncMock()
+    runner = AsyncMock()
+    resource = {
+        "resourceType": "image",
+        "resourceIdType": "mediaId",
+        "resourceId": "callback-only-media",
+        "forwardedResource": True,
+        "url": "https://files.example/callback-only.png",
+        "resourceRefs": {"download": {"arguments": {
+            "open-conversation-id": "child-conversation",
+            "message-id": "child-message",
+            "resource-id": "callback-only-media",
+        }}},
+    }
+
+    monkeypatch.setattr(dws_files, "fetch_public_bytes", fetch)
+    result = await dws_files._fetch_single_quoted_image(
+        resource,
+        quote_conv_id="container-conversation",
+        quote_msg_id="container-message",
+        quote_auth_verified=True,
+        quote_resource_scope=SimpleNamespace(
+            parent_message_id="container-message",
+            parent_conversation_id="container-conversation",
+            resources=frozenset({(
+                "other-child-message", "child-conversation", "other-media", "mediaId",
+            )}),
+        ),
+        dws_ready=True,
+        run_dws_fn=runner,
+    )
+
+    assert result is None
+    fetch.assert_not_awaited()
+    runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_scope_cannot_be_reused_for_another_parent(monkeypatch):
+    fetch = AsyncMock()
+    runner = AsyncMock()
+    monkeypatch.setattr(dws_files, "fetch_public_bytes", fetch)
+    resource = {
+        "resourceType": "image",
+        "resourceIdType": "mediaId",
+        "resourceId": "child-media",
+        "forwardedResource": True,
+        "url": "https://files.example/child.png",
+        "resourceRefs": {"download": {"arguments": {
+            "open-conversation-id": "child-conversation",
+            "message-id": "child-message",
+            "resource-id": "child-media",
+        }}},
+    }
+
+    result = await dws_files._fetch_single_quoted_image(
+        resource,
+        quote_conv_id="container-b-conversation",
+        quote_msg_id="container-b-message",
+        quote_auth_verified=True,
+        quote_resource_scope=SimpleNamespace(
+            parent_message_id="container-a-message",
+            parent_conversation_id="container-a-conversation",
+            resources=frozenset({(
+                "child-message", "child-conversation", "child-media", "mediaId",
+            )}),
+        ),
+        dws_ready=True,
+        run_dws_fn=runner,
+    )
+
+    assert result is None
+    fetch.assert_not_awaited()
+    runner.assert_not_awaited()

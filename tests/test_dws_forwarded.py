@@ -76,6 +76,101 @@ def test_forwarded_image_resources_keep_child_download_identity():
     assert "不可读取" not in item["display_text"]
 
 
+def test_dws_quote_projection_marks_forward_container_as_trusted_scope():
+    item = extract_clean_dws_item(record(
+        quotedMessage={
+            "openMessageId": "container-open",
+            "openConversationId": "current-group",
+            "forwardMessages": [child(1, content="[图片消息](mediaId=picture)")],
+        }
+    ))
+    assert item["quoted"].dws_verified is True
+    assert item["quoted"].message_id == "container-open"
+    assert item["quoted"].conversation_id == "current-group"
+    scope = item["quoted"].dws_resource_scope
+    assert scope.parent_message_id == "container-open"
+    assert scope.parent_conversation_id == "current-group"
+    assert scope.resources == frozenset({
+        ("child-1", "source-group", "picture", "mediaId"),
+    })
+
+
+def test_verified_quote_identity_wins_over_callback_identity():
+    from app.dws_context import DwsQuoteInfo, _merge_same_quote_info
+
+    merged = _merge_same_quote_info(
+        DwsQuoteInfo(
+            message_id="container-open",
+            conversation_id="callback-conversation",
+            text="callback",
+        ),
+        DwsQuoteInfo(
+            message_id="container-open",
+            conversation_id="current-group",
+            text="dws",
+            dws_verified=True,
+        ),
+    )
+    assert merged.dws_verified is True
+    assert merged.conversation_id == "current-group"
+
+
+def test_historical_forward_container_keeps_current_dws_scope():
+    from app.dws_context import _item_to_quote_info
+
+    item = extract_clean_dws_item(record(forwardMessages=[child(1)]))
+    quote = _item_to_quote_info(item)
+    assert quote.dws_verified is True
+    assert quote.message_id == "merged"
+    assert quote.conversation_id == "current-group"
+
+
+def test_forward_parent_projection_prefers_open_ids_for_scope_and_download_locator():
+    from app.dws_context import _item_to_quote_info
+
+    item = extract_clean_dws_item({
+        **record(
+            messageId="legacy-parent",
+            conversationId="legacy-group",
+            openMessageId="open-parent",
+            openConversationId="open-group",
+            forwardMessages=[child(1, content="[图片消息](mediaId=picture)")],
+        ),
+    })
+    assert item["message_id"] == "open-parent"
+    assert item["conversation_id"] == "open-group"
+    quote = _item_to_quote_info(item)
+    assert quote.message_id == "open-parent"
+    assert quote.conversation_id == "open-group"
+    assert quote.dws_resource_scope.parent_message_id == "open-parent"
+    assert quote.dws_resource_scope.parent_conversation_id == "open-group"
+
+
+def test_forwarded_provenance_prefers_open_identity_over_legacy_aliases():
+    item = extract_clean_dws_item(record(forwardMessages=[{
+        **child(1, content="[图片消息](mediaId=picture)"),
+        "messageId": "legacy-child",
+        "openMessageId": "open-child",
+        "conversationId": "legacy-group",
+        "openConversationId": "open-group",
+    }]))
+    args = item["resources"][0]["resourceRefs"]["download"]["arguments"]
+    assert args["message-id"] == "open-child"
+    assert args["open-conversation-id"] == "open-group"
+
+
+def test_forward_container_auth_identity_prefers_open_aliases():
+    quote = _parse_quote_dict({
+        "messageId": "legacy-parent",
+        "openMessageId": "open-parent",
+        "conversationId": "legacy-group",
+        "openConversationId": "open-group",
+        "forwardMessages": [child(1)],
+    })
+    assert quote.message_id == "open-parent"
+    assert quote.conversation_id == "open-group"
+
+
 def test_forwarded_media_description_is_normalized_without_extra_queries():
     item = extract_clean_dws_item(record(forwardMessages=[child(1, content="[图片消息](mediaId=picture)")]))
     assert item["resources"][0]["resourceId"] == "picture"

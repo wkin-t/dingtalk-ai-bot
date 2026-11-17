@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import re
 import tempfile
@@ -330,11 +331,44 @@ async def _fetch_single_quoted_image(
     *,
     quote_conv_id: str,
     quote_msg_id: str,
+    quote_auth_verified: bool = False,
+    quote_resource_scope: Any | None = None,
     dws_ready: bool,
     run_dws_fn: Callable[[Sequence[str]], Awaitable[Any]],
 ) -> bytes | None:
+    forwarded = bool(res.get("forwardedResource"))
+    dl_args: dict[str, Any] = {}
+    refs = res.get("resourceRefs")
+    if isinstance(refs, dict) and isinstance(refs.get("download"), dict):
+        cand_args = refs["download"].get("arguments")
+        if isinstance(cand_args, dict):
+            dl_args = cand_args
+
+    child_conv_id = str(dl_args.get("open-conversation-id") or "").strip()
+    child_msg_id = str(dl_args.get("message-id") or "").strip()
+    arg_res_id = str(dl_args.get("resource-id") or "").strip()
+    declared_res_id = str(res.get("resourceId") or "").strip()
+    if forwarded:
+        scope_parent_msg = str(getattr(quote_resource_scope, "parent_message_id", "") or "").strip()
+        scope_parent_conv = str(getattr(quote_resource_scope, "parent_conversation_id", "") or "").strip()
+        scope_resources = getattr(quote_resource_scope, "resources", frozenset())
+        # 先验证子资源 provenance 与当前 dws 已确认的容器授权，再碰任何 callback URL。
+        if (
+            not quote_auth_verified
+            or not str(quote_conv_id or "").strip()
+            or not str(quote_msg_id or "").strip()
+            or not child_conv_id
+            or not child_msg_id
+            or not arg_res_id
+            or (declared_res_id and declared_res_id != arg_res_id)
+            or scope_parent_msg != str(quote_msg_id or "").strip()
+            or scope_parent_conv != str(quote_conv_id or "").strip()
+            or (child_msg_id, child_conv_id, arg_res_id, "mediaId") not in scope_resources
+        ):
+            return None
+
     url = str(res.get("url") or "").strip()
-    if url:
+    if url and not forwarded:
         try:
             validate_safe_public_url(url)
             raw_bytes = await fetch_public_bytes(
@@ -352,16 +386,15 @@ async def _fetch_single_quoted_image(
     if not dws_ready:
         return None
 
-    dl_args: dict[str, Any] = {}
-    refs = res.get("resourceRefs")
-    if isinstance(refs, dict) and isinstance(refs.get("download"), dict):
-        cand_args = refs["download"].get("arguments")
-        if isinstance(cand_args, dict):
-            dl_args = cand_args
-
-    conv_id = str(dl_args.get("open-conversation-id") or ("" if res.get("forwardedResource") else quote_conv_id) or "").strip()
-    msg_id = str(dl_args.get("message-id") or ("" if res.get("forwardedResource") else quote_msg_id) or "").strip()
-    res_id = str(dl_args.get("resource-id") or res.get("resourceId") or "").strip()
+    res_id = arg_res_id or declared_res_id
+    if forwarded:
+        # 合并转发的资源归属仍由子消息精确证明；DWS 下载授权则使用
+        # 当前会话中已验证可读的合并转发容器，不能把容器身份当作资源定位。
+        conv_id = str(quote_conv_id or "").strip()
+        msg_id = str(quote_msg_id or "").strip()
+    else:
+        conv_id = str(child_conv_id or quote_conv_id or "").strip()
+        msg_id = str(child_msg_id or quote_msg_id or "").strip()
     if not (conv_id and msg_id and res_id):
         return None
 
@@ -442,13 +475,15 @@ async def fetch_quoted_media_and_docs(
     max_doc_bytes = max(65536, int(cfg.DWS_MAX_DOC_BYTES))
     max_doc_chars = max(500, int(cfg.DWS_MAX_DOC_CHARS))
 
-    seen_img_keys: set[str] = set()
+    seen_img_keys: set[Any] = set()
+    seen_forwarded_img_bytes: set[tuple[str, str, str, str, bytes]] = set()
     image_attempts = 0
     candidate_nodes: list[str] = []
     seen_nodes: set[str] = set()
 
     for q in quotes:
-        q_conv = str(getattr(q, "conversation_id", "") or conversation_id or "").strip()
+        q_conv_raw = str(getattr(q, "conversation_id", "") or "").strip()
+        q_conv = q_conv_raw or str(conversation_id or "").strip()
         q_mid = str(getattr(q, "message_id", "") or "").strip()
         q_text = str(getattr(q, "text", "") or "")
         q_resources = getattr(q, "resources", None) or []
@@ -471,11 +506,28 @@ async def fetch_quoted_media_and_docs(
                         candidate_nodes.append(nid)
                 continue
 
-            if len(result.images) < max_images and image_attempts < max_images and (
+            attempt_limit = max_images * (2 if bool(res.get("forwardedResource")) else 1)
+            if len(result.images) < max_images and image_attempts < attempt_limit and (
                 r_type in {"image", "picture", "photo", "emotion"}
                 or r_id_type == "mediaId"
             ):
-                dedup_k = r_id or r_url
+                if bool(res.get("forwardedResource")):
+                    refs = res.get("resourceRefs")
+                    download = refs.get("download") if isinstance(refs, dict) else None
+                    args = download.get("arguments") if isinstance(download, dict) else None
+                    child_msg_id = str(args.get("message-id") or "").strip() if isinstance(args, dict) else ""
+                    child_conv_id = str(args.get("open-conversation-id") or "").strip() if isinstance(args, dict) else ""
+                    alias_resource_id = str(args.get("resource-id") or r_id).strip() if isinstance(args, dict) else r_id
+                    dedup_k = (
+                        "forwarded",
+                        q_mid,
+                        q_conv,
+                        child_msg_id,
+                        child_conv_id,
+                        alias_resource_id,
+                    ) if all((q_mid, q_conv, child_msg_id, child_conv_id, alias_resource_id)) else None
+                else:
+                    dedup_k = r_id or r_url
                 if dedup_k and dedup_k in seen_img_keys:
                     continue
                 if dedup_k:
@@ -485,10 +537,33 @@ async def fetch_quoted_media_and_docs(
                     res,
                     quote_conv_id=q_conv,
                     quote_msg_id=q_mid,
+                    quote_auth_verified=bool(
+                        dws_ready
+                        and getattr(q, "dws_verified", False)
+                        and q_mid
+                        and q_conv_raw
+                        and q_conv_raw == str(conversation_id or "").strip()
+                    ),
+                    quote_resource_scope=getattr(q, "dws_resource_scope", None),
                     dws_ready=dws_ready,
                     run_dws_fn=run_dws_fn,
                 )
                 if img_bytes:
+                    if bool(res.get("forwardedResource")):
+                        refs = res.get("resourceRefs")
+                        download = refs.get("download") if isinstance(refs, dict) else None
+                        args = download.get("arguments") if isinstance(download, dict) else None
+                        if isinstance(args, dict):
+                            source_key = (
+                                q_mid,
+                                q_conv,
+                                str(args.get("message-id") or "").strip(),
+                                str(args.get("open-conversation-id") or "").strip(),
+                                hashlib.sha256(img_bytes).digest(),
+                            )
+                            if source_key in seen_forwarded_img_bytes:
+                                continue
+                            seen_forwarded_img_bytes.add(source_key)
                     result.images.append(img_bytes)
 
         for nid in extract_alidocs_node_ids(q_text):

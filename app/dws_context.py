@@ -473,6 +473,19 @@ class DwsQuoteInfo:
     message_type: str = ""
     resources: list[dict[str, Any]] = field(default_factory=list)
     has_forwarded: bool = False
+    # 仅由当前 dws 投影构造的引用设置；Stream callback 自带字段不能建立授权作用域。
+    dws_verified: bool = False
+    # 当前 dws 转发树实际拥有的子资源，不能从 callback 引用资源 union 复制。
+    dws_resource_scope: "DwsForwardResourceScope | None" = None
+
+
+@dataclass(frozen=True)
+class DwsForwardResourceScope:
+    """当前 dws 可读的合并转发父消息与其子资源成员集合。"""
+
+    parent_message_id: str
+    parent_conversation_id: str
+    resources: frozenset[tuple[str, str, str, str]]
 
 
 @dataclass(frozen=True, order=True)
@@ -1016,6 +1029,39 @@ def _resource_dedup_key(resource: dict[str, Any]) -> tuple[str, str]:
     return "", json.dumps(resource, ensure_ascii=False, sort_keys=True)
 
 
+def _dws_forward_resource_scope(
+    resources: Sequence[dict[str, Any]],
+    *,
+    parent_message_id: str,
+    parent_conversation_id: str,
+) -> DwsForwardResourceScope | None:
+    """从当前 dws 转发树生成子资源授权成员集合。"""
+    scope: set[tuple[str, str, str, str]] = set()
+    for resource in resources:
+        if not isinstance(resource, dict) or not resource.get("forwardedResource"):
+            continue
+        refs = resource.get("resourceRefs")
+        download = refs.get("download") if isinstance(refs, dict) else None
+        args = download.get("arguments") if isinstance(download, dict) else None
+        if not isinstance(args, dict):
+            continue
+        child_msg = str(args.get("message-id") or "").strip()
+        child_conv = str(args.get("open-conversation-id") or "").strip()
+        resource_id = str(args.get("resource-id") or resource.get("resourceId") or "").strip()
+        resource_type = str(args.get("type") or resource.get("resourceIdType") or "").strip()
+        if resource_type.lower() == "mediaid":
+            resource_type = "mediaId"
+        if child_msg and child_conv and resource_id and resource_type == "mediaId":
+            scope.add((child_msg, child_conv, resource_id, resource_type))
+    if not scope or not parent_message_id or not parent_conversation_id:
+        return None
+    return DwsForwardResourceScope(
+        parent_message_id=parent_message_id,
+        parent_conversation_id=parent_conversation_id,
+        resources=frozenset(scope),
+    )
+
+
 def _merge_robot_card_markdown_resources(
     item: dict[str, Any], raw_text: str, resources: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -1064,8 +1110,8 @@ def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
         return None
     if _is_explicit_recalled(q):
         return None
-    msg_id = str(q.get("messageId") or q.get("openMessageId") or q.get("msgId") or "").strip()
-    conv_id = str(q.get("conversationId") or q.get("openConversationId") or "").strip()
+    msg_id = str(q.get("openMessageId") or q.get("messageId") or q.get("msgId") or "").strip()
+    conv_id = str(q.get("openConversationId") or q.get("conversationId") or "").strip()
     sender = str(q.get("sender") or q.get("senderNick") or q.get("nick") or "").strip()
     sender_id = str(q.get("senderId") or q.get("senderUserId") or q.get("senderStaffId") or "").strip()
     create_time = normalize_dws_timestamp(
@@ -1227,16 +1273,16 @@ def _expand_forwarded_content(src: dict[str, Any]) -> tuple[str, list[dict[str, 
             timestamp = normalize_dws_timestamp(raw.get("createTime") or raw.get("create_time"))
             body = _extract_text_from_stream_content(raw.get("text") or raw.get("content"), str(raw.get("messageType") or ""))
             media = _forwarded_resources(raw, body)
-            message_id = str(raw.get("messageId") or raw.get("openMessageId") or raw.get("message_id") or "")
-            conversation_id = str(raw.get("conversationId") or raw.get("openConversationId") or raw.get("conversation_id") or inherited_conversation)
+            message_id = str(raw.get("openMessageId") or raw.get("messageId") or raw.get("message_id") or "")
+            conversation_id = str(raw.get("openConversationId") or raw.get("conversationId") or raw.get("conversation_id") or inherited_conversation)
             for resource in media[:30]:
-                # 不继承外层定位，下载器必须按这一条原消息定位媒体。
+                # 资源定位保留子消息；下载授权作用域由当前可读的合并转发容器提供。
                 resource["forwardedResource"] = True
                 refs = dict(resource["resourceRefs"]) if isinstance(resource.get("resourceRefs"), dict) else {}
                 download = dict(refs["download"]) if isinstance(refs.get("download"), dict) else {}
                 args = dict(download["arguments"]) if isinstance(download.get("arguments"), dict) else {}
                 args.update({"message-id": message_id or args.get("message-id", ""),
-                    "open-conversation-id": str(raw.get("conversationId") or raw.get("openConversationId") or raw.get("conversation_id") or args.get("open-conversation-id") or conversation_id),
+                    "open-conversation-id": str(raw.get("openConversationId") or raw.get("conversationId") or raw.get("conversation_id") or args.get("open-conversation-id") or conversation_id),
                     "resource-id": str(resource.get("resourceId") or "")})
                 download["arguments"] = args
                 refs["download"] = download
@@ -1258,7 +1304,7 @@ def _expand_forwarded_content(src: dict[str, Any]) -> tuple[str, list[dict[str, 
             if nested is not None:
                 visit(nested, depth + 1, conversation_id)
 
-    visit(children, 1, str(src.get("conversationId") or src.get("openConversationId") or src.get("conversation_id") or ""))
+    visit(children, 1, str(src.get("openConversationId") or src.get("conversationId") or src.get("conversation_id") or ""))
     if not children:
         lines.append("[合并转发子消息不可读取，dws 未返回内部正文]")
     if truncated:
@@ -1274,11 +1320,18 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if _is_explicit_recalled(item):
         return None
 
+    # 合并转发父容器的下载授权使用 open* 域；普通历史保持原有 canonical
+    # 字段优先级，避免改变非 forward 消息的去重和撤回语义。
+    is_forward_container = _forwarded_children(item) is not None
     message_id = str(
-        item.get("messageId") or item.get("openMessageId") or item.get("msgId") or ""
+        (item.get("openMessageId") or item.get("messageId") or item.get("msgId") or "")
+        if is_forward_container
+        else (item.get("messageId") or item.get("openMessageId") or item.get("msgId") or "")
     ).strip()
     conversation_id = str(
-        item.get("conversationId") or item.get("openConversationId") or ""
+        (item.get("openConversationId") or item.get("conversationId") or "")
+        if is_forward_container
+        else (item.get("conversationId") or item.get("openConversationId") or "")
     ).strip()
     sender = str(
         item.get("sender") or item.get("senderNick") or item.get("senderName") or ""
@@ -1325,6 +1378,14 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(item.get("quotedMessage"), dict)
         else None
     )
+    if quoted_info is not None:
+        # 该引用来自当前 dws 消息投影，允许它为合并转发媒体建立授权作用域。
+        quoted_info.dws_verified = True
+        quoted_info.dws_resource_scope = _dws_forward_resource_scope(
+            quoted_info.resources,
+            parent_message_id=quoted_info.message_id,
+            parent_conversation_id=quoted_info.conversation_id,
+        )
 
     forwarded_text, forwarded_resources, has_forwarded = _expand_forwarded_content(item)
     resources.extend(forwarded_resources)
@@ -1846,9 +1907,21 @@ def _merge_same_quote_info(primary: DwsQuoteInfo, secondary: DwsQuoteInfo) -> Dw
             seen_res.add(rk)
             merged_res.append(res)
 
+    verified_scope = primary.dws_verified or secondary.dws_verified
+    trusted_identity = secondary if secondary.dws_verified else primary
+    trusted_resource_scope = (
+        secondary.dws_resource_scope
+        if secondary.dws_verified
+        else primary.dws_resource_scope
+    )
+    if trusted_resource_scope is not None and (
+        trusted_resource_scope.parent_message_id != trusted_identity.message_id
+        or trusted_resource_scope.parent_conversation_id != trusted_identity.conversation_id
+    ):
+        trusted_resource_scope = None
     return DwsQuoteInfo(
-        message_id=primary.message_id or secondary.message_id,
-        conversation_id=primary.conversation_id or secondary.conversation_id,
+        message_id=trusted_identity.message_id or primary.message_id or secondary.message_id,
+        conversation_id=trusted_identity.conversation_id or primary.conversation_id or secondary.conversation_id,
         sender=primary.sender or secondary.sender,
         sender_id=primary.sender_id or secondary.sender_id,
         text=chosen_text,
@@ -1856,6 +1929,8 @@ def _merge_same_quote_info(primary: DwsQuoteInfo, secondary: DwsQuoteInfo) -> Dw
         message_type=primary.message_type or secondary.message_type,
         resources=merged_res,
         has_forwarded=primary.has_forwarded or secondary.has_forwarded,
+        dws_verified=verified_scope,
+        dws_resource_scope=trusted_resource_scope,
     )
 
 
@@ -1914,6 +1989,12 @@ def _item_to_quote_info(item: dict[str, Any]) -> DwsQuoteInfo:
         message_type=item.get("message_type", ""),
         resources=list(item.get("resources") or []),
         has_forwarded=bool(item.get("has_forwarded")),
+        dws_verified=True,
+        dws_resource_scope=_dws_forward_resource_scope(
+            item.get("resources") or [],
+            parent_message_id=str(item.get("message_id") or "").strip(),
+            parent_conversation_id=str(item.get("conversation_id") or "").strip(),
+        ),
     )
 
 
@@ -1969,6 +2050,8 @@ def _enrich_quote_from_history(
             create_time=quote.create_time,
             message_type=quote.message_type,
             resources=list(quote.resources),
+            dws_verified=quote.dws_verified,
+            dws_resource_scope=quote.dws_resource_scope,
         )
 
     return quote
