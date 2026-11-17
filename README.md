@@ -81,7 +81,7 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 - **流式 AI 卡片**：钉钉卡片逐字更新，展示思考过程；更新节流由 `STREAM_UPDATE_THROTTLE` 控制（默认 1.5s）
 - **原生联网搜索**：Gemini 用 `google_search`，GPT 走 Responses API 的 `web_search`，原生 OpenRouter 使用 annotations。默认全自主（`SEARCH_AUTONOMOUS=true`），fast/pro 档始终挂载搜索工具，由模型自己决定是否搜索。🌐 图标只在确实发生搜索时点亮
 - **Claude 搜索暂时禁用**：s2a 中转站的已知行为是，Claude（anthropic 容器）一旦触发联网搜索就会被静默换成非 Claude 模型（实测常见 gemini-2.5-flash）再作答，属于身份冒充。因此 `CLAUDE_SEARCH_BRIDGE_ENABLED` 默认 `false`，Claude 不挂任何搜索工具；当用户确实要求联网时，改为注入 system 提示，让 Claude 自己说明"搜索工具会把我换成别的模型，所以现在用不了"。相关的桥接实现（`app/antigravity_search.py`）与身份校验保留在代码里，作为将来重新打开该开关时的护栏
-- **生图 + 改图**：Gemini Imagen / OpenAI `gpt-image-2` 生图；Gemini Flash / OpenAI images.edit 改图。图片上传腾讯云 COS，以预签名 URL 展示
+- **生图 + 改图**：Gemini 原生图片模型（如 `gemini-nano-banana-2.1`）通过中转 `generate_content` 生图与改图；OpenAI `gpt-image-2.6-sunburst` 使用 Images 接口。结果上传当前机器人所属的钉钉媒体，在原卡片内展示，不依赖 COS 或 dws 个人发送。旧 Imagen 直连与 Deprecated 企业微信的 COS 存储仍保留兼容
 - **多模态**：单图/多图识别，图片 MIME 按文件魔数检测
 - **Soul 自主进化**：每次对话后 AI 反思并进化个性，30 分钟冷却，保留 changelog。Soul 文件按 `{BOT_ID}__{cid}.md` 隔离
 
@@ -147,7 +147,7 @@ dingtalk-ai-bot/
 │   ├── openclaw_client.py        # OpenClaw 客户端（Deprecated）
 │   ├── openclaw_tools_client.py  # OpenClaw Tools Invoke（Deprecated）
 │   ├── image_gen.py              # 生图 + 改图
-│   ├── image_store.py            # 图片上传 COS → 预签名 URL
+│   ├── image_store.py            # Deprecated 企业微信旧路径的 COS 存储
 │   ├── dws_context.py           # dws 会话读取、引用展开、企业校验
 │   ├── dws_files.py             # 图片 / 文档下载与解析
 │   ├── dws_members.py           # 群成员快照与卡片内成员提及
@@ -232,7 +232,7 @@ python main.py                     # 默认端口 35000
 | `MODEL_ROUTER` / `MODEL_LITE` / `MODEL_FAST` / `MODEL_PRO` | 否 | 路由模型与三档模型，所有后端通用；默认值按 `AI_BACKEND` 选择（见下表） |
 | `THINKING_LEVEL_OVERRIDES` | 否 | JSON 对象，按完整模型名或 `backend:模型名` 覆盖支持档位；默认使用模型能力表，详见“按模型区分思考深度” |
 | `OPENAI_ROUTER_SUPPORTS_REASONING` | 否 | 单独声明 `MODEL_ROUTER` 是否接受思考字段，不复用 lite 开关；不设置时识别已知模型家族，未知型号不自动加字段 |
-| `GEMINI_API_KEY` | 视后端 | Google 直连 key。Gemini 后端需要；生图 / 改图也始终直连 Google |
+| `GEMINI_API_KEY` | 视后端 | Google 直连 key；旧 Imagen 生图仍使用直连。原生 Gemini 图片模型与对话共用 `GEMINI_API_BASE` / `GEMINI_API_BASE_KEY` |
 | `GEMINI_API_BASE` / `GEMINI_API_BASE_KEY` | 否 | Gemini 走中转站时的 `/v1beta` 原生协议地址（不带路径后缀）与 key |
 | `OPENAI_API_BASE` / `OPENAI_API_KEY` | `openai` 后端 | OpenAI 兼容端点与 key |
 | `OPENAI_{LITE,FLASH,PRO}_SUPPORTS_{REASONING,SEARCH,VISION}` | 否 | `openai` 后端各档 capability 声明 |
@@ -247,7 +247,11 @@ python main.py                     # 默认端口 35000
 | `DWS_MAX_QUOTE_IMAGES` | 否 | 自动补全的历史图与引用图总上限，默认 4；本轮用户上传图片另行处理 |
 | `DWS_MAX_DOC_BYTES` / `DWS_MAX_DOC_CHARS` | 否 | 单文档大小 / 正文截取上限，默认 10 MiB / 12000 字符 |
 | `REDIS_*` / `MYSQL_*` | 否 | 用于统计、采样等应用状态及旧路径；钉钉对话历史不再通过它们持久化或降级 |
-| `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_BUCKET` / `COS_REGION` | 生图 | 腾讯云 COS 图片存储 |
+| `IMAGE_BACKEND` | 否 | 显式选择 `gemini` 或 `openai`，建议多容器分别设置；未设时兼容按 `OPENAI_IMAGE_MODEL` 名称推断 |
+| `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_EDIT_MODEL` | Gemini 生图 / 改图 | 分别控制实际模型；原生 Gemini 模型走 `generate_content`，旧 `imagen-*` 生图走 Google 直连 |
+| `OPENAI_IMAGE_MODEL` | GPT 生图 / 改图 | Images 接口模型，如 `gpt-image-2.6-sunburst` |
+| `OPENAI_IMAGE_COMPLEXITY` | 否 | GPT Image 2.6 的规划复杂度：`low` / `medium` / `high`，最高为 `high`；不等于对话 `reasoning.effort=max`，空值不下发 |
+| `COS_SECRET_ID` / `COS_SECRET_KEY` / `COS_BUCKET` / `COS_REGION` | Deprecated 旧路径 | 企业微信等旧路径的 COS 存储；钉钉生图 / 改图不需要 |
 | `SOUL_ADMIN_IDS` | 否 | 允许修改 Soul 的用户 ID（逗号分隔，留空表示所有人） |
 | `CLAUDE_SEARCH_BRIDGE_ENABLED` | 否 | Claude 搜索桥接总开关，默认 `false`（见上文"Claude 搜索暂时禁用"）。重新打开前需要下面 4 个变量都配齐，否则 `bridge_ready()` 仍为 false |
 | `ANTIGRAVITY_GEMINI_API_BASE` / `ANTIGRAVITY_GEMINI_API_KEY` | 桥接重新启用时 | 独立于 `GEMINI_API_KEY` 的专用凭据，避免共享 Google key 被旁路搜索。`API_BASE` 需为 sub2api 的 `/v1beta` 地址，不能指向 `generativelanguage.googleapis.com` |

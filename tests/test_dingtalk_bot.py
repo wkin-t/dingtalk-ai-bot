@@ -9,6 +9,13 @@ import pytest
 os.environ.setdefault("GEMINI_API_KEY", "test-dummy-key")
 
 
+def test_safe_image_error_does_not_echo_untrusted_runtime_error_text():
+    from app.dingtalk_bot import _safe_image_error
+
+    assert _safe_image_error(RuntimeError("图片格式 sk-secret-token")) == "图片格式"
+    assert "sk-secret-token" not in _safe_image_error(RuntimeError("provider sk-secret-token"))
+
+
 @pytest.fixture(autouse=True)
 def isolated_dws_context():
     from app.dws_context import DwsContextBundle
@@ -1047,6 +1054,192 @@ async def test_dingtalk_consumer_embeds_bqb_in_card_and_sanitizes_history():
 
     # 历史持久化仅保留语义标签，不写入短期 @media_id
     mock_update_history.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_generated_images_use_robot_media_ids_without_cos():
+    """生图结果走当前机器人媒体上传，不生成 COS URL 或写入 COS。"""
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-image")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    handler.card_helper.upload_generated_image = AsyncMock(
+        side_effect=["@lALP_GENERATED_1", "@lALP_GENERATED_2"]
+    )
+    incoming_message = SimpleNamespace(
+        sender_id="sender-image",
+        sender_nick="测试用户",
+        conversation_id="conv-image",
+        conversation_type="1",
+    )
+    route_result = {
+        "model": "fast",
+        "thinking_level": "low",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在画图",
+        "reason": "test",
+        "need_image_gen": True,
+        "image_gen_params": {
+            "prompt": "a red apple",
+            "aspect_ratio": "1:1",
+            "number_of_images": 2,
+        },
+    }
+    image_bytes = [b"\x89PNG\r\n\x1a\nimage-1", b"\x89PNG\r\n\x1a\nimage-2"]
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.ENABLE_BQB", False), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.get_session_key", return_value="session-image"), \
+         patch("app.memory.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True)), \
+         patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.dingtalk_bot._enrich_image_prompt", new_callable=AsyncMock, return_value="a red apple"), \
+         patch("app.dingtalk_bot.generate_image", new_callable=AsyncMock, return_value=image_bytes), \
+         patch("app.image_store.save_image") as save_image, \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(incoming_message, "画一个苹果", "conv-image", [])
+
+    save_image.assert_not_called()
+    assert handler.card_helper.upload_generated_image.await_count == 2
+    final_text = handler.card_helper.stream_update.await_args_list[-1].args[1]
+    assert "![图片1](@lALP_GENERATED_1)" in final_text
+    assert "![图片2](@lALP_GENERATED_2)" in final_text
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_generated_image_cancel_is_finalized_and_re_raised():
+    """生成阶段取消会更新最终卡片，并把取消异常交给上层。"""
+    from contextlib import ExitStack
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-image-cancel")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    incoming = SimpleNamespace(
+        sender_id="sender-image-cancel", sender_nick="测试用户",
+        conversation_id="conv-image-cancel", conversation_type="1",
+    )
+    route = {
+        "model": "fast", "thinking_level": "low", "need_search": False,
+        "temperature": "balanced", "thinking_text": "正在画图", "reason": "test",
+        "need_image_gen": True,
+        "image_gen_params": {"prompt": "a red apple", "aspect_ratio": "1:1"},
+    }
+    with ExitStack() as stack:
+        for target, replacement in [
+            ("app.dingtalk_bot.AI_BACKEND", "openai"),
+            ("app.dingtalk_bot.ENABLE_BQB", False),
+            ("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False),
+            ("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False),
+            ("app.dingtalk_bot.USE_STATS", False),
+            ("app.dingtalk_bot.get_session_key", "session-image-cancel"),
+            ("app.memory.get_history", []),
+            ("app.dingtalk_bot._load_soul", ""),
+            ("app.dingtalk_bot.fetch_dws_context_bundle", DwsContextBundle(dws_available=True)),
+            ("app.dingtalk_bot._analyze_with_openai", route),
+            ("app.ai.messages_pipeline.prepare_messages_for_backend", lambda messages, _bot_id: messages),
+            ("app.ai.sampling_pipeline.resolve_sampling", (0.7, None, {})),
+            ("app.dingtalk_bot._enrich_image_prompt", "a red apple"),
+            ("app.dingtalk_bot.generate_image", asyncio.CancelledError()),
+            ("app.dingtalk_bot._maybe_evolve_soul", None),
+            ("app.dingtalk_bot.asyncio.create_task", None),
+        ]:
+            if target.endswith("fetch_dws_context_bundle") or target.endswith("_analyze_with_openai") or target.endswith("_enrich_image_prompt") or target.endswith("generate_image"):
+                replacement = AsyncMock(return_value=replacement) if not isinstance(replacement, BaseException) else AsyncMock(side_effect=replacement)
+            elif target.endswith("get_history"):
+                replacement = MagicMock(return_value=replacement)
+            elif target.endswith("_maybe_evolve_soul") or target.endswith("_load_soul") or target.endswith("create_task"):
+                replacement = MagicMock(return_value=replacement)
+            elif target.endswith("prepare_messages_for_backend") or target.endswith("resolve_sampling") or target.endswith("get_session_key"):
+                replacement = MagicMock(return_value=replacement)
+            stack.enter_context(patch(target, replacement))
+        with pytest.raises(asyncio.CancelledError):
+            await handler.handle_ai_stream(incoming, "画一个苹果", "conv-image-cancel", [])
+
+    final_call = handler.card_helper.stream_update.await_args_list[-1]
+    assert final_call.args[1] == "图片生成已取消"
+    assert final_call.kwargs["is_finalize"] is True
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_edited_image_uses_robot_media_id_without_cos():
+    """改图结果也走当前机器人媒体上传。"""
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-edit")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    handler.card_helper.upload_generated_image = AsyncMock(return_value="@lALP_EDITED_1")
+    incoming_message = SimpleNamespace(
+        sender_id="sender-edit",
+        sender_nick="测试用户",
+        conversation_id="conv-edit",
+        conversation_type="1",
+    )
+    route_result = {
+        "model": "fast",
+        "thinking_level": "low",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在修改",
+        "reason": "test",
+        "need_image_edit": True,
+        "image_gen_params": {"prompt": "make the apple green", "aspect_ratio": "1:1"},
+    }
+    source_image = b"\x89PNG\r\n\x1a\nsource-image"
+
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.ENABLE_BQB", False), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.get_session_key", return_value="session-edit"), \
+         patch("app.memory.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True)), \
+         patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route_result), \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.dingtalk_bot.edit_image", new_callable=AsyncMock, return_value=[source_image]), \
+         patch("app.image_store.save_image") as save_image, \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(
+            incoming_message,
+            "把苹果变绿",
+            "conv-edit",
+            [],
+            image_data_list=[source_image],
+        )
+
+    save_image.assert_not_called()
+    handler.card_helper.upload_generated_image.assert_awaited_once_with(source_image)
+    final_text = handler.card_helper.stream_update.await_args_list[-1].args[1]
+    assert "![修改结果](@lALP_EDITED_1)" in final_text
 
 
 @pytest.mark.asyncio

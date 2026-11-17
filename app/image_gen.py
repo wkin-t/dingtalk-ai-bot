@@ -1,26 +1,125 @@
 # -*- coding: utf-8 -*-
 """
-统一生图模块
-Gemini: imagen-4.0-generate-001 (google-genai SDK)
-OpenAI: gpt-image-2 (openai SDK)
+统一生图模块，支持 Gemini 原生图片、旧 Imagen 和 OpenAI Images 协议。
 """
 import asyncio
 import base64
+import hashlib
+import os
 from typing import List
 
+from app import config as app_config
 from app.config import (
     GEMINI_IMAGE_MODEL,
     GEMINI_IMAGE_EDIT_MODEL,
+    GEMINI_API_BASE,
     OPENAI_IMAGE_MODEL,
     SOCKS_PROXY,
     OPENAI_API_BASE,
     OPENAI_API_KEY_CUSTOM,
 )
 
-# 复用 gemini_client.py 的直连 client（已配置代理）。
-# 不用对话 client：GEMINI_API_BASE 设置时对话走中转站，而生图的 generate_images(:predict)
-# 端点中转站不覆盖，必须始终直连 Google 官方 API。
-from app.gemini_client import direct_client as genai_client
+# Gemini 原生图片模型通过对话/原生 generate_content 端点走中转；旧 Imagen
+# :predict 端点仍由直连 client 调用。两者必须明确分开，避免把中转 key 发给
+# Google 直连端点或把 Imagen 请求发到中转站不支持的路径。
+from app.gemini_client import client as genai_client
+from app.gemini_client import direct_client
+
+OPENAI_IMAGE_COMPLEXITY = getattr(app_config, "OPENAI_IMAGE_COMPLEXITY", "")
+
+
+def _is_gemini_content_image_model(model: str) -> bool:
+    """判断模型是否使用 Gemini 原生图片输出协议。"""
+    normalized = (model or "").strip().lower()
+    return normalized.startswith("gemini-") and "imagen" not in normalized
+
+
+def _gemini_client_for_model(model: str):
+    """按协议选择 Gemini 中转 client 或 Google 直连 client。"""
+    return genai_client if _is_gemini_content_image_model(model) else direct_client
+
+
+def _ensure_gemini_content_auth():
+    """中转原生图片路径必须使用显式中转 key，禁止隐式复用直连 key。"""
+    if GEMINI_API_BASE and not os.getenv("GEMINI_API_BASE_KEY", "").strip():
+        raise RuntimeError("Gemini 图片中转 key 未配置")
+
+
+def _deduplicate_images(images: List[bytes], limit: int) -> List[bytes]:
+    """按图片 bytes 的 SHA-256 去重并保留原始顺序。"""
+    unique: List[bytes] = []
+    seen: set[bytes] = set()
+    for image in images:
+        if not image:
+            continue
+        digest = hashlib.sha256(image).digest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        unique.append(image)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _extract_gemini_inline_images(response) -> List[bytes]:
+    """从 Gemini response 的 candidates.parts 中提取图片 inline_data。"""
+    parts = []
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        parts.extend(getattr(content, "parts", None) or [])
+    if not parts:
+        parts.extend(getattr(response, "parts", None) or [])
+
+    images = []
+    for part in parts:
+        inline_data = getattr(part, "inline_data", None)
+        mime_type = getattr(inline_data, "mime_type", "") if inline_data else ""
+        data = getattr(inline_data, "data", None) if inline_data else None
+        if data and isinstance(mime_type, str) and mime_type.startswith("image/"):
+            images.append(bytes(data))
+    return images
+
+
+def _detect_image_mime_type(image_bytes: bytes) -> str:
+    """按文件头识别改图输入的真实 MIME，避免把 WebP/PNG 伪报成 JPEG。"""
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes[:2] == b"BM":
+        return "image/bmp"
+    raise RuntimeError("无法识别输入图片格式")
+
+
+def _image_filename_for_mime(mime_type: str) -> str:
+    """将 MIME 映射为上传给图片编辑接口的文件名。"""
+    extension = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+        "image/bmp": "bmp",
+    }.get(mime_type, "png")
+    return f"image.{extension}"
+
+
+def _openai_image_kwargs(model_name: str, size: str, **kwargs):
+    """构造 OpenAI Images 参数，并只向 GPT Image 2.6 下发其专属字段。"""
+    normalized = (model_name or "").strip().lower()
+    params = dict(kwargs)
+    params["size"] = size
+    if normalized.startswith("gpt-image-2.6-"):
+        complexity = str(OPENAI_IMAGE_COMPLEXITY or "").strip().lower()
+        if complexity:
+            params["complexity"] = complexity
+        params["output_format"] = "png"
+        params.pop("response_format", None)
+    return params
 
 
 def _map_openai_size(aspect_ratio: str) -> str:
@@ -64,17 +163,51 @@ async def _generate_with_gemini(
     aspect_ratio: str = "1:1",
     number_of_images: int = 1,
 ) -> List[bytes]:
-    """调用 Gemini Imagen 4 生图"""
+    """调用 Gemini Imagen 或原生图片模型生图。"""
     from google.genai import types
 
     loop = asyncio.get_running_loop()
 
+    target_count = max(1, min(4, int(number_of_images)))
+
+    if _is_gemini_content_image_model(GEMINI_IMAGE_MODEL):
+        client = _gemini_client_for_model(GEMINI_IMAGE_MODEL)
+        collected: List[bytes] = []
+        # 某些中转/模型会在一次响应中重复同一张图片；有界重试补齐数量，
+        # 避免无限请求，也不把重复图片当成多张结果。
+        max_attempts = target_count
+        _ensure_gemini_content_auth()
+
+        def _call_content():
+            return client.models.generate_content(
+                model=GEMINI_IMAGE_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                    image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+                ),
+            )
+
+        for _ in range(max_attempts):
+            response = await loop.run_in_executor(None, _call_content)
+            collected.extend(_extract_gemini_inline_images(response))
+            unique = _deduplicate_images(collected, target_count)
+            if len(unique) >= target_count:
+                return unique
+
+        unique = _deduplicate_images(collected, target_count)
+        if not unique:
+            raise RuntimeError("图片生成被安全过滤器拒绝，或无法生成图片")
+        raise RuntimeError(
+            f"图片生成返回数量不足（需要 {target_count} 张，实际 {len(unique)} 张）"
+        )
+
     def _call():
-        response = genai_client.models.generate_images(
+        response = direct_client.models.generate_images(
             model=GEMINI_IMAGE_MODEL,
             prompt=prompt,
             config=types.GenerateImagesConfig(
-                number_of_images=number_of_images,
+                number_of_images=target_count,
                 aspect_ratio=aspect_ratio,
             ),
         )
@@ -89,7 +222,14 @@ async def _generate_with_gemini(
     for img in response.generated_images:
         images.append(img.image.image_bytes)
 
-    return images
+    unique = _deduplicate_images(images, target_count)
+    if not unique:
+        raise RuntimeError("图片生成被安全过滤器拒绝，或无法生成图片")
+    if len(unique) < target_count:
+        raise RuntimeError(
+            f"图片生成返回数量不足（需要 {target_count} 张，实际 {len(unique)} 张）"
+        )
+    return unique
 
 
 async def _generate_with_openai(
@@ -97,19 +237,21 @@ async def _generate_with_openai(
     aspect_ratio: str = "1:1",
     number_of_images: int = 1,
 ) -> List[bytes]:
-    """调用 OpenAI gpt-image-2 生图"""
+    """调用 OpenAI Images 生图。"""
     loop = asyncio.get_running_loop()
     client = _get_openai_client()
     size = _map_openai_size(aspect_ratio)
 
     def _call():
-        return client.images.generate(
+        params = _openai_image_kwargs(
+            OPENAI_IMAGE_MODEL,
+            size,
             model=OPENAI_IMAGE_MODEL,
             prompt=prompt,
             n=number_of_images,
-            size=size,
             response_format="b64_json",
         )
+        return client.images.generate(**params)
 
     response = await loop.run_in_executor(None, _call)
 
@@ -134,16 +276,20 @@ async def _edit_with_openai(
     loop = asyncio.get_running_loop()
     client = _get_openai_client()
     size = _map_openai_size(aspect_ratio)
+    mime_type = _detect_image_mime_type(image_bytes)
+    filename = _image_filename_for_mime(mime_type)
 
     def _call():
-        return client.images.edit(
+        params = _openai_image_kwargs(
+            OPENAI_IMAGE_MODEL,
+            size,
             model=OPENAI_IMAGE_MODEL,
-            image=("image.png", io.BytesIO(image_bytes), "image/png"),
+            image=(filename, io.BytesIO(image_bytes), mime_type),
             prompt=prompt,
             n=1,
-            size=size,
             response_format="b64_json",
         )
+        return client.images.edit(**params)
 
     response = await loop.run_in_executor(None, _call)
     images = []
@@ -159,28 +305,26 @@ async def _edit_with_gemini(
     image_bytes: bytes,
     prompt: str,
 ) -> List[bytes]:
-    """Gemini 2.0 Flash 图片编辑（generate_content 多模态输出）"""
+    """Gemini 图片编辑（generate_content 多模态输出）。"""
     from google.genai import types
     loop = asyncio.get_running_loop()
+    client = _gemini_client_for_model(GEMINI_IMAGE_EDIT_MODEL)
+    if _is_gemini_content_image_model(GEMINI_IMAGE_EDIT_MODEL):
+        _ensure_gemini_content_auth()
+    mime_type = _detect_image_mime_type(image_bytes)
 
     def _call():
-        response = genai_client.models.generate_content(
+        response = client.models.generate_content(
             model=GEMINI_IMAGE_EDIT_MODEL,
             contents=[
-                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=image_bytes)),
+                types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
                 types.Part(text=prompt),
             ],
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE", "TEXT"],
             ),
         )
-        result = []
-        for candidate in response.candidates:
-            for part in candidate.content.parts:
-                if (hasattr(part, "inline_data") and part.inline_data
-                        and part.inline_data.mime_type.startswith("image/")):
-                    result.append(part.inline_data.data)
-        return result
+        return _deduplicate_images(_extract_gemini_inline_images(response), 4)
 
     images = await loop.run_in_executor(None, _call)
     if not images:

@@ -3,11 +3,13 @@
 
 import json
 import asyncio
+import io
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from PIL import Image
 
 
 @pytest.mark.asyncio
@@ -53,6 +55,100 @@ def _patch_httpx_transport(monkeypatch, responses):
 
     monkeypatch.setattr("app.dingtalk_card.httpx.AsyncClient", client_factory)
     return requests, client_options
+
+
+def _valid_png(size=(2, 2), color="red"):
+    image = Image.new("RGB", size, color)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_image_normalizes_media_id_and_uses_detected_png_type():
+    import app.dingtalk_card as dc
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="$iAEKAqNwbmcDBgTNAk")
+    png = _valid_png()
+
+    result = await helper.upload_generated_image(png)
+
+    assert result == "@$iAEKAqNwbmcDBgTNAk"
+    helper.upload_media.assert_awaited_once_with(
+        png,
+        filetype="image",
+        filename="generated.png",
+        mimetype="image/png",
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_image_converts_webp_to_png_before_upload():
+    import app.dingtalk_card as dc
+    from PIL import Image
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="@lALP_webp")
+    source = io.BytesIO()
+    Image.new("RGB", (2, 2), "red").save(source, format="WEBP")
+
+    result = await helper.upload_generated_image(source.getvalue())
+
+    assert result == "@lALP_webp"
+    uploaded, kwargs = helper.upload_media.await_args.args[0], helper.upload_media.await_args.kwargs
+    assert uploaded.startswith(b"\x89PNG\r\n\x1a\n")
+    assert kwargs == {
+        "filetype": "image",
+        "filename": "generated.png",
+        "mimetype": "image/png",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content,returned,match",
+    [
+        (b"not-an-image" + b"\x00", "@lALP_id", "图片格式"),
+        (_valid_png(), "bad id", "media_id"),
+        (_valid_png(), None, "media_id"),
+    ],
+)
+async def test_upload_generated_image_rejects_invalid_content_or_media_id(content, returned, match):
+    import app.dingtalk_card as dc
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value=returned)
+
+    with pytest.raises(RuntimeError, match=match):
+        await helper.upload_generated_image(content)
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_image_rejects_truncated_png_before_upload():
+    import app.dingtalk_card as dc
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="$iAEKAqNwbmcDBgTNAk")
+
+    with pytest.raises(RuntimeError, match="图片格式"):
+        await helper.upload_generated_image(b"\x89PNG\r\n\x1a\n" + b"broken")
+
+    helper.upload_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_image_rejects_excessive_pixel_count(monkeypatch):
+    import app.dingtalk_card as dc
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="$iAEKAqNwbmcDBgTNAk")
+    monkeypatch.setattr(dc, "_GENERATED_IMAGE_MAX_PIXELS", 1)
+
+    with pytest.raises(RuntimeError, match="像素"):
+        await helper.upload_generated_image(_valid_png(size=(2, 2)))
+
+    helper.upload_media.assert_not_awaited()
 
 
 @pytest.mark.asyncio

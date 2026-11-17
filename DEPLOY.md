@@ -21,10 +21,10 @@
 | 依赖 | 用途 | 说明 |
 |---|---|---|
 | OpenAI 兼容中转站（如自建 sub2api） | GPT / Claude 对话，可选 Gemini 对话 | `openai`、`anthropic` 容器通过 `OPENAI_API_BASE` 访问；Gemini 容器可通过 `GEMINI_API_BASE` 走同一中转站的 `/v1beta` 原生协议 |
-| SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 生图 / 改图始终直连 Google，需要 `SOCKS_PROXY` |
+| SOCKS5 代理（如 v2rayA） | 直连 Google 等境外 API | 旧 Imagen 直连使用 `SOCKS_PROXY`；Gemini 原生图片模型可走中转，钉钉媒体上传不走代理 |
 | dws CLI 与有效登录态 | 钉钉会话、引用、媒体及群成员读取 | 镜像安装固定版本；三个生产 compose 共享 `./data-dws:/app/data-dws`。dws 决定会话可见范围、顺序、撤回、`/clear` 和历史条数；群聊还需返回当前同企业、同会话的完整机器人名单，供 `DINGTALK_CLIENT_ID` 精确匹配唯一 `robotCode` 到 dws `openDingtalkId`；成员提及在同一张流式卡片内渲染，不另发提醒；登录企业须与机器人企业一致 |
 | Redis / MySQL | 统计、采样等应用状态及旧路径存储；卡片正文短期补全 | 钉钉会话不从 Redis / MySQL 恢复旧历史，也不在 dws 失败时回退；Stream `chatbotUserId` 不直接当作 dws sender；群聊身份名单缺失、重复或不完整时不写新缓存。业务发送成功后，dws 可见性查询最多尝试 3 次并受 5 秒查询预算约束，只有当前查询唯一确定精确 `messageId` 才写入本机器人卡片正文；读取只匹配不可变 `messageId` 和 dws `openDingtalkId`，footer 绑定失败时保留 dws 投影 |
-| 腾讯云 COS | 生图存储 | 可选，生图功能需要 |
+| 腾讯云 COS | Deprecated 企业微信等旧路径存储 | 钉钉生图 / 改图上传本机器人媒体，不需要 COS；不要删除旧对象或凭据来执行本次升级 |
 
 ## 部署步骤
 
@@ -43,7 +43,7 @@ cp .env.anthropic.example .env.anthropic    # Claude
 - `DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET`：各容器使用**不同的**钉钉应用
 - `CHAT_COMPLETIONS_BEARER_TOKEN`：`openssl rand -hex 32` 生成。未配置时 `/v1/chat/completions` 拒绝服务
 - 模型与上游：
-  - Gemini：`GEMINI_API_KEY`（直连 Google，生图同样需要），可选 `GEMINI_API_BASE` + `GEMINI_API_BASE_KEY`
+  - Gemini：`GEMINI_API_KEY` 用于 Google 直连兼容；配置 `GEMINI_API_BASE` + `GEMINI_API_BASE_KEY` 后，原生图片模型与对话使用该中转
   - GPT / Claude：`OPENAI_API_BASE` + `OPENAI_API_KEY`
   - 三档模型：`MODEL_ROUTER` / `MODEL_LITE` / `MODEL_FAST` / `MODEL_PRO`
 
@@ -101,8 +101,10 @@ docker exec dingtalk-ai-bot-anthropic dws auth status --readonly -f json
 | `DWS_CONTEXT_LIMIT` | 默认 40。钉钉主链路会按 `MAX_HISTORY_LENGTH` 和当前消息去重余量扩大窗口，单次读取最多 100 条；保持现有 50 / 50 / 25 配置即可 |
 | `DWS_EXPECTED_CORP_ID` | 可选企业绑定。登录不可用或企业无法确认时停止读取，不使用旧库兜底；不要混用其他企业的共享登录态 |
 | `ENABLE_CARD_BODY_RESTORE` | 默认 `true`。设为 `false` 同时禁用卡片正文保存和恢复；dws 可见性、撤回、`/clear` 和普通历史过滤不变 |
-| `GEMINI_API_BASE` | 填中转站的 Gemini 原生协议入口，SDK 会自动拼接 `/v1beta`。**路径前缀取决于中转站**：sub2api 需要带 `/antigravity`（如 `https://<中转站域名>/antigravity`），不带会返回 400 `API key group platform is not gemini`；标准 `/v1beta` 协议层的中转站则不能带后缀。中转站在公网时用 `https`，`http` 会被 302 跳转导致 POST 失败 |
-| `GEMINI_API_KEY` | 保持为 Google 直连 key。生图的 `:predict` 端点中转站不覆盖，始终直连 |
+| `GEMINI_API_BASE` | 填中转站的 Gemini 原生协议入口，SDK 自动拼接 `/v1beta`；前缀取决于账号组。2026-11-17 新 key 组实测使用 `http://10.1.0.16:38090`，不带旧 `/antigravity` 前缀。公网入口使用 `https`，不可从旧账号组推断新路径 |
+| `GEMINI_API_KEY` | 保留 Google 直连 key，供旧 Imagen `:predict` 等兼容路径使用；`gemini-nano-banana-2.1` 使用 `GEMINI_API_BASE_KEY` 走原生中转 |
+| `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_EDIT_MODEL` | Gemini 原生生图与改图分别显式设置；不能只改 `OPENAI_IMAGE_MODEL` 来替换 Gemini 实际模型 |
+| `OPENAI_IMAGE_MODEL` / `OPENAI_IMAGE_COMPLEXITY` | GPT 目标为 `gpt-image-2.6-sunburst`；最高规划档为 `complexity=high`，没有图片 `reasoning.effort=max` 字段 |
 | `OPENAI_{FLASH,PRO}_SUPPORTS_SEARCH` | 只有上游真正执行 Responses `web_search` 时才会有搜索效果。不同中转站对不同上游的处理不一样（如 sub2api 上的 Claude 会在服务端搜索并把结果拼进正文，但不产生标准搜索事件），换中转站后需要重新实测 |
 | `SEARCH_FALLBACK_PROVIDER` | 默认 `none`。设为 `gemini` 会启用旧的"Gemini 搜索摘要注入"兼容路径 |
 | `OPENROUTER_PROVIDER_ORDER` | 仅原生 `AI_BACKEND=openrouter` 使用，默认 `Anthropic`；改成其他 provider 时 prompt cache 可能被静默忽略 |

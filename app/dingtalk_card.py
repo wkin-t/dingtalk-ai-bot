@@ -7,8 +7,11 @@ import json
 import uuid
 import time
 import asyncio
+import io
+import re
 import random
 import traceback
+import warnings
 from typing import Optional, Dict, Any, List, Callable
 from functools import wraps
 
@@ -42,6 +45,64 @@ from app.config import (
     DINGTALK_FILE_DOWNLOAD_TIMEOUT,
     DINGTALK_TOKEN_EARLY_REFRESH_SEC,
 )
+
+
+# 钉钉旧媒体接口的线上资料存在 1 MiB/20 MiB 两种上限；按较宽的已知上限
+# 设定硬门槛，避免把异常响应或无限大的图片交给上传接口。
+_GENERATED_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_GENERATED_IMAGE_MAX_PIXELS = 40_000_000
+_SAFE_MEDIA_ID_RE = re.compile(r"^[A-Za-z0-9_$.:+-]{1,512}$")
+
+
+def _prepare_generated_image(content: bytes) -> tuple[bytes, str, str]:
+    """校验生成图片并转换为钉钉媒体接口稳定支持的 PNG/JPEG/GIF/BMP。"""
+    if not isinstance(content, (bytes, bytearray)) or not content:
+        raise RuntimeError("图片内容为空")
+    if len(content) > _GENERATED_IMAGE_MAX_BYTES:
+        raise RuntimeError("图片文件过大，无法上传")
+
+    data = bytes(content)
+    try:
+        from PIL import Image
+
+        # verify() 检查完整文件结构；把解压炸弹警告提升为异常，避免在
+        # WebP 转换或钉钉上传前才耗尽内存。重新打开后只读取尺寸，保留原图
+        # 字节，不为了展示擅自缩放用户生成的图片。
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                width, height = image.size
+                if width <= 0 or height <= 0 or width * height > _GENERATED_IMAGE_MAX_PIXELS:
+                    raise RuntimeError("图片像素过大，无法上传")
+                image.verify()
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("图片格式无效或已损坏") from exc
+
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                converted = io.BytesIO()
+                image.convert("RGBA").save(converted, format="PNG", optimize=True)
+                data = converted.getvalue()
+        except Exception as exc:
+            raise RuntimeError("图片格式无法转换") from exc
+        if len(data) > _GENERATED_IMAGE_MAX_BYTES:
+            raise RuntimeError("图片文件过大，无法上传")
+        return data, "generated.png", "image/png"
+
+    formats = (
+        (b"\x89PNG\r\n\x1a\n", "generated.png", "image/png"),
+        (b"\xff\xd8\xff", "generated.jpg", "image/jpeg"),
+        ((b"GIF87a", b"GIF89a"), "generated.gif", "image/gif"),
+        (b"BM", "generated.bmp", "image/bmp"),
+    )
+    for signature, filename, mimetype in formats:
+        signatures = signature if isinstance(signature, tuple) else (signature,)
+        if any(data.startswith(item) for item in signatures):
+            return data, filename, mimetype
+    raise RuntimeError("图片格式不受支持")
 
 RETRYABLE_ERROR_KEYWORDS = (
     "ssl",
@@ -114,6 +175,7 @@ def async_retry(
     jitter: float = 0.25,
     retry_on_none: bool = True,
     retry_if: Optional[Callable[[Exception], bool]] = None,
+    safe_logging: bool = False,
 ):
     """
     异步重试装饰器
@@ -148,20 +210,26 @@ def async_retry(
 
                 except Exception as e:
                     should_retry = retry_if(e) if retry_if else True
+                    error_detail = (
+                        f"（{type(e).__name__}）"
+                        if safe_logging
+                        else f": {e}"
+                    )
                     if attempt < max_attempts and should_retry:
                         wait_time = _retry_wait_seconds(attempt, base_delay, max_delay, jitter)
                         print(
                             f"⚠️ {func.__name__} 异常（第 {attempt}/{max_attempts} 次），"
-                            f"{wait_time:.1f}秒后重试: {e}"
+                            f"{wait_time:.1f}秒后重试{error_detail}"
                         )
                         await asyncio.sleep(wait_time)
                         continue
 
                     if not should_retry:
-                        print(f"⛔ {func.__name__} 非重试型异常，停止重试: {e}")
+                        print(f"⛔ {func.__name__} 非重试型异常，停止重试{error_detail}")
                     else:
-                        print(f"❌ {func.__name__} 最终失败（已重试 {max_attempts} 次）: {e}")
-                    traceback.print_exc()
+                        print(f"❌ {func.__name__} 最终失败（已重试 {max_attempts} 次）{error_detail}")
+                    if not safe_logging:
+                        traceback.print_exc()
                     return None
 
             print(f"❌ {func.__name__} 最终失败（结果为空，已重试 {max_attempts} 次）")
@@ -768,8 +836,7 @@ class DingTalkCardHelper:
             except Exception as e:
                 if _is_retryable_exception(e):
                     raise
-                print(f"⚠️ 上传媒体失败: {e}")
-                traceback.print_exc()
+                print(f"⚠️ 上传媒体失败（{type(e).__name__}）")
                 return False
 
         @async_retry(
@@ -778,6 +845,7 @@ class DingTalkCardHelper:
             max_delay=DINGTALK_RETRY_MAX_DELAY,
             jitter=DINGTALK_RETRY_JITTER,
             retry_if=_is_retryable_exception,
+            safe_logging=True,
         )
         async def _upload_with_retry() -> Optional[str]:
             current = self.access_token or token
@@ -797,6 +865,20 @@ class DingTalkCardHelper:
         if result == PERMANENT_FAIL:
             return None
         return result
+
+    async def upload_generated_image(self, content: bytes) -> str:
+        """上传生图结果并返回可嵌入钉钉 Markdown 的单个 ``@media_id``。"""
+        data, filename, mimetype = _prepare_generated_image(content)
+        raw_media_id = await self.upload_media(
+            data,
+            filetype="image",
+            filename=filename,
+            mimetype=mimetype,
+        )
+        media_id = str(raw_media_id or "").strip().lstrip("@")
+        if not media_id or not _SAFE_MEDIA_ID_RE.fullmatch(media_id):
+            raise RuntimeError("钉钉媒体上传未返回有效 media_id")
+        return f"@{media_id}"
 
     async def send_group_message(
         self,

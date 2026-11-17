@@ -58,7 +58,6 @@ from app.gemini_client import (
     safe_model_name,
 )
 from app.image_gen import generate_image, edit_image
-from app.image_store import save_image
 from app.openclaw_tools_client import invoke_tool, build_asr_arguments, build_file_arguments, build_vision_arguments
 from app.reference import maybe_inject_reference
 from app.dws_members import members_prompt, resolve_mentions
@@ -74,6 +73,28 @@ except Exception as e:
 
 # --- 全局变量定义 ---
 message_buffer = {}
+
+_IMAGE_ERROR_SAFE_PREFIXES = (
+    "图片生成被安全过滤器拒绝",
+    "无法生成图片",
+    "生图 API 未返回任何图片",
+    "改图 API 未返回任何图片",
+    "图片生成返回数量不足",
+    "图片文件过大",
+    "图片像素过大",
+    "图片格式",
+    "钉钉媒体上传未返回有效 media_id",
+    "图片内容为空",
+)
+
+
+def _safe_image_error(error: BaseException) -> str:
+    """图片分支只保留稳定业务摘要，避免把上游响应或凭据写入卡片/日志。"""
+    message = str(error)
+    for prefix in _IMAGE_ERROR_SAFE_PREFIXES:
+        if message.startswith(prefix):
+            return prefix
+    return safe_error_summary(error, "provider")
 
 @dataclass
 class BufferedTurnContext:
@@ -1484,28 +1505,45 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if not images:
                     raise RuntimeError("生图 API 未返回任何图片")
 
-                # 上传图片到 COS + 生成公网 URL
-                image_urls = []
+                # 上传到当前机器人应用的钉钉媒体空间，避免依赖外部公网 URL。
+                image_media_ids = []
                 for img_bytes in images:
-                    _, url = save_image(img_bytes)
-                    image_urls.append(url)
+                    media_id = await self.card_helper.upload_generated_image(img_bytes)
+                    image_media_ids.append(media_id)
 
                 # 卡片 markdown 展示图片
-                img_markdown = "\n".join(f"![图片{i+1}]({url})" for i, url in enumerate(image_urls))
+                img_markdown = "\n".join(
+                    f"![图片{i + 1}]({media_id})"
+                    for i, media_id in enumerate(image_media_ids)
+                )
                 prompt_display = image_prompt[:500] + ("..." if len(image_prompt) > 500 else "")
                 card_text = f"🎨 `{prompt_display}`\n\n已生成 {len(images)} 张图片 ✨\n\n{img_markdown}"
 
-                await self.card_helper.stream_update(
+                final_update_ok = await self.card_helper.stream_update(
                     out_track_id,
                     card_text,
                     is_finalize=True,
                     is_full=True,
                 )
-                print(f"✅ [生图] 完成，{len(images)} 张已上传 COS")
+                if final_update_ok is False:
+                    raise RuntimeError("钉钉卡片更新失败")
+                print(f"✅ [生图] 完成，{len(images)} 张已上传钉钉媒体")
+
+            except asyncio.CancelledError:
+                try:
+                    await self.card_helper.stream_update(
+                        out_track_id,
+                        "图片生成已取消",
+                        is_finalize=True,
+                        is_full=True,
+                    )
+                except Exception as finalize_error:
+                    print(f"⚠️ [生图] 取消收尾失败（{type(finalize_error).__name__}）")
+                raise
 
             except RuntimeError as e:
-                error_msg = str(e)
-                print(f"⚠️ [生图] 业务错误: {error_msg}")
+                error_msg = _safe_image_error(e)
+                print(f"⚠️ [生图] 业务错误（{type(e).__name__}）")
                 if "安全过滤" in error_msg:
                     friendly = "图片生成被安全过滤器拒绝，请调整描述后重试"
                 elif "无法生成" in error_msg:
@@ -1515,7 +1553,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 await self.card_helper.stream_update(out_track_id, friendly, is_finalize=True, is_full=True)
 
             except Exception as e:
-                print(f"❌ [生图] 异常: {e}")
+                print(f"❌ [生图] 异常（{type(e).__name__}）")
                 await self.card_helper.stream_update(
                     out_track_id,
                     "图片生成失败，请稍后重试 🥲",
@@ -1553,20 +1591,38 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 if not edited:
                     raise RuntimeError("改图 API 未返回任何图片")
 
-                _, url = save_image(edited[0])
+                media_id = await self.card_helper.upload_generated_image(edited[0])
                 prompt_display = edit_prompt[:500] + ("..." if len(edit_prompt) > 500 else "")
-                card_text = f"✏️ `{prompt_display}`\n\n已修改图片 ✨\n\n![修改结果]({url})"
-                await self.card_helper.stream_update(
+                card_text = f"✏️ `{prompt_display}`\n\n已修改图片 ✨\n\n![修改结果]({media_id})"
+                final_update_ok = await self.card_helper.stream_update(
                     out_track_id,
                     card_text,
                     is_finalize=True,
                     is_full=True,
                 )
-                print(f"✅ [改图] 完成，已上传 COS")
+                if final_update_ok is False:
+                    raise RuntimeError("钉钉卡片更新失败")
+                print(f"✅ [改图] 完成，已上传钉钉媒体")
+            except asyncio.CancelledError:
+                try:
+                    await self.card_helper.stream_update(
+                        out_track_id,
+                        "图片修改已取消",
+                        is_finalize=True,
+                        is_full=True,
+                    )
+                except Exception as finalize_error:
+                    print(f"⚠️ [改图] 取消收尾失败（{type(finalize_error).__name__}）")
+                raise
             except RuntimeError as e:
-                await self.card_helper.stream_update(out_track_id, f"图片修改失败：{e}", is_finalize=True, is_full=True)
+                await self.card_helper.stream_update(
+                    out_track_id,
+                    f"图片修改失败：{_safe_image_error(e)}",
+                    is_finalize=True,
+                    is_full=True,
+                )
             except Exception as e:
-                print(f"❌ [改图] 异常: {e}")
+                print(f"❌ [改图] 异常（{type(e).__name__}）")
                 await self.card_helper.stream_update(out_track_id, "图片修改失败，请稍后重试 🥲", is_finalize=True, is_full=True)
             return  # 跳过正常 AI 流
         # ===== 改图分支结束 =====
