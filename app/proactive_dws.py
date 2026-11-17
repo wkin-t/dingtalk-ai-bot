@@ -167,16 +167,12 @@ def _parse_complete_bot_rows(payload: Any, conversation_id: str) -> list[dict[st
         return None
 
     bot_ids: set[str] = set()
-    robot_codes: set[str] = set()
     for row in rows:
-        robot_code = _clean_id(row.get("robotCode"))
         sender_id = _clean_id(row.get("openDingtalkId"))
         if not sender_id or sender_id in bot_ids:
             return None
-        if robot_code and robot_code in robot_codes:
-            return None
-        if robot_code:
-            robot_codes.add(robot_code)
+        # 同一其他应用可在名单中有多个 sender；本 bot 的 AppKey 唯一性由
+        # fetch_group_snapshot 单独核验，不能因此误判整个完整名单不可用。
         bot_ids.add(sender_id)
     return rows
 

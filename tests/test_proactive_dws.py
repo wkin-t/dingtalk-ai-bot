@@ -230,6 +230,34 @@ async def test_snapshot_requires_complete_unique_robot_membership_and_same_conve
 
 
 @pytest.mark.asyncio
+async def test_other_bot_app_code_duplicates_do_not_invalidate_unique_own_identity():
+    from app import proactive_dws
+
+    bots = [
+        {"robotCode": "robot-a", "openDingtalkId": "bot-a"},
+        {"robotCode": "shared-other-app", "openDingtalkId": "bot-b"},
+        {"robotCode": "shared-other-app", "openDingtalkId": "bot-c"},
+    ]
+    async def read(args, **kwargs):
+        if args[:2] == ["chat", "+chat-members-list"]:
+            return _bot_payload("cid-1", bots)
+        if args[:3] == ["chat", "message", "list"]:
+            return _group_rows_payload("cid-1", [], has_more=False)
+        raise AssertionError(args)
+
+    with patch.object(proactive_dws, "check_dws_corp_access", AsyncMock(return_value=_allowed_corp())), \
+         patch.object(proactive_dws, "run_dws_readonly_json", side_effect=read), \
+         patch.object(proactive_dws, "resolve_card_sender_id", AsyncMock(return_value="bot-a")):
+        snapshot = await proactive_dws.fetch_group_snapshot(
+            "corp-1", "cid-1", "robot-a", datetime(2026, 11, 17, 10, 0, tzinfo=BEIJING),
+            known_group={"cid": "cid-1", "name": "研发群"})
+
+    assert snapshot is not None
+    assert snapshot.bot_sender_id == "bot-a"
+    assert set(snapshot.bot_ids) == {"bot-a", "bot-b", "bot-c"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bot_payload",
     [
