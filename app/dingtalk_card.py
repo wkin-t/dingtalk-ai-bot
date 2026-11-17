@@ -12,7 +12,7 @@ import re
 import random
 import traceback
 import warnings
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Awaitable
 from functools import wraps
 
 import httpx
@@ -880,43 +880,70 @@ class DingTalkCardHelper:
 
     async def deliver_proactive_card(
         self, conversation_id: str, template_id: str, content: str,
-        delivery_id: str, send_guard: Callable[[], bool],
+        delivery_id: str, send_guard: Callable[[], Awaitable[bool]],
     ) -> bool:
-        """只投递已完成正文；结果未知不重发，不创建思考卡或错误回退消息。"""
-        token = await self.get_access_token()
-        if not token:
-            return False
-        request = card_models.CreateAndDeliverRequest(
-            card_template_id=template_id, out_track_id=delivery_id, callback_type="STREAM",
-            card_data=card_models.CreateAndDeliverRequestCardData(
-                card_param_map=self._convert_card_data({"msgTitle": "", "thinkingText": "",
-                    "msgContent": content, "flowStatus": "3", "isError": "false", "msgButtons": []})),
-            open_space_id=f"dtv1.card//im_group.{conversation_id}",
-            im_group_open_deliver_model=card_models.CreateAndDeliverRequestImGroupOpenDeliverModel(
-                robot_code=self.client_id, at_user_ids={}),
-            im_group_open_space_model=card_models.CreateAndDeliverRequestImGroupOpenSpaceModel(
-                support_forward=True),
-        )
+        """先完成未投递卡片的流式正文，再通过当前门禁投递一次。"""
         try:
-            async with httpx.AsyncClient(trust_env=False, follow_redirects=False,
-                    timeout=httpx.Timeout(10.0, connect=3.0)) as client:
-                # token 已取得；最后一次当前 dws 查询完成后直接发出可取消的 POST。
-                if not await send_guard():
+            async with asyncio.timeout(30):
+                token = await self.get_access_token()
+                if not token:
                     return False
-                response = await client.post(
-                    "https://api.dingtalk.com/v1.0/card/instances/createAndDeliver",
-                    headers={"x-acs-dingtalk-access-token": token}, json=request.to_map())
-            if response.status_code != 200:
-                return False
-            body = response.json()
-            if not isinstance(body, dict) or body.get("success") is not True:
-                return False
-            result = body.get("result")
-            if not isinstance(result, dict) or result.get("outTrackId") != delivery_id:
-                return False
-            deliveries = result.get("deliverResults")
-            return deliveries is None or (isinstance(deliveries, list) and bool(deliveries)
-                and all(isinstance(item, dict) and item.get("success") is True for item in deliveries))
+                final_data = self._convert_card_data({"msgTitle": "AI", "thinkingText": "",
+                    "msgContent": content, "statusText": "", "flowStatus": "3", "isError": "false",
+                    "msgButtons": [], "config": {"autoLayout": True}})
+                request = card_models.CreateCardRequest(
+                    card_template_id=template_id, out_track_id=delivery_id, callback_type="STREAM",
+                    card_data=card_models.CreateCardRequestCardData(
+                        card_param_map={**final_data, "flowStatus": "1"}),
+                    im_group_open_space_model=card_models.CreateCardRequestImGroupOpenSpaceModel(
+                        support_forward=True),
+                )
+                update = card_models.UpdateCardRequest(out_track_id=delivery_id,
+                    card_data=card_models.UpdateCardRequestCardData(card_param_map=final_data),
+                    card_update_options=card_models.UpdateCardRequestCardUpdateOptions(update_card_data_by_key=True))
+                delivery = card_models.DeliverCardRequest(out_track_id=delivery_id,
+                    open_space_id=f"dtv1.card//im_group.{conversation_id}",
+                    im_group_open_deliver_model=card_models.DeliverCardRequestImGroupOpenDeliverModel(
+                        robot_code=self.client_id, at_user_ids={}))
+
+                def acknowledged(response):
+                    if response.status_code != 200:
+                        return None
+                    body = response.json()
+                    return body if isinstance(body, dict) and body.get("success") is True else None
+
+                async with httpx.AsyncClient(trust_env=False, follow_redirects=False,
+                        timeout=httpx.Timeout(10.0, connect=3.0)) as client:
+                    if not await send_guard():
+                        return False
+                    headers = {"x-acs-dingtalk-access-token": token}
+                    response = await client.post(
+                        "https://api.dingtalk.com/v1.0/card/instances", headers=headers, json=request.to_map())
+                    created = acknowledged(response)
+                    if not created or not isinstance(created.get("result"), str) or not created["result"].strip():
+                        return False
+                    # 模板的 streaming 组件不消费初始 msgContent；先在群外结束流式输入，
+                    # 避免投递已被接受、正文却没有完成渲染的空白卡片。
+                    response = await client.put("https://api.dingtalk.com/v1.0/card/streaming",
+                        headers=headers, json={"outTrackId": delivery_id, "guid": str(uuid.uuid4()),
+                            "key": "msgContent", "content": content, "isFull": True,
+                            "isFinalize": True, "isError": False})
+                    streamed = acknowledged(response)
+                    if not streamed or streamed.get("result") is not True:
+                        return False
+                    response = await client.put("https://api.dingtalk.com/v1.0/card/instances",
+                        headers=headers, json=update.to_map())
+                    updated = acknowledged(response)
+                    if not updated or updated.get("result") is not True:
+                        return False
+                    if not await send_guard():
+                        return False
+                    response = await client.post("https://api.dingtalk.com/v1.0/card/instances/deliver",
+                        headers=headers, json=delivery.to_map())
+                    delivered = acknowledged(response)
+                    results = delivered.get("result") if delivered else None
+                    return (isinstance(results, list) and bool(results)
+                        and all(isinstance(item, dict) and item.get("success") is True for item in results))
         except asyncio.CancelledError:
             raise
         except Exception as error:

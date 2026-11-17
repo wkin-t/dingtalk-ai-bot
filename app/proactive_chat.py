@@ -16,6 +16,7 @@ from app.proactive_policy import BEIJING, build_daily_slots, in_working_hours, s
 
 GENERATION_TIMEOUT = 45
 TURN_TIMEOUT = 90
+DELIVERY_TIMEOUT = 30
 _ERROR_TEXT = re.compile(
     r"(?:^\s*(?:❌|⚠️|error[:：]|错误[:：])|API\s*(?:Error|错误|请求失败)|error\s*code\s*:|no available accounts|"
     r"^\s*(?:HTTP\s*)?[45]\d\d\b|service (?:temporarily )?unavailable|"
@@ -235,7 +236,7 @@ class ProactiveChatScheduler:
                 identity = f"{self.corp_id}:{cid}:{day.isoformat()}:{slot_index}"
                 delivery_id = "proactive-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
                 permit[0] = True
-                delivery_deadline = time.monotonic() + 15
+                delivery_deadline = time.monotonic() + DELIVERY_TIMEOUT
                 async def send_guard():
                     if not permit[0] or time.monotonic() >= delivery_deadline:
                         return False
@@ -250,7 +251,7 @@ class ProactiveChatScheduler:
                     return (owned and permit[0] and time.monotonic() < delivery_deadline
                         and self._eligible(current, self.clock()))
                 success = await asyncio.wait_for(
-                    self.handler.send_proactive_text(fresh, text, delivery_id, send_guard), 15)
+                    self.handler.send_proactive_text(fresh, text, delivery_id, send_guard), DELIVERY_TIMEOUT)
                 print(f"[主动群聊] 投递结束 accepted={'true' if success else 'unknown'}")
             finally:
                 permit[0] = False
