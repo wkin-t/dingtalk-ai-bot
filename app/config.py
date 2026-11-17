@@ -204,7 +204,7 @@ def get_agent_for_conversation(conversation_id: str) -> str | None:
 AI_BACKEND = os.getenv("AI_BACKEND", "gemini")
 
 def _auto_image_backend() -> str:
-    """按 OPENAI_IMAGE_MODEL 名称自动推断生图后端。
+    """Deprecated：旧预分析图片入口按 OPENAI_IMAGE_MODEL 名称推断后端。
     Gemini 图片模型走原生 generate_content 协议；Imagen 保留 Google 直连，
     GPT 图片模型走 OpenAI Images 接口。模型变量与协议路径由 image_gen 分别处理。
     可通过 IMAGE_BACKEND 环境变量显式覆盖。

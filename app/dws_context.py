@@ -925,6 +925,133 @@ def _extract_resources_from_dict(src: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+_CARD_MEDIA_MARKDOWN_RE = re.compile(
+    r"^[ ]{0,3}!\[[^\]\r\n]{1,128}\]\((@l[A-Za-z0-9_-]{1,510})\)[ ]*$"
+)
+_CARD_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+_VALID_CARD_FLOW_STATUS = frozenset({"3"})
+_CARD_MARKDOWN_MEDIA_LIMIT = 4
+
+
+def _raw_dws_identity(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_robot_card_projection(item: dict[str, Any]) -> bool:
+    """仅认可 dws 原始机器人卡片投影，避免从普通正文推断媒体资源。"""
+    send_type = str(item.get("sendType") or "").strip().lower()
+    if send_type != "robot":
+        return False
+    if not _raw_dws_identity(item, "messageId", "openMessageId"):
+        return False
+    if not _raw_dws_identity(item, "conversationId", "openConversationId"):
+        return False
+
+    flow_status = item.get("flowStatus")
+    if isinstance(flow_status, bool) or flow_status is None:
+        return False
+    if isinstance(flow_status, int):
+        flow_status = str(flow_status)
+    elif isinstance(flow_status, float):
+        if not flow_status.is_integer():
+            return False
+        flow_status = str(int(flow_status))
+    else:
+        flow_status = str(flow_status).strip()
+    return flow_status in _VALID_CARD_FLOW_STATUS
+
+
+def _extract_robot_card_markdown_media_ids(item: dict[str, Any], raw_text: str) -> list[str]:
+    """从 dws 机器人卡片正文提取独立行媒体引用，不解析代码示例或 URL。"""
+    if not _is_robot_card_projection(item) or not raw_text:
+        return []
+
+    media_limit = max(0, min(_CARD_MARKDOWN_MEDIA_LIMIT, int(cfg.DWS_MAX_QUOTE_IMAGES)))
+    if media_limit == 0:
+        return []
+    media_ids: list[str] = []
+    fence_marker = ""
+    for line in raw_text.splitlines():
+        fence_match = _CARD_FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not fence_marker:
+                fence_marker = marker
+            elif (
+                marker[0] == fence_marker[0]
+                and len(marker) >= len(fence_marker)
+                and not fence_match.group(2).strip()
+            ):
+                fence_marker = ""
+            continue
+        if fence_marker:
+            continue
+
+        media_match = _CARD_MEDIA_MARKDOWN_RE.fullmatch(line)
+        if media_match:
+            media_id = media_match.group(1)
+            if media_id not in media_ids:
+                media_ids.append(media_id)
+                if len(media_ids) >= _CARD_MARKDOWN_MEDIA_LIMIT:
+                    break
+    return media_ids
+
+
+def _resource_dedup_key(resource: dict[str, Any]) -> tuple[str, str]:
+    resource_id = str(resource.get("resourceId") or "").strip()
+    resource_id_type = str(resource.get("resourceIdType") or "").strip()
+    if resource_id:
+        return resource_id_type, resource_id
+    return "", json.dumps(resource, ensure_ascii=False, sort_keys=True)
+
+
+def _merge_robot_card_markdown_resources(
+    item: dict[str, Any], raw_text: str, resources: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    media_ids = _extract_robot_card_markdown_media_ids(item, raw_text)
+    if not media_ids:
+        return resources
+
+    seen = {_resource_dedup_key(resource) for resource in resources}
+    image_resource_count = sum(
+        1
+        for resource in resources
+        if str(resource.get("resourceType") or "").strip().lower() in {"image", "picture", "photo", "emotion"}
+        or str(resource.get("resourceIdType") or "").strip() == "mediaId"
+    )
+    media_limit = max(0, min(_CARD_MARKDOWN_MEDIA_LIMIT, int(cfg.DWS_MAX_QUOTE_IMAGES) - image_resource_count))
+    if media_limit == 0:
+        return resources
+
+    message_id = _raw_dws_identity(item, "messageId", "openMessageId")
+    conversation_id = _raw_dws_identity(item, "conversationId", "openConversationId")
+    for media_id in media_ids[:media_limit]:
+        resource = {
+            "resourceType": "image",
+            "resourceIdType": "mediaId",
+            "resourceId": media_id,
+            "resourceRefs": {
+                "download": {
+                    "arguments": {
+                        "message-id": message_id,
+                        "open-conversation-id": conversation_id,
+                        "resource-id": media_id,
+                        "type": "mediaId",
+                    }
+                }
+            },
+        }
+        key = _resource_dedup_key(resource)
+        if key not in seen:
+            resources.append(resource)
+            seen.add(key)
+    return resources
+
+
 def _parse_quote_dict(q: dict[str, Any]) -> DwsQuoteInfo | None:
     if not isinstance(q, dict):
         return None
@@ -1163,10 +1290,13 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
     message_aliases = _raw_message_ids(item)
 
     raw_text = ""
+    raw_source_text = ""
     if isinstance(item.get("text"), str):
-        raw_text = item["text"].strip()
+        raw_source_text = item["text"]
+        raw_text = raw_source_text.strip()
     elif isinstance(item.get("content"), str):
-        candidate = item["content"].strip()
+        raw_source_text = item["content"]
+        candidate = raw_source_text.strip()
         if not (candidate.startswith("{") and "cipher" in candidate.lower()):
             raw_text = candidate
 
@@ -1174,6 +1304,7 @@ def extract_clean_dws_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if not resources:
         for media_id in re.findall(r"mediaId=([^\s)]+)", raw_text):
             resources.append({"resourceType": "image", "resourceIdType": "mediaId", "resourceId": media_id})
+    resources = _merge_robot_card_markdown_resources(item, raw_source_text, resources)
 
     is_bot_like = (
         sender_type in {"robot", "bot", "chatbot", "system"}

@@ -85,3 +85,13 @@
 用户补充：已停用代码应标记 `Deprecated`。本轮范围为预分析生图/改图、Prompt 增强、旧 OpenClaw 图片 JSON 与 Imagen 直连兼容分支；仍使用的图片 API、上传校验、路由和 dws 通用层不整体弃用。README 集中索引，回滚开关保留。
 
 本地实现验收：最终全量 1084 passed（5 项已有 SDK/测试警告），compileall 与空白检查通过。独立边界复审为 approve；确认修复 Responses 参数 delta 补齐、完整输出参数 UTF-8 上限、已上传图片在后续失败时的保留，以及非生产 OpenRouter 误入旧生图入口。下一阶段按上文候选业务回放、push、三容器发布及真实 Stream 顺序执行。
+
+## Clawbot 原图引用的 DWS 投影补全
+
+候选 `343a474` 的 Gemini/GPT 生图已真实通过函数调用、指定图片 API、机器人上传和同卡片最终 ACK；dws 已读回两张卡片图片。引用改图试运行确实选择 `edit_image`，但两路 `quoted_images=0`。当前 dws 对机器人卡片仅返回正文独立行 `![image](@l...)`，没有结构化 resources；现有解析只认结构化资源或 `mediaId=`。以精确原卡片 messageId/cid 和 `type=mediaId` 经 dws 下载，两张图片的完整 SHA-256 均与原始生成字节一致，确认只需补投影解析。
+
+补全只读取原始 DWS 单条记录的 raw_text，要求 sendType=robot、flowStatus=3、原始消息/会话 ID 完整且未撤回；跳过代码和非独立行，只接受有界安全 @l 媒体引用。资源下载参数绑定原始消息/会话/媒体 ID，复用既有只读下载、图片格式和全局预算，不读回缓存或拼接转发正文。BQB/贴纸等机器人卡片中的真实图片与现有所有历史媒体采用同一预算；普通历史图片仍不进入图片工具的编辑输入，只有本次上传和显式引用可编辑。
+
+Claude 在当前生产配置、Sonnet/Opus 裸名、Sonnet 4.6 以及 Responses/Chat/Anthropic Messages 多种协议的短请求中均返回 503 No available accounts；尚未改其模型、key、账号池或服务。用户要求测试通过再 push/发布三容器，因此将上游可用性作为独立待解决项，候选准备与其余验证继续进行。
+
+DWS 投影修复本地验收：25 项新增边界用例、DWS 整文件 125 passed；完整回归 1109 passed（5 项既有 SDK/测试警告）、compileall 与空白检查通过；独立最终复审 approve。准备重建候选并对原始 Clawbot 引用执行真实改图。

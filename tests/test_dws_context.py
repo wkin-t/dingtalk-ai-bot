@@ -679,6 +679,293 @@ class TestEnvelopeAndMessageParsing:
         assert card_msg is not None
         assert card_msg["is_bot_like"] is True
 
+    @pytest.mark.parametrize(
+        ("projection", "message_id", "media_id"),
+        [
+            (
+                {
+                    "content": "🤖 Gemini\n![image](@lcard-media-a)\n",
+                    "sendType": "robot",
+                    "flowStatus": 3,
+                    "messageType": "interactiveCard",
+                },
+                "card-projection-a",
+                "@lcard-media-a",
+            ),
+            (
+                {
+                    "text": "🤖 GPT\n![image](@lcard-media-b)\n",
+                    "sendType": "robot",
+                    "flowStatus": "3",
+                    "msgType": "markdownCard",
+                },
+                "card-projection-b",
+                "@lcard-media-b",
+            ),
+        ],
+    )
+    def test_robot_card_projection_extracts_standalone_markdown_media_resource(
+        self, projection, message_id, media_id
+    ):
+        from app.dws_context import extract_clean_dws_item
+
+        item = {
+            "messageId": message_id,
+            "conversationId": "conv-card",
+            "sender": "机器人",
+            "createTime": "2026-11-17 12:26:44",
+            **projection,
+        }
+
+        cleaned = extract_clean_dws_item(item)
+
+        assert cleaned is not None
+        assert cleaned["message_id"] == message_id
+        assert cleaned["resources"] == [
+            {
+                "resourceType": "image",
+                "resourceIdType": "mediaId",
+                "resourceId": media_id,
+                "resourceRefs": {
+                    "download": {
+                        "arguments": {
+                            "message-id": message_id,
+                            "open-conversation-id": "conv-card",
+                            "resource-id": media_id,
+                            "type": "mediaId",
+                        }
+                    }
+                },
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {
+                "messageId": "user-spoof",
+                "conversationId": "conv-card",
+                "sendType": "user",
+                "flowStatus": 3,
+                "text": "![image](@luser-spoof-media)",
+            },
+            {
+                "messageId": "fenced-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "```markdown\n![image](@lfenced-media)\n```",
+            },
+            {
+                "messageId": "inline-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "示例 `![image](@linline-media)` 不应读取",
+            },
+            {
+                "messageId": "escaped-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": r"\![image](@lescaped-media)",
+            },
+            {
+                "messageId": "url-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "![image](https://example.invalid/card.png)",
+            },
+            {
+                "messageId": "path-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "![image](/var/tmp/card.png)",
+            },
+            {
+                "messageId": "long-token-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "![image](@" + ("x" * 513) + ")",
+            },
+            {
+                "messageId": "wrong-prefix-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "![image](@x-not-a-dingtalk-media-token)",
+            },
+            {
+                "messageId": "tilde-fenced-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "~~~markdown\n![image](@ltilde-fenced-media)\n~~~",
+            },
+            {
+                "messageId": "fence-suffix-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "```\n![image](@lfenced-suffix-media)\n```not-close\n![image](@lfenced-suffix-media-2)\n```",
+            },
+            {
+                "messageId": "four-space-indented-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "    ![image](@lfour-space-media)",
+            },
+            {
+                "messageId": "tab-indented-card-example",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "\t![image](@ltab-media)",
+            },
+        ],
+    )
+    def test_markdown_media_extraction_rejects_spoof_code_and_non_media_targets(self, item):
+        from app.dws_context import extract_clean_dws_item
+
+        cleaned = extract_clean_dws_item(item)
+
+        assert cleaned is not None
+        assert cleaned["resources"] == []
+
+    def test_markdown_media_extraction_keeps_short_fence_close_inside_long_fence(self):
+        from app.dws_context import extract_clean_dws_item
+
+        cleaned = extract_clean_dws_item(
+            {
+                "messageId": "fence-length-card",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": (
+                    "````markdown\n"
+                    "![image](@lfour-backtick-media)\n"
+                    "```\n"
+                    "![image](@lstill-fenced-media)\n"
+                    "````\n"
+                    "![image](@loutside-fence-media)"
+                ),
+            }
+        )
+
+        assert cleaned is not None
+        assert [resource["resourceId"] for resource in cleaned["resources"]] == [
+            "@loutside-fence-media"
+        ]
+
+    @pytest.mark.parametrize("flow_status", [None, "", "finished", 0, 1, 2, 4])
+    def test_markdown_media_extraction_requires_valid_original_card_flow_status(self, flow_status):
+        from app.dws_context import extract_clean_dws_item
+
+        item = {
+            "messageId": "invalid-flow-status",
+            "conversationId": "conv-card",
+            "sendType": "robot",
+            "flowStatus": flow_status,
+            "text": "![image](@linvalid-flow-media)",
+        }
+
+        cleaned = extract_clean_dws_item(item)
+
+        assert cleaned is not None
+        assert cleaned["resources"] == []
+
+    def test_markdown_media_resources_merge_without_duplicates_and_keep_original_message_id(self):
+        from app.dws_context import extract_clean_dws_item
+
+        message_id = "card-resource-merge"
+        cleaned = extract_clean_dws_item(
+            {
+                "messageId": message_id,
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": "3",
+                "resources": [
+                    {
+                        "resourceType": "image",
+                        "resourceIdType": "mediaId",
+                        "resourceId": "@lexisting-media",
+                    },
+                    {
+                        "resourceType": "file",
+                        "resourceIdType": "fileId",
+                        "resourceId": "existing-file",
+                    },
+                ],
+                "text": "![image](@lexisting-media)\n![image](@lnew-media)\n![image](@lnew-media)",
+            }
+        )
+
+        assert cleaned is not None
+        assert cleaned["message_id"] == message_id
+        assert [resource["resourceId"] for resource in cleaned["resources"]] == [
+            "@lexisting-media",
+            "existing-file",
+            "@lnew-media",
+        ]
+        assert cleaned["resources"][-1]["resourceRefs"] == {
+            "download": {
+                "arguments": {
+                    "message-id": message_id,
+                    "open-conversation-id": "conv-card",
+                    "resource-id": "@lnew-media",
+                    "type": "mediaId",
+                }
+            }
+        }
+
+    def test_markdown_media_resource_binds_open_id_aliases_when_primary_ids_are_absent(self):
+        from app.dws_context import extract_clean_dws_item
+
+        cleaned = extract_clean_dws_item(
+            {
+                "openMessageId": "open-card-message",
+                "openConversationId": "open-card-conversation",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "![image](@lopen-card-media)",
+            }
+        )
+
+        assert cleaned is not None
+        assert cleaned["message_id"] == "open-card-message"
+        assert cleaned["conversation_id"] == "open-card-conversation"
+        assert cleaned["resources"][0]["resourceRefs"]["download"]["arguments"] == {
+            "message-id": "open-card-message",
+            "open-conversation-id": "open-card-conversation",
+            "resource-id": "@lopen-card-media",
+            "type": "mediaId",
+        }
+
+    def test_markdown_media_resources_are_bounded_by_card_media_limit(self):
+        from app.dws_context import extract_clean_dws_item
+
+        cleaned = extract_clean_dws_item(
+            {
+                "messageId": "card-resource-limit",
+                "conversationId": "conv-card",
+                "sendType": "robot",
+                "flowStatus": 3,
+                "text": "\n".join(f"![image](@lcard-media-{index})" for index in range(6)),
+            }
+        )
+
+        assert cleaned is not None
+        assert [resource["resourceId"] for resource in cleaned["resources"]] == [
+            "@lcard-media-0",
+            "@lcard-media-1",
+            "@lcard-media-2",
+            "@lcard-media-3",
+        ]
+
     def test_recalled_rows_and_tombstones_are_filtered_without_matching_normal_text(self):
         from app.dws_context import extract_clean_dws_item
 
