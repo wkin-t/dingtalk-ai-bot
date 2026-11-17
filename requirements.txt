@@ -19,7 +19,7 @@ python-socks
 # PySocks 用于 Socket 级代理
 PySocks
 alibabacloud-tea-util==0.3.15
-alibabacloud-tea-openapi==0.4.6
+alibabacloud-tea-openapi==0.4.7
 # Google Gemini 官方 SDK (新版)
 # 锁定版本：app/gemini_sse_patch.py 整体替换 SDK 私有流解析方法，升级前须按该文件说明重新核对并更新 EXPECTED_VERSION
 google-genai==2.34.0
