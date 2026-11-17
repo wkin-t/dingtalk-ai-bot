@@ -393,6 +393,17 @@ SEARCH_AUTONOMOUS = _get_bool("SEARCH_AUTONOMOUS", True)
 CARD_TEMPLATE_ID = os.getenv("CARD_TEMPLATE_ID", "ea2d035e-20fe-447d-9fbf-c04658772b24.schema")
 
 # 钉钉主动推送 API
+# 主动群聊只有在管理员显式启用并绑定企业时运行；默认安装不会向群主动发言。
+PROACTIVE_CHAT_ENABLED = _get_bool("PROACTIVE_CHAT_ENABLED", False)
+PROACTIVE_CHAT_CORP_ID = (
+    os.getenv("PROACTIVE_CHAT_CORP_ID") or os.getenv("DWS_EXPECTED_CORP_ID") or ""
+).strip()
+PROACTIVE_CHAT_POLL_SECONDS = max(15, _get_int("PROACTIVE_CHAT_POLL_SECONDS", 60))
+PROACTIVE_CHAT_DISCOVERY_SECONDS = max(300, _get_int("PROACTIVE_CHAT_DISCOVERY_SECONDS", 900))
+PROACTIVE_CHAT_GROUP_ALLOWLIST = tuple(
+    cid.strip() for cid in os.getenv("PROACTIVE_CHAT_GROUP_ALLOWLIST", "").split(",") if cid.strip()
+)
+
 DINGTALK_PUSH_BEARER_TOKEN = os.getenv("DINGTALK_PUSH_BEARER_TOKEN", "").strip()
 DINGTALK_PUSH_IP_ALLOWLIST_RAW = os.getenv("DINGTALK_PUSH_IP_ALLOWLIST", "").strip()
 

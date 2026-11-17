@@ -28,6 +28,12 @@ _SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 # 正向只读子命令与参数白名单：任何未在此声明的子命令或参数一律拒绝执行
 _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
+    ("chat", "+chat-list-all"): {
+        "value_flags": {"--limit", "--page-limit", "--max-items", "-f", "--format"},
+        "bool_flags": {"--page-all"},
+        "required_bool_flags": {"--page-all"},
+        "required_value_flags": {"--limit", "--page-limit"},
+    },
     ("chat", "+chat-members-list"): {
         "value_flags": {"--conversation-id", "--member-types", "--page-limit", "-f", "--format"},
         "bool_flags": set(), "required_bool_flags": set(),
@@ -814,13 +820,14 @@ def _validate_flag_value(matched_prefix: tuple[str, ...], flag: str, val: str) -
         raise PermissionError(f"仅允许 json 输出格式，实际收到: {val}")
     if flag == "--direction" and val not in {"older", "newer"}:
         raise PermissionError(f"--direction 仅允许 older/newer，实际收到: {val}")
-    if flag == "--limit":
+    if flag in {"--limit", "--page-limit", "--max-items"}:
         try:
             n = int(val)
         except ValueError as exc:
-            raise PermissionError(f"--limit 必须为整数: {val}") from exc
-        if n < 1 or n > 100:
-            raise PermissionError(f"--limit 超出安全范围 [1, 100]: {n}")
+            raise PermissionError(f"{flag} 必须为整数: {val}") from exc
+        upper = 200 if matched_prefix == ("chat", "+chat-list-all") else 100
+        if n < 1 or n > upper:
+            raise PermissionError(f"{flag} 超出安全范围 [1, {upper}]: {n}")
     if matched_prefix == ("chat", "message", "download-media"):
         if flag == "--type" and val != "mediaId":
             raise PermissionError(f"download-media 仅允许 --type mediaId，拒绝: {val}")
@@ -1428,6 +1435,17 @@ async def run_dws_readonly_json(
 
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except Exception:
+            pass
+        raise
     except asyncio.TimeoutError:
         try:
             proc.kill()

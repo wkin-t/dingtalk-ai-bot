@@ -878,6 +878,51 @@ class DingTalkCardHelper:
             raise RuntimeError("钉钉媒体上传未返回有效 media_id")
         return f"@{media_id}"
 
+    async def deliver_proactive_card(
+        self, conversation_id: str, template_id: str, content: str,
+        delivery_id: str, send_guard: Callable[[], bool],
+    ) -> bool:
+        """只投递已完成正文；结果未知不重发，不创建思考卡或错误回退消息。"""
+        token = await self.get_access_token()
+        if not token:
+            return False
+        request = card_models.CreateAndDeliverRequest(
+            card_template_id=template_id, out_track_id=delivery_id, callback_type="STREAM",
+            card_data=card_models.CreateAndDeliverRequestCardData(
+                card_param_map=self._convert_card_data({"msgTitle": "", "thinkingText": "",
+                    "msgContent": content, "flowStatus": "3", "isError": "false", "msgButtons": []})),
+            open_space_id=f"dtv1.card//im_group.{conversation_id}",
+            im_group_open_deliver_model=card_models.CreateAndDeliverRequestImGroupOpenDeliverModel(
+                robot_code=self.client_id, at_user_ids={}),
+            im_group_open_space_model=card_models.CreateAndDeliverRequestImGroupOpenSpaceModel(
+                support_forward=True),
+        )
+        try:
+            async with httpx.AsyncClient(trust_env=False, follow_redirects=False,
+                    timeout=httpx.Timeout(10.0, connect=3.0)) as client:
+                # token 已取得；最后一次当前 dws 查询完成后直接发出可取消的 POST。
+                if not await send_guard():
+                    return False
+                response = await client.post(
+                    "https://api.dingtalk.com/v1.0/card/instances/createAndDeliver",
+                    headers={"x-acs-dingtalk-access-token": token}, json=request.to_map())
+            if response.status_code != 200:
+                return False
+            body = response.json()
+            if not isinstance(body, dict) or body.get("success") is not True:
+                return False
+            result = body.get("result")
+            if not isinstance(result, dict) or result.get("outTrackId") != delivery_id:
+                return False
+            deliveries = result.get("deliverResults")
+            return deliveries is None or (isinstance(deliveries, list) and bool(deliveries)
+                and all(isinstance(item, dict) and item.get("success") is True for item in deliveries))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"[主动群聊] 投递结果未知 type={type(error).__name__}")
+            return False
+
     async def send_group_message(
         self,
         open_conversation_id: str,

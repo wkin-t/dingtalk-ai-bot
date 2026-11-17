@@ -80,8 +80,14 @@ def start_dingtalk_stream_async():
     print("🚀 正在启动钉钉 Stream 客户端...")
     credential = dingtalk_stream.Credential(DINGTALK_CLIENT_ID, DINGTALK_CLIENT_SECRET)
     client = dingtalk_stream.DingTalkStreamClient(credential)
-    client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, GeminiBotHandler())
-    client.start_forever()
+    handler = GeminiBotHandler()
+    client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, handler)
+    from app.config import PROACTIVE_CHAT_ENABLED
+    if PROACTIVE_CHAT_ENABLED:
+        from app.proactive_chat import start_stream_with_proactive
+        start_stream_with_proactive(client, handler)
+    else:
+        client.start_forever()
 
 def run_stream_in_thread():
     try:

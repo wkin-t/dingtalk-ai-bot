@@ -906,6 +906,26 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         
         # thinking_text 由预分析模型动态生成（结合 Soul 个性）
 
+    def proactive_conversation_lock(self, conversation_id: str):
+        key = (BOT_ID, conversation_id)
+        lock = session_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            session_locks[key] = lock
+        return lock
+
+    def proactive_has_pending(self, conversation_id: str) -> bool:
+        return any(getattr(value.get("incoming_message"), "conversation_id", None) == conversation_id
+            for value in message_buffer.values())
+
+    async def generate_proactive_text(self, snapshot):
+        from app.proactive_chat import generate_proactive_text
+        return await generate_proactive_text(snapshot, soul_content=_load_soul(snapshot.conversation_id))
+
+    async def send_proactive_text(self, snapshot, text, delivery_id, send_guard):
+        return await self.card_helper.deliver_proactive_card(
+            snapshot.conversation_id, self.card_template_id, text, delivery_id, send_guard)
+
     def _calculate_cost(self, model_usage: list) -> float:
         """根据模型用量计算费用 (美元)"""
         total_cost = 0.0
@@ -2072,11 +2092,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         if pending is None:
             return
         conversation_id = pending["incoming_message"].conversation_id or buffer_key
-        lock_key = (BOT_ID, conversation_id)
-        conversation_lock = session_locks.get(lock_key)
-        if conversation_lock is None:
-            conversation_lock = asyncio.Lock()
-            session_locks[lock_key] = conversation_lock
+        conversation_lock = self.proactive_conversation_lock(conversation_id)
 
         # 缓冲仍按用户合并；处理按机器人和会话串行，拿锁后才读取上下文。
         async with conversation_lock:

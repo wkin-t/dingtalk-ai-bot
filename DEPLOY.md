@@ -242,6 +242,22 @@ docker compose down
 
 发布前按各容器原镜像派生候选并保留回滚镜像、源码与环境备份，核对源码和完整环境哈希；只 recreate 三个指定服务。候选 handler 回放与上线后真实 Stream 入站应分别记录，健康检查不能替代群内图片验收。
 
+## 主动群聊启用与验收
+
+默认关闭。三个生产容器应显式保持各自 `BOT_ID=gemini/openai/anthropic`，并设置同一受信企业：
+
+```dotenv
+PROACTIVE_CHAT_ENABLED=true
+PROACTIVE_CHAT_CORP_ID=<与当前 dws 登录及机器人所在企业相同的 corpId>
+PROACTIVE_CHAT_GROUP_ALLOWLIST=
+```
+
+allowlist 留空表示所有当前可核验、已接入且最近 24 小时有真人消息的群；受控验收时只填写 Clawbot 的 cid。开关/企业/allowlist 变更后需 targeted Compose recreate，不能只 restart。三个容器需共享现有 `data-dws` 挂载；新增 `data-dws/proactive-guard` 仅保存随机 epoch，不保存消息或凭据，不得在常规清理中移除。该闩与 Redis sentinel 不一致时保持暂停，应先审查发送记录与 Redis 恢复情况，不能直接清空闩或初始化当天额度。
+
+验收需区分纯策略、真实 Redis 原子脚本、候选业务链路与正式调度。覆盖节假日/调休、北京时间边界、只有机器人消息、真人刚发言可以接话、24h 过期、跨容器竞争、重启、超时/取消和发送结果未知。模型必须由实际非流式调用返回正常完成元数据，才能创建卡片；健康探测或路由成功不能代替。Clawbot 实测应在真实工作时段执行，核验当前真人记录、一次性终态卡片及 dws 可读回正文；模型失败时应观察到静默跳过，无群内错误卡片。
+
+回滚时先将三个容器 `PROACTIVE_CHAT_ENABLED=false` 并 recreate，保留 Redis 时隙记录与安全闩；源码/镜像回滚不应重置当日已消耗机会。正常回复不依赖主动模块的 Redis、日历或企业设置。
+
 ## Deprecated 部署
 
 OpenClaw 与企业微信的历史部署文档仍保留，但不再维护：

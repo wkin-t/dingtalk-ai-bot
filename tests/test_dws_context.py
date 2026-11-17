@@ -3254,3 +3254,45 @@ def test_same_member_has_only_one_structured_mention_per_reply():
     assert text.count("atId=member-a") == 1
     assert "完成后请 同事甲 回复。" in text
     assert targets == ["member-a"]
+
+
+def test_readonly_whitelist_allows_production_group_discovery_page_arguments_only():
+    from app.dws_context import validate_readonly_dws_args
+
+    args = [
+        "chat",
+        "+chat-list-all",
+        "--limit",
+        "100",
+        "--page-all",
+        "--page-limit",
+        "10",
+        "-f",
+        "json",
+    ]
+    assert validate_readonly_dws_args(args) == args
+
+    with pytest.raises(PermissionError):
+        validate_readonly_dws_args(
+            ["chat", "+chat-list-all", "--limit", "201", "--page-all", "--page-limit", "10", "-f", "json"]
+        )
+    with pytest.raises(PermissionError):
+        validate_readonly_dws_args(
+            ["chat", "+chat-list-all", "--limit", "100", "--page-all", "--page-limit", "0", "-f", "json"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_readonly_dws_query_kills_and_reaps_its_child(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    import app.dws_context as dws
+    dws.reset_dws_RuntimeState_for_tests()
+    process = SimpleNamespace(returncode=None, communicate=AsyncMock(side_effect=asyncio.CancelledError),
+        kill=Mock(), wait=AsyncMock(return_value=-9))
+    monkeypatch.setattr(dws.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    with pytest.raises(asyncio.CancelledError):
+        await dws.run_dws_readonly_json(["auth", "status", "--readonly", "-f", "json"])
+    process.kill.assert_called_once()
+    process.wait.assert_awaited_once()
