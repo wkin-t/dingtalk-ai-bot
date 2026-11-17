@@ -685,3 +685,11 @@ class TestDisplayResizing:
             # 第 0 帧原本完全不透明，缩放后任一像素都不应被全局 transparency=255 误伤变透明
             alphas = [out_f0.getpixel((x, y))[3] for x in range(0, out_f0.width, 4) for y in range(0, out_f0.height, 4)]
             assert min(alphas) == 255
+
+
+def test_detect_image_format_webp_requires_explicit_opt_in():
+    from app.bqb_image import detect_image_format
+
+    webp = b"RIFF" + b"\x00" * 4 + b"WEBP" + b"payload"
+    assert detect_image_format(webp) is None
+    assert detect_image_format(webp, allow_webp=True) == ("webp", "image/webp")

@@ -152,6 +152,76 @@ async def test_upload_generated_image_rejects_excessive_pixel_count(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("removed", [2, 20, 50])
+async def test_upload_generated_image_rejects_jpeg_that_verifies_but_cannot_decode(removed):
+    import app.dingtalk_card as dc
+
+    source = io.BytesIO()
+    Image.new("RGB", (100, 100), "red").save(source, format="JPEG")
+    truncated = source.getvalue()[:-removed]
+    with Image.open(io.BytesIO(truncated)) as image:
+        image.verify()
+    with Image.open(io.BytesIO(truncated)) as image:
+        with pytest.raises(OSError):
+            image.load()
+
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="@media-test")
+    with pytest.raises(RuntimeError, match="图片格式无效或已损坏"):
+        await helper.upload_generated_image(truncated)
+    helper.upload_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format,extension,mime", [("PNG", "png", "image/png"), ("JPEG", "jpg", "image/jpeg"), ("GIF", "gif", "image/gif"), ("BMP", "bmp", "image/bmp")])
+async def test_upload_generated_image_keeps_decodable_original_bytes(format, extension, mime):
+    import app.dingtalk_card as dc
+
+    source = io.BytesIO()
+    Image.new("RGB", (100, 100), "red").save(source, format=format)
+    data = source.getvalue()
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="@media-test")
+    await helper.upload_generated_image(data)
+    helper.upload_media.assert_awaited_once_with(data, filetype="image", filename=f"generated.{extension}", mimetype=mime)
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_image_rejects_corrupt_later_gif_frame():
+    import app.dingtalk_card as dc
+
+    source = io.BytesIO()
+    Image.new("RGB", (100, 100), "red").save(source, format="GIF", save_all=True, append_images=[Image.new("RGB", (100, 100), "blue")])
+    truncated = source.getvalue()[:-20]
+    with Image.open(io.BytesIO(truncated)) as image:
+        image.verify()
+    with Image.open(io.BytesIO(truncated)) as image:
+        image.load()
+        with pytest.raises(OSError):
+            image.seek(1)
+            image.load()
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="@media-test")
+    with pytest.raises(RuntimeError, match="图片格式无效或已损坏"):
+        await helper.upload_generated_image(truncated)
+    helper.upload_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_generated_animation_obeys_total_pixel_decode_budget(monkeypatch):
+    import app.dingtalk_card as dc
+
+    source = io.BytesIO()
+    Image.new("RGB", (10, 10), "red").save(source, format="GIF", save_all=True, append_images=[Image.new("RGB", (10, 10), "blue")])
+    monkeypatch.setattr(dc, "_GENERATED_IMAGE_MAX_PIXELS", 100)
+    helper = _make_helper(dc)
+    helper.upload_media = AsyncMock(return_value="@media-test")
+    with pytest.raises(RuntimeError, match="像素"):
+        await helper.upload_generated_image(source.getvalue())
+    helper.upload_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("active", "path"),
     [(True, "/v1.0/robot/emotion/reply"), (False, "/v1.0/robot/emotion/recall")],

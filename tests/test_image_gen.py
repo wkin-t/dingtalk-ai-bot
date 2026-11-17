@@ -334,5 +334,52 @@ class TestOpenAIBackend:
         assert _map_openai_size("unknown") == "1024x1024"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation,count", [("generate", 1), ("generate", 2), ("edit", 1)])
+async def test_gemini_thought_images_never_count_as_delivered_results(monkeypatch, operation, count):
+    import app.image_gen as image_gen
+
+    def response(index):
+        return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+            SimpleNamespace(thought=True, inline_data=SimpleNamespace(mime_type="image/png", data=b"draft-" + bytes([index]))),
+            SimpleNamespace(thought=False, inline_data=SimpleNamespace(mime_type="image/png", data=b"final-" + bytes([index]))),
+        ]))])
+
+    relay = MagicMock()
+    relay.models.generate_content.side_effect = [response(1), response(2)]
+    monkeypatch.setattr(image_gen, "genai_client", relay)
+    monkeypatch.setattr(image_gen, "GEMINI_API_BASE", "")
+    monkeypatch.setattr(image_gen, "GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
+    monkeypatch.setattr(image_gen, "GEMINI_IMAGE_EDIT_MODEL", "gemini-nano-banana-2.1")
+    if operation == "generate":
+        results = await image_gen.generate_image("a cat", backend="gemini", number_of_images=count)
+    else:
+        results = await image_gen.edit_image(b"\x89PNG\r\n\x1a\ninput", "make it blue", backend="gemini")
+
+    assert results == [b"final-" + bytes([i]) for i in range(1, count + 1)]
+    assert relay.models.generate_content.call_count == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["generate", "edit"])
+async def test_gemini_only_thought_image_is_not_a_success(monkeypatch, operation):
+    import app.image_gen as image_gen
+
+    relay = MagicMock()
+    relay.models.generate_content.return_value = SimpleNamespace(parts=[
+        SimpleNamespace(thought=True, inline_data=SimpleNamespace(mime_type="image/png", data=b"draft-only")),
+    ])
+    monkeypatch.setattr(image_gen, "genai_client", relay)
+    monkeypatch.setattr(image_gen, "GEMINI_API_BASE", "")
+    monkeypatch.setattr(image_gen, "GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
+    monkeypatch.setattr(image_gen, "GEMINI_IMAGE_EDIT_MODEL", "gemini-nano-banana-2.1")
+    with pytest.raises(RuntimeError):
+        if operation == "generate":
+            await image_gen.generate_image("a cat", backend="gemini")
+        else:
+            await image_gen.edit_image(b"\x89PNG\r\n\x1a\ninput", "make it blue", backend="gemini")
+    assert relay.models.generate_content.call_count == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

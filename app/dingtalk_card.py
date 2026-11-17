@@ -19,6 +19,7 @@ import httpx
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from app.bqb_image import detect_image_format
 
 from alibabacloud_dingtalk.oauth2_1_0.client import Client as OAuth2Client
 from alibabacloud_dingtalk.oauth2_1_0 import models as oauth2_models
@@ -62,12 +63,15 @@ def _prepare_generated_image(content: bytes) -> tuple[bytes, str, str]:
         raise RuntimeError("图片文件过大，无法上传")
 
     data = bytes(content)
+    image_format = detect_image_format(data, allow_webp=True)
+    if image_format is None:
+        raise RuntimeError("图片格式不受支持")
+    extension, mimetype = image_format
     try:
-        from PIL import Image
+        from PIL import Image, ImageSequence
 
-        # verify() 检查完整文件结构；把解压炸弹警告提升为异常，避免在
-        # WebP 转换或钉钉上传前才耗尽内存。重新打开后只读取尺寸，保留原图
-        # 字节，不为了展示擅自缩放用户生成的图片。
+        # JPEG 的 verify() 不解码像素，GIF 首帧可读也不能证明后续帧完整。
+        # 逐帧解码必须共享像素预算，避免动画放大校验开销；原始字节仍保留。
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(data)) as image:
@@ -75,34 +79,28 @@ def _prepare_generated_image(content: bytes) -> tuple[bytes, str, str]:
                 if width <= 0 or height <= 0 or width * height > _GENERATED_IMAGE_MAX_PIXELS:
                     raise RuntimeError("图片像素过大，无法上传")
                 image.verify()
+            with Image.open(io.BytesIO(data)) as image:
+                decoded_pixels = 0
+                for frame in ImageSequence.Iterator(image):
+                    width, height = frame.size
+                    decoded_pixels += width * height
+                    if width <= 0 or height <= 0 or decoded_pixels > _GENERATED_IMAGE_MAX_PIXELS:
+                        raise RuntimeError("图片像素过大，无法上传")
+                    frame.load()
+                if extension == "webp":
+                    image.seek(0)
+                    converted = io.BytesIO()
+                    image.convert("RGBA").save(converted, format="PNG", optimize=True)
+                    data = converted.getvalue()
+                    extension, mimetype = "png", "image/png"
     except RuntimeError:
         raise
     except Exception as exc:
         raise RuntimeError("图片格式无效或已损坏") from exc
 
-    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                converted = io.BytesIO()
-                image.convert("RGBA").save(converted, format="PNG", optimize=True)
-                data = converted.getvalue()
-        except Exception as exc:
-            raise RuntimeError("图片格式无法转换") from exc
-        if len(data) > _GENERATED_IMAGE_MAX_BYTES:
-            raise RuntimeError("图片文件过大，无法上传")
-        return data, "generated.png", "image/png"
-
-    formats = (
-        (b"\x89PNG\r\n\x1a\n", "generated.png", "image/png"),
-        (b"\xff\xd8\xff", "generated.jpg", "image/jpeg"),
-        ((b"GIF87a", b"GIF89a"), "generated.gif", "image/gif"),
-        (b"BM", "generated.bmp", "image/bmp"),
-    )
-    for signature, filename, mimetype in formats:
-        signatures = signature if isinstance(signature, tuple) else (signature,)
-        if any(data.startswith(item) for item in signatures):
-            return data, filename, mimetype
-    raise RuntimeError("图片格式不受支持")
+    if len(data) > _GENERATED_IMAGE_MAX_BYTES:
+        raise RuntimeError("图片文件过大，无法上传")
+    return data, f"generated.{extension}", mimetype
 
 RETRYABLE_ERROR_KEYWORDS = (
     "ssl",

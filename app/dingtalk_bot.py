@@ -87,6 +87,8 @@ _IMAGE_ERROR_SAFE_PREFIXES = (
     "图片内容为空",
 )
 
+IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS = 1.0
+
 
 def _safe_image_error(error: BaseException) -> str:
     """图片分支只保留稳定业务摘要，避免把上游响应或凭据写入卡片/日志。"""
@@ -95,6 +97,27 @@ def _safe_image_error(error: BaseException) -> str:
         if message.startswith(prefix):
             return prefix
     return safe_error_summary(error, "provider")
+
+
+async def _finalize_cancelled_image(card_helper, out_track_id: str, content: str) -> None:
+    """在有限预算内尽力结束图片卡片，并保留原始取消异常。"""
+    try:
+        await asyncio.wait_for(
+            card_helper.stream_update(
+                out_track_id,
+                content,
+                is_finalize=True,
+                is_full=True,
+            ),
+            timeout=IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        print("⚠️ [图片] 取消收尾超时")
+    except Exception as error:
+        print(f"⚠️ [图片] 取消收尾失败（{type(error).__name__}）")
+
 
 @dataclass
 class BufferedTurnContext:
@@ -1530,15 +1553,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 print(f"✅ [生图] 完成，{len(images)} 张已上传钉钉媒体")
 
             except asyncio.CancelledError:
-                try:
-                    await self.card_helper.stream_update(
-                        out_track_id,
-                        "图片生成已取消",
-                        is_finalize=True,
-                        is_full=True,
-                    )
-                except Exception as finalize_error:
-                    print(f"⚠️ [生图] 取消收尾失败（{type(finalize_error).__name__}）")
+                await _finalize_cancelled_image(
+                    self.card_helper,
+                    out_track_id,
+                    "图片生成已取消",
+                )
                 raise
 
             except RuntimeError as e:
@@ -1604,15 +1623,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     raise RuntimeError("钉钉卡片更新失败")
                 print(f"✅ [改图] 完成，已上传钉钉媒体")
             except asyncio.CancelledError:
-                try:
-                    await self.card_helper.stream_update(
-                        out_track_id,
-                        "图片修改已取消",
-                        is_finalize=True,
-                        is_full=True,
-                    )
-                except Exception as finalize_error:
-                    print(f"⚠️ [改图] 取消收尾失败（{type(finalize_error).__name__}）")
+                await _finalize_cancelled_image(
+                    self.card_helper,
+                    out_track_id,
+                    "图片修改已取消",
+                )
                 raise
             except RuntimeError as e:
                 await self.card_helper.stream_update(

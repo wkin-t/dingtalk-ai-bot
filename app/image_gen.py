@@ -9,6 +9,7 @@ import os
 from typing import List
 
 from app import config as app_config
+from app.bqb_image import detect_image_format
 from app.config import (
     GEMINI_IMAGE_MODEL,
     GEMINI_IMAGE_EDIT_MODEL,
@@ -73,39 +74,14 @@ def _extract_gemini_inline_images(response) -> List[bytes]:
 
     images = []
     for part in parts:
+        if getattr(part, "thought", False):
+            continue
         inline_data = getattr(part, "inline_data", None)
         mime_type = getattr(inline_data, "mime_type", "") if inline_data else ""
         data = getattr(inline_data, "data", None) if inline_data else None
         if data and isinstance(mime_type, str) and mime_type.startswith("image/"):
             images.append(bytes(data))
     return images
-
-
-def _detect_image_mime_type(image_bytes: bytes) -> str:
-    """按文件头识别改图输入的真实 MIME，避免把 WebP/PNG 伪报成 JPEG。"""
-    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if image_bytes[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-    if image_bytes[:2] == b"BM":
-        return "image/bmp"
-    raise RuntimeError("无法识别输入图片格式")
-
-
-def _image_filename_for_mime(mime_type: str) -> str:
-    """将 MIME 映射为上传给图片编辑接口的文件名。"""
-    extension = {
-        "image/png": "png",
-        "image/jpeg": "jpg",
-        "image/gif": "gif",
-        "image/webp": "webp",
-        "image/bmp": "bmp",
-    }.get(mime_type, "png")
-    return f"image.{extension}"
 
 
 def _openai_image_kwargs(model_name: str, size: str, **kwargs):
@@ -276,8 +252,11 @@ async def _edit_with_openai(
     loop = asyncio.get_running_loop()
     client = _get_openai_client()
     size = _map_openai_size(aspect_ratio)
-    mime_type = _detect_image_mime_type(image_bytes)
-    filename = _image_filename_for_mime(mime_type)
+    image_format = detect_image_format(image_bytes, allow_webp=True)
+    if image_format is None:
+        raise RuntimeError("无法识别输入图片格式")
+    extension, mime_type = image_format
+    filename = f"image.{extension}"
 
     def _call():
         params = _openai_image_kwargs(
@@ -311,7 +290,10 @@ async def _edit_with_gemini(
     client = _gemini_client_for_model(GEMINI_IMAGE_EDIT_MODEL)
     if _is_gemini_content_image_model(GEMINI_IMAGE_EDIT_MODEL):
         _ensure_gemini_content_auth()
-    mime_type = _detect_image_mime_type(image_bytes)
+    image_format = detect_image_format(image_bytes, allow_webp=True)
+    if image_format is None:
+        raise RuntimeError("无法识别输入图片格式")
+    _, mime_type = image_format
 
     def _call():
         response = client.models.generate_content(

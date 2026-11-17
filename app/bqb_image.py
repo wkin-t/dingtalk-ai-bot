@@ -6,8 +6,8 @@ import io
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def detect_image_format(data: bytes) -> Optional[Tuple[str, str]]:
-    """根据文件头魔数检测钉钉 /media/upload 支持的图片格式，拒绝伪装 HTML 或不支持的编码。"""
+def detect_image_format(data: bytes, *, allow_webp: bool = False) -> Optional[Tuple[str, str]]:
+    """按魔数识别格式；WebP 仅供允许它的模型或转换路径显式启用。"""
     if not data or len(data) < 12:
         return None
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -18,16 +18,14 @@ def detect_image_format(data: bytes) -> Optional[Tuple[str, str]]:
         return "gif", "image/gif"
     if data[:2] == b"BM":
         return "bmp", "image/bmp"
+    if allow_webp and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp", "image/webp"
     return None
 
 
 def normalize_image_for_vision(data: bytes) -> Optional[bytes]:
     """校验引用图片魔数（含 WebP），并将部分多模态上游不兼容的 BMP 转为内存 PNG。"""
-    if not data or len(data) < 12:
-        return None
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return data
-    fmt = detect_image_format(data)
+    fmt = detect_image_format(data, allow_webp=True)
     if fmt is None:
         return None
     if fmt[0] != "bmp":

@@ -1181,6 +1181,235 @@ async def test_dingtalk_generated_image_cancel_is_finalized_and_re_raised():
 
 
 @pytest.mark.asyncio
+async def test_dingtalk_edited_image_cancel_is_finalized_and_re_raised():
+    """改图阶段取消也复用同一收尾路径，并把取消异常交给上层。"""
+    from contextlib import ExitStack
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-edit-cancel")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+    incoming = SimpleNamespace(
+        sender_id="sender-edit-cancel", sender_nick="测试用户",
+        conversation_id="conv-edit-cancel", conversation_type="1",
+    )
+    route = {
+        "model": "fast", "thinking_level": "low", "need_search": False,
+        "temperature": "balanced", "thinking_text": "正在修改", "reason": "test",
+        "need_image_edit": True,
+        "image_gen_params": {"prompt": "make the apple green", "aspect_ratio": "1:1"},
+    }
+    source_image = b"\x89PNG\r\n\x1a\nsource-image"
+    with ExitStack() as stack:
+        for target, replacement in [
+            ("app.dingtalk_bot.AI_BACKEND", "openai"),
+            ("app.dingtalk_bot.ENABLE_BQB", False),
+            ("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False),
+            ("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False),
+            ("app.dingtalk_bot.USE_STATS", False),
+            ("app.dingtalk_bot.get_session_key", "session-edit-cancel"),
+            ("app.memory.get_history", []),
+            ("app.dingtalk_bot._load_soul", ""),
+            ("app.dingtalk_bot.fetch_dws_context_bundle", DwsContextBundle(dws_available=True)),
+            ("app.dingtalk_bot._analyze_with_openai", route),
+            ("app.ai.messages_pipeline.prepare_messages_for_backend", lambda messages, _bot_id: messages),
+            ("app.ai.sampling_pipeline.resolve_sampling", (0.7, None, {})),
+            ("app.dingtalk_bot.edit_image", asyncio.CancelledError()),
+            ("app.dingtalk_bot._maybe_evolve_soul", None),
+            ("app.dingtalk_bot.asyncio.create_task", None),
+        ]:
+            if target.endswith("fetch_dws_context_bundle") or target.endswith("_analyze_with_openai") or target.endswith("edit_image"):
+                replacement = AsyncMock(return_value=replacement) if not isinstance(replacement, BaseException) else AsyncMock(side_effect=replacement)
+            elif target.endswith("get_history"):
+                replacement = MagicMock(return_value=replacement)
+            elif target.endswith("_maybe_evolve_soul") or target.endswith("_load_soul") or target.endswith("create_task"):
+                replacement = MagicMock(return_value=replacement)
+            elif target.endswith("prepare_messages_for_backend") or target.endswith("resolve_sampling") or target.endswith("get_session_key"):
+                replacement = MagicMock(return_value=replacement)
+            stack.enter_context(patch(target, replacement))
+
+        with pytest.raises(asyncio.CancelledError):
+            await handler.handle_ai_stream(
+                incoming,
+                "把苹果变绿",
+                "conv-edit-cancel",
+                [],
+                image_data_list=[source_image],
+            )
+
+    final_call = handler.card_helper.stream_update.await_args_list[-1]
+    assert final_call.args[1] == "图片修改已取消"
+    assert final_call.kwargs["is_finalize"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_cleanup_has_bounded_wait_and_releases_lock(monkeypatch):
+    """取消收尾卡住时应及时结束，且不遗留会话锁。"""
+    import app.dingtalk_bot as bot
+
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+
+    async def blocked_update(*_args, **_kwargs):
+        cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+
+    helper = SimpleNamespace(stream_update=blocked_update)
+    monkeypatch.setattr(bot, "IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS", 0.01)
+    conversation_lock = asyncio.Lock()
+
+    async def cancelled_turn():
+        async with conversation_lock:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await bot._finalize_cancelled_image(
+                    helper, "track-cancel", "图片生成已取消"
+                )
+                raise
+
+    task = asyncio.create_task(cancelled_turn())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+
+    assert cleanup_started.is_set()
+    assert cleanup_cancelled.is_set()
+    assert not conversation_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_cleanup_cancels_real_card_stream_wait_without_sdk_call(monkeypatch):
+    """真实卡片 helper 被同卡 stream 锁占用时，取消收尾不应遗留后台任务。"""
+    import app.dingtalk_bot as bot
+    from app.dingtalk_card import DingTalkCardHelper
+
+    card_helper = object.__new__(DingTalkCardHelper)
+    card_helper.access_token = "test-access-token"
+    card_helper._stream_locks = {}
+    card_helper._last_stream_at = {}
+    card_helper.get_access_token = AsyncMock(return_value="test-access-token")
+    sdk_call = MagicMock(side_effect=AssertionError("不应调用钉钉 SDK"))
+    card_helper.card_client = SimpleNamespace(streaming_update_with_options=sdk_call)
+    card_helper.runtime = SimpleNamespace()
+
+    stream_lock = card_helper._get_stream_lock("track-real-helper")
+    await stream_lock.acquire()
+    conversation_lock = asyncio.Lock()
+    monkeypatch.setattr(bot, "IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS", 0.02)
+
+    async def cancelled_turn():
+        async with conversation_lock:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await bot._finalize_cancelled_image(
+                    card_helper,
+                    "track-real-helper",
+                    "图片生成已取消",
+                )
+                raise
+
+    task = asyncio.create_task(cancelled_turn())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+
+    assert not conversation_lock.locked()
+    assert stream_lock.locked()
+    stream_lock.release()
+    await asyncio.sleep(0)
+    sdk_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_cleanup_does_not_echo_error(monkeypatch, capsys):
+    """取消收尾的普通异常只记录类型，不泄露原始异常文本。"""
+    import app.dingtalk_bot as bot
+
+    async def failed_update(*_args, **_kwargs):
+        raise RuntimeError("secret-token-from-card")
+
+    monkeypatch.setattr(bot, "IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS", 0.01)
+    await bot._finalize_cancelled_image(
+        SimpleNamespace(stream_update=failed_update),
+        "track-cancel",
+        "图片生成已取消",
+    )
+    assert "secret-token-from-card" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_cleanup_success_calls_stream_update_once():
+    """正常收尾只发一次最终卡片更新，并携带取消文案。"""
+    import app.dingtalk_bot as bot
+
+    calls = []
+
+    async def successful_update(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True
+
+    await bot._finalize_cancelled_image(
+        SimpleNamespace(stream_update=successful_update),
+        "track-success",
+        "图片修改已取消",
+    )
+
+    assert calls == [
+        (
+            ("track-success", "图片修改已取消"),
+            {"is_finalize": True, "is_full": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_second_cancel_during_image_cleanup_is_not_swallowed(monkeypatch, capsys):
+    """第二次取消仍应沿原 CancelledError 路径退出，不能转成普通失败。"""
+    import app.dingtalk_bot as bot
+
+    cleanup_started = asyncio.Event()
+
+    async def blocked_update(*_args, **_kwargs):
+        cleanup_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(bot, "IMAGE_CANCEL_FINALIZE_TIMEOUT_SECONDS", 1.0)
+    helper = SimpleNamespace(stream_update=blocked_update)
+
+    async def cancelled_turn():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await bot._finalize_cancelled_image(
+                helper, "track-second-cancel", "图片生成已取消"
+            )
+            raise
+
+    task = asyncio.create_task(cancelled_turn())
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+
+    assert "取消收尾失败" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_dingtalk_edited_image_uses_robot_media_id_without_cos():
     """改图结果也走当前机器人媒体上传。"""
     from app.dingtalk_bot import GeminiBotHandler
