@@ -373,7 +373,7 @@ async def _fetch_single_quoted_image(
                 "chat",
                 "message",
                 "download-media",
-                "--conversation-id",
+                "--open-conversation-id",
                 conv_id,
                 "--message-id",
                 msg_id,

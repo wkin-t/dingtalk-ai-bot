@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+import os
 
 import pytest
 
@@ -131,3 +132,41 @@ async def test_forwarded_image_without_identity_never_falls_back_to_outer_messag
         quote_conv_id="outer-group", quote_msg_id="outer-message", dws_ready=True, run_dws_fn=runner)
     assert result is None
     runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forwarded_image_download_uses_open_conversation_id():
+    png_bytes = b"\x89PNG\r\n\x1a\nchild-image"
+    calls = []
+
+    async def runner(args):
+        calls.append(list(args))
+        assert "--open-conversation-id" in args
+        assert "--conversation-id" not in args
+        output_dir = args[args.index("--output") + 1]
+        output_path = os.path.join(output_dir, "child.png")
+        with open(output_path, "wb") as handle:
+            handle.write(png_bytes)
+        return {"path": output_path}
+
+    resource = {
+        "resourceType": "image",
+        "resourceIdType": "mediaId",
+        "resourceId": "child-media",
+        "forwardedResource": True,
+        "resourceRefs": {"download": {"arguments": {
+            "open-conversation-id": "child-conversation",
+            "message-id": "child-message",
+            "resource-id": "child-media",
+        }}},
+    }
+    result = await dws_files._fetch_single_quoted_image(
+        resource,
+        quote_conv_id="outer-group",
+        quote_msg_id="outer-message",
+        dws_ready=True,
+        run_dws_fn=runner,
+    )
+
+    assert result == png_bytes
+    assert len(calls) == 1

@@ -519,7 +519,7 @@ class TestReadonlySecurityGate:
                     "chat",
                     "message",
                     "download-media",
-                    "--conversation-id",
+                    "--open-conversation-id",
                     "cid123==",
                     "--message-id",
                     "msg_1",

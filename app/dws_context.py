@@ -66,7 +66,7 @@ _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
     },
     ("chat", "message", "download-media"): {
         "value_flags": {
-            "--conversation-id",
+            "--open-conversation-id",
             "--message-id",
             "--resource-id",
             "--type",
@@ -77,7 +77,7 @@ _READONLY_COMMAND_SPECS: dict[tuple[str, ...], dict[str, set[str]]] = {
         "bool_flags": set(),
         "required_bool_flags": set(),
         "required_value_flags": {
-            "--conversation-id",
+            "--open-conversation-id",
             "--message-id",
             "--resource-id",
             "--type",
