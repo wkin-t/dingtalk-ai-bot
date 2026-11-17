@@ -234,6 +234,14 @@ docker compose down
 
 数据目录（`./data*`）不会被删除，需要时请手动备份后再清理。
 
+## 图片工具部署与验收
+
+`ENABLE_IMAGE_TOOLS` 默认从未配置变为 `true`：Gemini/GPT 自主调用生图或改图函数，Claude 不挂图片工具；`false` 为 Deprecated 预分析流程的回滚开关。图片模型和 key 沿用各容器配置，钉钉图片通过机器人媒体接口显示，不依赖 COS。GPT 图片复杂度最高为 `OPENAI_IMAGE_COMPLEXITY=high`，与对话模型的 `reasoning.effort=max` 独立。
+
+验收应包含真实工具调用、实际图片 API、机器人上传和同一卡片最终展示；普通文本及 Claude 也要验证。显式引用改图应确认图片来自本轮当前可读的 dws 引用。工具每轮最多执行两次、累计四张，保留原始 call ID / Gemini 签名续接，禁用图片 API 的自动重发以避免超时后重复付费。包含新生成图片的卡片不保存临时媒体 ID 的正文缓存。
+
+发布前按各容器原镜像派生候选并保留回滚镜像、源码与环境备份，核对源码和完整环境哈希；只 recreate 三个指定服务。候选 handler 回放与上线后真实 Stream 入站应分别记录，健康检查不能替代群内图片验收。
+
 ## Deprecated 部署
 
 OpenClaw 与企业微信的历史部署文档仍保留，但不再维护：

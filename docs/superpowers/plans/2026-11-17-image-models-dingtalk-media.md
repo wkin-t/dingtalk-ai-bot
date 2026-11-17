@@ -60,3 +60,28 @@
 本轮完整 tests 为 1053 passed、5 warnings（79.13 秒）；warning 为既有的 SDK xhigh 枚举提示与模拟异步流清理告警。compileall、diff whitespace 和暂存区密钥形状审计通过。模型/key/env 不在本轮变更范围。
 
 独立边界复审与独立提交终审均为 approve；终审额外运行 22 个定向测试通过。对照基线确认旧 OpenAI 数量处理和改图输入的完整解码预检属于相邻既有行为，不纳入本轮四项 CR 的修复范围。
+
+## Clawbot 群验收与三容器发布（2026-11-17）
+
+用户授权仅在 Clawbot 群真实测试，成功后 push 并部署 Gemini、GPT、Claude 三容器。使用该群所属 Vibe Coding 联盟的显式 dws profile，不改变默认组织、不放宽应用只读白名单。
+
+第一轮真实 Stream 入站发现：普通群消息的路由输入先放四条历史，每条最多 120 字，而三个分析客户端只读取前 300 字，当前用户的生图指令被裁掉；强制搜索又读取带“当前用户消息”标签的全部上下文，标签或历史中的“当前”导致无关请求强制联网。Gemini/GPT 因此没进入生图分支，Claude 无关请求触发不可用的搜索桥接。验收未通过，暂不 push 或发布三容器。
+
+修复先以 TDD 验证：路由的前 300 字必须含当前原始发言，历史/引用/历史媒体说明只作为后置辅助信息；强制搜索只检查当前原始发言，不检查元数据标签或历史；明确否定搜索的常见短语不能被同一句中的“联网/搜索”反向强制。保留模型分析与自动搜索的既有档位策略，不更换对话模型、搜索桥接配置或账户池。生图、引用改图和无图片的普通对话分别验证，原有历史图片不能单独触发改图。
+
+用户另询问原生工具。官方 Responses API 提供 image_generation；Gemini 通用模型可原生调用自定义函数，Nano Banana 自身通过 IMAGE/TEXT 原生输出图片。先用现有中转做有界兼容探针，不把官方支持等同中转支持；当前 GPT 原生工具真实请求返回 502，尚未证明可用于生产。待实际兼容性结果决定是否接入，不以空工具声明替代执行链路。
+
+### 模型自主生图（用户已明确选择）
+
+- 本轮改为模型自主调用图片工具，Claude 不提供图片工具。Gemini 用官方原生 function declarations；GPT 优先调查官方 Responses image_generation 的中转 502，若当前中转不能稳定执行，则用原生 Responses function calling 调用同一现有 Images API，明确记录这是应用执行的函数工具，不称为服务器内置工具。
+- 新增 app/image_tools.py 作为纯工具声明、参数校验、每轮预算和执行适配。导入图片 API 必须在执行函数内进行，避免 image_gen 与 gemini_client 的循环初始化。服务端固定图片模型、后端、key、base；模型只能给 prompt、aspect_ratio、number_of_images 或 1-based image_index，不能传模型、凭据、URL 或任意路径。生成图总数最多 4、实际图片工具调用最多 2 次，JSON 参数最多 8192 字节；未知工具、无效字段、超预算明确返回稳定失败信息，不调用图片 API，不回显上游原文。
+- ImageToolSession(backend, input_images) 每轮独立；execute(name, arguments) 返回 images(bytes 列表) 与 response(可序列化成功/失败摘要)，成功图片可作为本轮后续编辑输入。input_images 只包含当前上传和当前 dws 确认的显式引用，不把普通历史图当自动编辑源。生成工具为 generate_image(prompt, aspect_ratio, number_of_images)，编辑为 edit_image(prompt, image_index, aspect_ratio)。
+- 客户端新增 enable_image_tools=False、image_tool_inputs=None 参数，通用兼容调用默认关闭；backend 主链路仅为 Gemini 或实际 gpt-* 模型启用。ENABLE_IMAGE_TOOLS 默认 true，设 false 可回滚旧路由生图；Claude/OpenRouter/OpenClaw 不挂工具。旧路由 image flags 在启用自主工具时不再触发提前返回，预分析只决定聊天模型/思考/采样。
+- 原生 function loop 保留模型的完整工具调用内容及必要签名，按 call_id/name 返回结果；普通搜索声明继续共存。生成/编辑执行前后分别产出内部 image_tool 状态，完成图片通过 generated_images: list[bytes] 内部事件返回 bot，不能让模型编造媒体 URL。工具错误不吞取消，重试只针对现有安全协议边界；预算耗尽后的最终模型请求不再提供图片工具，禁止无限循环或每次失败更换其他模型。
+- bot 消费 generated_images 后调用当前机器人 upload_generated_image，并把图片 Markdown 追加在同一张卡片，不另发消息、不走 COS/dws 写、不把 bytes 送入统计或正文缓存；含新生成图片的卡片不保存临时媒体 ID 的正文回读缓存。正常聊天和 Claude 不受图片执行副作用影响。
+- TDD 覆盖工具 schema/预算/无图编辑/取消/去重，Gemini 与 Responses 完整工具调用→执行→结果继续回复，以及 bot 同卡片展示、失败与 Claude 不挂工具。用户输入优先修复仍实施，保证预分析与搜索不会被历史或元数据误导。
+- 全套与编译、独立审查通过后，从三容器当前镜像派生候选并备份；先在候选进程用 Clawbot 当前可读测试消息运行真实核心处理，明确这是 handler 业务链路回放，不冒充 Stream 入站。群内结果与生成图片可读性通过后 push，再发布三容器，并用真实 @ 消息做上线后的 Stream 验证。保留全部环境、模型、key 与其他容器，失败回滚。
+
+用户补充：已停用代码应标记 `Deprecated`。本轮范围为预分析生图/改图、Prompt 增强、旧 OpenClaw 图片 JSON 与 Imagen 直连兼容分支；仍使用的图片 API、上传校验、路由和 dws 通用层不整体弃用。README 集中索引，回滚开关保留。
+
+本地实现验收：最终全量 1084 passed（5 项已有 SDK/测试警告），compileall 与空白检查通过。独立边界复审为 approve；确认修复 Responses 参数 delta 补齐、完整输出参数 UTF-8 上限、已上传图片在后续失败时的保留，以及非生产 OpenRouter 误入旧生图入口。下一阶段按上文候选业务回放、push、三容器发布及真实 Stream 顺序执行。

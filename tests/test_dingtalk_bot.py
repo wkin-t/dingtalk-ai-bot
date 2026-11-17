@@ -19,7 +19,7 @@ def test_safe_image_error_does_not_echo_untrusted_runtime_error_text():
 @pytest.fixture(autouse=True)
 def isolated_dws_context():
     from app.dws_context import DwsContextBundle
-    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True)), patch("app.dingtalk_bot.schedule_bqb_index_warmup"):
+    with patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=DwsContextBundle(dws_available=True)), patch("app.dingtalk_bot.schedule_bqb_index_warmup"), patch("app.dingtalk_bot.ENABLE_IMAGE_TOOLS", False):
         yield
 
 
@@ -420,7 +420,7 @@ async def test_dws_turn_integrates_history_mentions_and_quoted_images(image_fiel
     update.assert_not_called()
 
 
-async def _capture_dws_media_messages(*, history_images=None, current_images=None, context_image_messages=None, route_need_image_edit=False):
+async def _capture_dws_media_messages(*, history_images=None, current_images=None, quoted_images=None, context_image_messages=None, route_need_image_edit=False):
     from app.dingtalk_bot import GeminiBotHandler
     from app.dws_context import DwsContextBundle
 
@@ -431,6 +431,7 @@ async def _capture_dws_media_messages(*, history_images=None, current_images=Non
     handler.card_helper.create_and_deliver = AsyncMock(return_value="track")
     handler.card_helper.stream_update = AsyncMock()
     handler.card_helper.update_card = AsyncMock(return_value=True)
+    handler.card_helper.upload_generated_image = AsyncMock(return_value="@lALP_EDITED")
     incoming = SimpleNamespace(
         sender_id="current-user",
         sender_nick="当前用户",
@@ -452,6 +453,7 @@ async def _capture_dws_media_messages(*, history_images=None, current_images=Non
     bundle = DwsContextBundle(
         dws_available=True,
         context_images=list(history_images),
+        quoted_images=list(quoted_images or []),
         context_image_messages=list(context_image_messages or []),
         merged_history=history,
         members_complete=True,
@@ -488,7 +490,7 @@ async def _capture_dws_media_messages(*, history_images=None, current_images=Non
          patch("app.dingtalk_bot._analyze_with_openai", new_callable=AsyncMock, return_value=route) as router, \
          patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
          patch("app.ai.backend.create_backend_stream", side_effect=capture_backend) as stream, \
-         patch("app.dingtalk_bot.edit_image", new_callable=AsyncMock) as edit, \
+         patch("app.dingtalk_bot.edit_image", new_callable=AsyncMock, return_value=[b"edited-image"]) as edit, \
          patch("app.memory.update_history"), \
          patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
          patch("app.dingtalk_bot.asyncio.create_task"):
@@ -501,10 +503,11 @@ async def _capture_dws_media_messages(*, history_images=None, current_images=Non
             current_message_ids=["current-message"],
         )
 
-    assert stream.called
+    if not route_need_image_edit:
+        assert stream.called
     return {
-        "messages": captured["messages"],
-        "kwargs": captured["kwargs"],
+        "messages": captured.get("messages", []),
+        "kwargs": captured.get("kwargs", {}),
         "router": router,
         "edit": edit,
         "card": handler.card_helper,
@@ -574,6 +577,19 @@ async def test_handler_history_image_sets_visual_router_context_without_editing(
     assert "历史上下文 1 张" in result["router"].await_args.args[0]
     assert "历史图片不是本次上传" in result["router"].await_args.args[0]
     result["edit"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handler_uses_explicit_quoted_image_for_edit_but_not_history_image():
+    """显式引用图可以改图，只有历史上下文图不能改图。"""
+    quoted_png = b"\x89PNG\r\n\x1a\nquoted-current"
+    result = await _capture_dws_media_messages(
+        quoted_images=[quoted_png],
+        route_need_image_edit=True,
+    )
+
+    result["edit"].assert_awaited_once()
+    assert result["edit"].await_args.kwargs["image_bytes"] == quoted_png
 
 
 @pytest.mark.asyncio
@@ -697,6 +713,7 @@ async def _run_dingtalk_consumer(
     observed_stream_updates=None,
     card_corp_id="",
     stream_update_success=True,
+    image_upload_result="@generated-test",
 ):
     """运行真实 DingTalk handler 收尾逻辑，返回最终卡片全量更新数据。"""
     from app.dingtalk_bot import GeminiBotHandler
@@ -710,6 +727,7 @@ async def _run_dingtalk_consumer(
     if observed_stream_updates is not None:
         handler.card_helper.stream_update.side_effect = lambda *args, **kwargs: observed_stream_updates.append((args, kwargs))
     handler.card_helper.update_card = AsyncMock(return_value=full_update_success)
+    handler.card_helper.upload_generated_image = AsyncMock(return_value=image_upload_result)
     incoming_message = SimpleNamespace(
         sender_id="sender-test",
         sender_nick="测试用户",
@@ -763,6 +781,30 @@ async def _run_dingtalk_consumer(
     if return_soul_hook:
         return result, soul_hook
     return result
+
+
+@pytest.mark.asyncio
+async def test_autonomous_image_tool_displays_real_media_in_same_card_without_cache():
+    with patch("app.dingtalk_bot.prepare_card_body") as cache, patch("app.image_store.save_image") as cos:
+        result = await _run_dingtalk_consumer([
+            {"image_tool": {"name": "generate_image", "state": "started"}},
+            {"generated_images": [b"actual-image"]},
+            {"content": "已按要求画好。"},
+        ], card_corp_id="test-corp")
+    assert "![生成图片1](@generated-test)" in result["msgContent"]
+    assert "已按要求画好。" in result["msgContent"]
+    assert result["flowStatus"] == "3"
+    cache.assert_not_called()
+    cos.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_autonomous_image_upload_failure_cannot_claim_success():
+    result = await _run_dingtalk_consumer([
+        {"generated_images": [b"actual-image"]},
+        {"content": "图片完成。"},
+    ], image_upload_result=None)
+    assert result["isError"] == "true"
 
 
 @pytest.mark.asyncio
@@ -1642,6 +1684,86 @@ async def test_dingtalk_bot_reports_error_when_dws_corp_mismatches_bot_corp():
     mock_stream.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_group_history_cannot_hide_current_image_generation_instruction_from_router():
+    """四条较长历史后，路由输入前缀仍必须是当前用户的生图指令。"""
+    from app.dingtalk_bot import GeminiBotHandler
+    from app.dws_context import DwsContextBundle
+
+    handler = object.__new__(GeminiBotHandler)
+    handler.card_template_id = "test-template"
+    handler.card_helper = MagicMock()
+    handler.card_helper.set_processing_reaction = AsyncMock(return_value=True)
+    handler.card_helper.create_and_deliver = AsyncMock(return_value="track-router-current-first")
+    handler.card_helper.stream_update = AsyncMock()
+    handler.card_helper.update_card = AsyncMock(return_value=True)
+
+    history = [
+        {
+            "role": "user",
+            "content": f"历史消息 {index}：当前天气和新闻只是上下文占位，不是本轮请求。" + "x" * 100,
+            "sender_nick": f"历史用户{index}",
+        }
+        for index in range(4)
+    ]
+    bundle = DwsContextBundle(
+        dws_available=True,
+        merged_history=history,
+        context_images=[],
+    )
+    incoming = SimpleNamespace(
+        message_id="msg-router-current-first",
+        sender_id="sender-router-current-first",
+        sender_nick="当前用户",
+        conversation_id="conv-router-current-first",
+        conversation_type="2",
+    )
+    route = {
+        "model": "fast",
+        "thinking_level": "low",
+        "need_search": False,
+        "temperature": "balanced",
+        "thinking_text": "正在思考",
+        "reason": "test",
+        "need_image_gen": False,
+        "need_image_edit": False,
+    }
+    router = AsyncMock(return_value=route)
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {"content": "收到"}
+        yield {"usage": {"model": "gemini-4-argon", "input_tokens": 1, "output_tokens": 1}}
+
+    current = "请直接生成一张白色背景、中央只有红苹果和绿色叶子的 1:1 图片。"
+    with patch("app.dingtalk_bot.AI_BACKEND", "openai"), \
+         patch("app.dingtalk_bot.ENABLE_BQB", False), \
+         patch("app.dingtalk_bot.DINGTALK_TYPING_ENABLED", False), \
+         patch("app.dingtalk_bot.DINGTALK_REFERENCE_AUTO_ENABLED", False), \
+         patch("app.dingtalk_bot.USE_STATS", False), \
+         patch("app.dingtalk_bot.fetch_dws_context_bundle", new_callable=AsyncMock, return_value=bundle), \
+         patch("app.dingtalk_bot.get_session_key", return_value="session-router-current-first"), \
+         patch("app.memory.get_history", return_value=[]), \
+         patch("app.dingtalk_bot._load_soul", return_value=""), \
+         patch("app.dingtalk_bot._analyze_with_openai", new=router), \
+         patch("app.ai.messages_pipeline.prepare_messages_for_backend", side_effect=lambda messages, _bot_id: messages), \
+         patch("app.ai.sampling_pipeline.resolve_sampling", return_value=(0.7, None, {})), \
+         patch("app.ai.backend.create_backend_stream", side_effect=fake_stream), \
+         patch("app.dingtalk_bot._maybe_evolve_soul", new=MagicMock(return_value=None)), \
+         patch("app.dingtalk_bot.asyncio.create_task"):
+        await handler.handle_ai_stream(
+            incoming,
+            current,
+            incoming.conversation_id,
+            [],
+            group_info={"name": "Clawbot"},
+        )
+
+    router_arg = router.await_args.args[0]
+    assert router_arg.startswith("[当前用户消息]\n" + current)
+    assert router_arg.index(current) < router_arg.index("[辅助上下文]")
+    assert len(router_arg[:300]) >= len(current)
+
+
 
 
 @pytest.mark.asyncio
@@ -1693,3 +1815,15 @@ async def test_cancelled_typing_task_still_cleans_card_status():
             [{"content": "完成正文"}], typing_task_factory=cancelled_task, observed_stream_updates=updates,
         )
     assert any(kwargs.get("content_key") == "statusText" and not args[1] for args, kwargs in updates)
+
+
+@pytest.mark.asyncio
+async def test_image_followup_error_preserves_uploaded_media_in_final_card():
+    result, updates = await _run_dingtalk_consumer([
+        {"generated_images": [b"actual-image"]},
+        {"error": "后续模型回复失败"},
+    ], return_stream_updates=True)
+    assert "![生成图片1](@generated-test)" in result["msgContent"]
+    assert "失败" in result["msgContent"] and result["isError"] == "true"
+    finalized = [call.args[1] for call in updates if call.kwargs.get("content_key") == "msgContent" and call.kwargs.get("is_finalize")]
+    assert finalized and all("@generated-test" in body for body in finalized)

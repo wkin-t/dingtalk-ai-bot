@@ -545,6 +545,126 @@ async def test_responses_enable_search_adds_web_search_tool(
 
 
 @pytest.mark.asyncio
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_image_tools_are_opt_in_for_gpt_and_use_fixed_declaration(
+    mock_openai_cls, mock_get_config,
+):
+    """GPT 主链路启用图片工具时应把声明交给 Responses，而不是走路由 image flag。"""
+    mock_get_config.return_value = _model_config("gpt-6.1-terra", supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+    declarations = [{
+        "name": "generate_image",
+        "description": "生成图片",
+        "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+    }]
+    with patch("app.image_tools.image_tool_declarations", return_value=declarations):
+        chunks = [chunk async for chunk in call_openai_stream(
+            [{"role": "user", "content": "画一只猫"}],
+            target_model="fast",
+            enable_image_tools=True,
+            image_tool_inputs=[],
+        )]
+
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs["tools"] == [
+        {"type": "function", "name": "generate_image", "description": "生成图片",
+         "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}}}
+    ]
+    assert "image_generation" not in {tool.get("type") for tool in kwargs["tools"]}
+
+
+@pytest.mark.asyncio
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_image_tools_are_never_declared_for_claude(
+    mock_openai_cls, mock_get_config,
+):
+    """Claude 不得因为通用开关而收到图片工具声明。"""
+    mock_get_config.return_value = _model_config("anthropic/claude-sonnet-5-5-low", supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.responses.create = AsyncMock(return_value=_make_async_stream([]))
+
+    with patch("app.image_tools.image_tool_declarations", create=True) as declarations:
+        chunks = [chunk async for chunk in call_openai_stream(
+            [{"role": "user", "content": "画一只猫"}],
+            target_model="fast",
+            enable_image_tools=True,
+            image_tool_inputs=[],
+        )]
+
+    declarations.assert_not_called()
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert "tools" not in kwargs or all(tool.get("type") == "web_search" for tool in kwargs["tools"])
+
+
+@pytest.mark.asyncio
+@patch("app.openai_client.get_litellm_model_config")
+@patch("app.openai_client.AsyncOpenAI")
+async def test_responses_image_function_call_executes_once_and_returns_generated_images(
+    mock_openai_cls, mock_get_config,
+):
+    """模型完整 function_call 后应执行工具、回传结果并继续一次最终 Responses 请求。"""
+    from types import SimpleNamespace
+
+    mock_get_config.return_value = _model_config("gpt-6.1-terra", supports_reasoning=True)
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    call_item = SimpleNamespace(
+        type="function_call", id="fc_item_1", call_id="fc_call_1",
+        name="generate_image", arguments='{"prompt":"a red apple"}',
+    )
+    first_response = SimpleNamespace(
+        id="resp_image_1", model="gpt-6.1-terra", output=[call_item], usage=None,
+    )
+    second_response = SimpleNamespace(
+        id="resp_image_2", model="gpt-6.1-terra", output=[], usage=None,
+    )
+    first_events = [
+        _response_event("response.created", response=first_response),
+        _response_event("response.output_item.done", item=call_item),
+        _response_event("response.completed", response=first_response),
+    ]
+    second_events = [
+        _response_event("response.created", response=second_response),
+        _response_event("response.output_text.delta", delta="已生成"),
+        _response_event("response.completed", response=second_response),
+    ]
+    mock_client.responses.create = AsyncMock(
+        side_effect=[_make_async_stream(first_events), _make_async_stream(second_events)]
+    )
+    fake_result = SimpleNamespace(
+        images=[b"\x89PNG\r\n\x1a\nimage"],
+        response={"ok": True, "image_count": 1},
+    )
+    fake_session = MagicMock(calls=0, max_calls=2)
+    fake_session.execute = AsyncMock(return_value=fake_result)
+    with patch("app.image_tools.ImageToolSession", return_value=fake_session), \
+         patch("app.image_tools.image_tool_declarations", return_value=[{
+             "name": "generate_image", "description": "生成图片",
+             "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}},
+         }], create=True):
+        chunks = [chunk async for chunk in call_openai_stream(
+            [{"role": "user", "content": "画一只红苹果"}],
+            target_model="fast",
+            enable_image_tools=True,
+            image_tool_inputs=[],
+        )]
+
+    fake_session.execute.assert_awaited_once_with("generate_image", '{"prompt":"a red apple"}')
+    assert any(chunk.get("generated_images") == [b"\x89PNG\r\n\x1a\nimage"] for chunk in chunks)
+    assert "已生成" in "".join(chunk.get("content", "") for chunk in chunks)
+    assert mock_client.responses.create.await_count == 2
+    continuation = mock_client.responses.create.await_args_list[1].kwargs
+    assert continuation.get("previous_response_id") is None
+    assert any(item.get("type") == "function_call_output" for item in continuation["input"])
+    assert any(tool["type"] == "function" for tool in continuation["tools"])
+
+
+@pytest.mark.asyncio
 @patch("app.responses_state.get_response_id", return_value=None)
 @patch("app.responses_state.set_response_id")
 @patch("app.openai_client.get_litellm_model_config")
@@ -2467,3 +2587,91 @@ async def test_claude_search_autonomous_mount_stays_silent_when_not_requested(mo
         }
         for chunk in chunks
     )
+
+
+@pytest.mark.asyncio
+async def test_image_tools_two_turns_preserve_reasoning_and_share_budget(monkeypatch):
+    import app.openai_client as oc
+    import app.image_gen as image_gen
+    import app.responses_state as response_state
+    model = "gpt-6.1-terra"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    generate = AsyncMock(return_value=[b"red-image"])
+    edit = AsyncMock(return_value=[b"blue-image"])
+    monkeypatch.setattr(image_gen, "generate_image", generate)
+    monkeypatch.setattr(image_gen, "edit_image", edit)
+    get_previous = MagicMock()
+    monkeypatch.setattr(response_state, "get_response_id", get_previous)
+    reasoning = {"type": "reasoning", "id": "rs1", "summary": [], "encrypted_content": "opaque-signature"}
+    first_call = {"type": "function_call", "call_id": "call-generate", "name": "generate_image", "arguments": '{"prompt":"red apple"}'}
+    second_call = {"type": "function_call", "call_id": "call-edit", "name": "edit_image", "arguments": '{"prompt":"make it blue","image_index":1}'}
+    first_output = [reasoning, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "开始"}]}, first_call]
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[
+        _make_async_stream([_bridge_completed(model, output=first_output, input_tokens=2, output_tokens=3)]),
+        _make_async_stream([_bridge_completed(model, output=[second_call], input_tokens=4, output_tokens=5)]),
+        _make_async_stream([_response_event("response.output_text.delta", delta="图片已完成"), _bridge_completed(model, input_tokens=6, output_tokens=7)]),
+    ])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+    chunks = [chunk async for chunk in oc.call_openai_stream([{"role": "user", "content": "画一个红苹果，再改成蓝色"}], target_model="fast", enable_image_tools=True, conversation_id="dingtalk-test")]
+    assert [chunk["generated_images"] for chunk in chunks if "generated_images" in chunk] == [[b"red-image"], [b"blue-image"]]
+    generate.assert_awaited_once()
+    edit.assert_awaited_once_with(b"red-image", "make it blue", backend="openai", aspect_ratio="1:1")
+    requests = [call.kwargs for call in client.responses.create.await_args_list]
+    assert len(requests) == 3
+    assert all(request["store"] is False and "previous_response_id" not in request for request in requests)
+    assert all(item in requests[1]["input"] for item in first_output)
+    assert [item["call_id"] for item in requests[2]["input"] if item.get("type") == "function_call_output"] == ["call-generate", "call-edit"]
+    assert "tools" not in requests[2]
+    get_previous.assert_not_called()
+    usage = [chunk["usage"] for chunk in chunks if "usage" in chunk]
+    assert len(usage) == 1 and usage[0]["input_tokens"] == 12 and usage[0]["output_tokens"] == 15
+
+
+def test_image_tool_call_id_conflict_is_rejected():
+    from app.openai_client import _image_tool_calls_from_output
+    with pytest.raises(RuntimeError, match="标识冲突"):
+        _image_tool_calls_from_output([
+            {"type": "function_call", "call_id": "same", "name": "generate_image", "arguments": '{"prompt":"a"}'},
+            {"type": "function_call", "call_id": "same", "name": "generate_image", "arguments": '{"prompt":"b"}'},
+        ])
+
+
+@pytest.mark.asyncio
+async def test_image_tool_reassembles_gateway_argument_deltas(monkeypatch):
+    import app.openai_client as oc
+    import app.image_gen as image_gen
+    model = "gpt-6.1-terra"
+    monkeypatch.setattr(oc, "get_litellm_model_config", lambda _: _model_config(model, supports_reasoning=True))
+    generate = AsyncMock(return_value=[b"real-image"])
+    monkeypatch.setattr(image_gen, "generate_image", generate)
+    item = {"type": "function_call", "id": "item-image", "call_id": "call-image", "name": "generate_image"}
+    client = MagicMock()
+    client.responses.create = AsyncMock(side_effect=[
+        _make_async_stream([
+            _response_event("response.output_item.added", item=item),
+            _response_event("response.function_call_arguments.delta", item_id="item-image", call_id="call-image", delta='{"prompt":'),
+            _response_event("response.function_call_arguments.delta", item_id="item-image", call_id="call-image", delta='"red apple"}'),
+            _response_event("response.function_call_arguments.done", item_id="item-image", call_id="call-image"),
+            _response_event("response.output_item.done", item=item),
+            _bridge_completed(model, output=[item]),
+        ]),
+        _make_async_stream([_response_event("response.output_text.delta", delta="图片完成"), _bridge_completed(model)]),
+    ])
+    monkeypatch.setattr(oc, "_build_client", lambda: client)
+    chunks = [chunk async for chunk in oc.call_openai_stream([{"role": "user", "content": "画个苹果"}], target_model="fast", enable_image_tools=True)]
+    assert any(chunk.get("generated_images") == [b"real-image"] for chunk in chunks)
+    generate.assert_awaited_once()
+    inputs = client.responses.create.await_args_list[1].kwargs["input"]
+    restored = [item for item in inputs if item.get("type") == "function_call"][0]
+    assert restored["id"] == "item-image" and restored["call_id"] == "call-image"
+    assert restored["arguments"] == '{"prompt":"red apple"}'
+
+
+@pytest.mark.parametrize("prompt", ["a" * 8192, "汉" * 3000], ids=["ascii-overflow", "utf8-overflow"])
+def test_completed_only_image_arguments_are_bounded_before_continuation(prompt):
+    from app.openai_client import _image_tool_complete_output
+    import json
+    item = {"type": "function_call", "call_id": "bounded", "name": "generate_image", "arguments": json.dumps({"prompt": prompt}, ensure_ascii=False)}
+    with pytest.raises(RuntimeError, match="参数超限"):
+        _image_tool_complete_output([item], {})

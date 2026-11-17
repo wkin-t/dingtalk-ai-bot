@@ -121,7 +121,8 @@ def _get_openai_client():
         import httpx
 
         proxy_url = SOCKS_PROXY.replace("socks5h://", "socks5://") if SOCKS_PROXY else None
-        kwargs = {"timeout": 300.0}
+        # 图片超时后的服务端结果不确定，自动重发可能重复计费。
+        kwargs = {"timeout": 300.0, "max_retries": 0}
         if OPENAI_API_BASE:
             kwargs["http_client"] = httpx.Client(trust_env=False, timeout=300.0)
         elif proxy_url:
@@ -159,6 +160,7 @@ async def _generate_with_gemini(
                 model=GEMINI_IMAGE_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
+                    http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
                     response_modalities=["IMAGE", "TEXT"],
                     image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
                 ),
@@ -178,6 +180,7 @@ async def _generate_with_gemini(
             f"图片生成返回数量不足（需要 {target_count} 张，实际 {len(unique)} 张）"
         )
 
+    # Deprecated：旧 Imagen 直连协议；当前生产使用原生 Gemini 图片模型。
     def _call():
         response = direct_client.models.generate_images(
             model=GEMINI_IMAGE_MODEL,
@@ -303,6 +306,7 @@ async def _edit_with_gemini(
                 types.Part(text=prompt),
             ],
             config=types.GenerateContentConfig(
+                http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
                 response_modalities=["IMAGE", "TEXT"],
             ),
         )

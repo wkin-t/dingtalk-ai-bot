@@ -217,7 +217,9 @@ def _auto_image_backend() -> str:
         return "gemini"
     return "openai"
 
+# Deprecated：预分析图片分支的后端选择；新图片工具按 Gemini/GPT 协议固定后端。
 IMAGE_BACKEND = _auto_image_backend()
+ENABLE_IMAGE_TOOLS = _get_bool("ENABLE_IMAGE_TOOLS", True)
 
 # Bot 实例标识 (多 bot 共存时区分消息来源)
 BOT_ID = os.getenv("BOT_ID", AI_BACKEND)

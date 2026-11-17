@@ -22,6 +22,7 @@ def test_openai_image_client_routes_gateway_direct_and_native_through_proxy(monk
         image_gen._get_openai_client()
     transport.assert_called_once_with(**expected_transport)
     assert client.call_args.kwargs["http_client"] is transport.return_value
+    assert client.call_args.kwargs["max_retries"] == 0
 
 
 class TestGenerateImage:

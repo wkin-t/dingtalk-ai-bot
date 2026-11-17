@@ -151,6 +151,9 @@ async def create_backend_stream(
     elif backend == "openai":
         # OPENAI_API_BASE 路径改用官方 SDK，正确捕获 reasoning_details（含 signature）
         from app.openai_client import call_openai_stream
+        image_kwargs = {}
+        if cfg.ENABLE_IMAGE_TOOLS and kwargs.get("enable_image_tools", False):
+            image_kwargs = {"enable_image_tools": True, "image_tool_inputs": kwargs.get("image_tool_inputs")}
         stream = call_openai_stream(
             messages,
             target_model=target_model,
@@ -160,6 +163,7 @@ async def create_backend_stream(
             temperature=temperature,
             top_p=top_p,
             conversation_id=kwargs.get("conversation_id", ""),
+            **image_kwargs,
         )
     else:
         from app.gemini_client import call_gemini_stream
@@ -173,6 +177,9 @@ async def create_backend_stream(
         }
         if kwargs.get("route_slot") in {"router", "lite", "fast", "pro"}:
             gemini_kwargs["route_slot"] = kwargs["route_slot"]
+        if cfg.ENABLE_IMAGE_TOOLS and kwargs.get("enable_image_tools", False):
+            gemini_kwargs["enable_image_tools"] = True
+            gemini_kwargs["image_tool_inputs"] = kwargs.get("image_tool_inputs")
         stream = call_gemini_stream(
             **gemini_kwargs,
         )

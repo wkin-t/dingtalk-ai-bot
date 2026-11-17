@@ -53,8 +53,33 @@ ROUTER_IMAGE_GEN_FALSE_HINT = (
 def should_force_search(content: str) -> bool:
     """判断用户是否显式要求或明显需要实时搜索。"""
     content_lower = (content or "").lower()
-    return any(keyword in content_lower for keyword in FORCE_SEARCH_KEYWORDS)
+    # 路由输入可能附带历史消息；如果调用方保留了明确的当前消息分隔符，
+    # 只读取分隔符后的当前发言，不能让历史中的“天气/新闻/当前”触发搜索。
+    current_marker = "[当前用户消息]"
+    if current_marker in content_lower:
+        content_lower = content_lower.rsplit(current_marker, 1)[1]
 
+    # 否定意图优先于关键词命中，避免“不要联网搜索/无需查最新消息”被误判。
+    search_negations = (
+        "不要联网",
+        "不需要联网",
+        "无需联网",
+        "不用联网",
+        "别联网",
+        "不要搜索",
+        "不需要搜索",
+        "无需搜索",
+        "不用搜索",
+        "别搜索",
+        "不要查",
+        "不需要查",
+        "无需查",
+        "不用查",
+        "别查",
+    )
+    if any(phrase in content_lower for phrase in search_negations):
+        return False
+    return any(keyword in content_lower for keyword in FORCE_SEARCH_KEYWORDS)
 
 def analyze_complexity_unified(content: str, has_images: bool = False) -> dict:
     """

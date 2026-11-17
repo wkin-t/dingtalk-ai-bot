@@ -247,7 +247,8 @@ python main.py                     # 默认端口 35000
 | `DWS_MAX_QUOTE_IMAGES` | 否 | 自动补全的历史图与引用图总上限，默认 4；本轮用户上传图片另行处理 |
 | `DWS_MAX_DOC_BYTES` / `DWS_MAX_DOC_CHARS` | 否 | 单文档大小 / 正文截取上限，默认 10 MiB / 12000 字符 |
 | `REDIS_*` / `MYSQL_*` | 否 | 用于统计、采样等应用状态及旧路径；钉钉对话历史不再通过它们持久化或降级 |
-| `IMAGE_BACKEND` | 否 | 显式选择 `gemini` 或 `openai`，建议多容器分别设置；未设时兼容按 `OPENAI_IMAGE_MODEL` 名称推断 |
+| `ENABLE_IMAGE_TOOLS` | 否 | 默认 `true`，Gemini/GPT 由对话模型原生函数调用 `generate_image` / `edit_image`；Claude 不挂图片工具。设为 `false` 回滚 Deprecated 预分析图片流水线 |
+| `IMAGE_BACKEND` | Deprecated 预分析流程 | 旧入口选择 `gemini` 或 `openai`；新图片工具按当前 Gemini/GPT 原生协议固定后端，不读取此覆盖 |
 | `GEMINI_IMAGE_MODEL` / `GEMINI_IMAGE_EDIT_MODEL` | Gemini 生图 / 改图 | 分别控制实际模型；原生 Gemini 模型走 `generate_content`，旧 `imagen-*` 生图走 Google 直连 |
 | `OPENAI_IMAGE_MODEL` | GPT 生图 / 改图 | Images 接口模型，如 `gpt-image-2.6-sunburst` |
 | `OPENAI_IMAGE_COMPLEXITY` | 否 | GPT Image 2.6 的规划复杂度：`low` / `medium` / `high`，最高为 `high`；不等于对话 `reasoning.effort=max`，空值不下发 |
@@ -343,9 +344,20 @@ dws 查询本身不会使模型缓存失效；能否复用缓存取决于实际�
 | 旧历史配置 | `MAX_STORAGE_LENGTH`、`HISTORY_TTL`、`ENABLE_DWS_GROUP_CONTEXT`、`DWS_PERSIST_GROUP_MESSAGES`、`DWS_IGNORE_SENDERS` | 仅服务旧历史 / 混合模式；当前钉钉历史条数由 `MAX_HISTORY_LENGTH` 控制 |
 | 钉钉 Responses 服务端续接 | `app.responses_state` 与 `app.openai_client` 内的 `previous_response_id` 兼容分支 | 仅钉钉会话弃用续接；通用客户端能力、清理旧状态的逻辑仍保留 |
 | 旧搜索摘要注入 | `app.gemini_client.google_search`、`_build_search_fallback_summary`、`SEARCH_FALLBACK_PROVIDER` | 仅保留显式兼容回滚，默认 `none`；后端原生搜索继续使用 |
+| 预分析生图 / 改图与 Prompt 增强 | `app.dingtalk_bot` 的旧图片分支、`_enrich_image_prompt` 及路由 `need_image_*` 字段 | 默认由模型自主调用图片工具；旧流程仅在 `ENABLE_IMAGE_TOOLS=false` 时回滚使用 |
+| 旧 Imagen 直连生图 | `app.image_gen._generate_with_gemini` 的 `generate_images` 分支 | 当前生产使用原生 Gemini 图片模型；保留旧 `imagen-*` 配置兼容 |
+| OpenClaw 图片 JSON 协议 | `app.dingtalk_bot._extract_image_gen_json_block` 和对应发送分支 | 仅旧 OpenClaw 解析，Gemini/GPT 使用已校验的图片工具结果 |
 | 旧历史 bot_id 回填 | `scripts/backfill_bot_id.py` | 只供旧数据维护，当前 dws 部署无需执行 |
 
 这些标记仅说明适用范围，不改变执行行为。`/clear`、`/resume`、`/since`、共享 AI 工具、原生 OpenRouter 后端以及当前关闭但保留的 Claude 搜索桥接均未整体弃用。
+
+### 模型自主生图与改图
+
+Gemini 和 GPT 通过各自原生函数调用协议选择 `generate_image` 或 `edit_image`，应用执行服务端配置的图片 API，再把实际图片上传到当前钉钉机器人并显示在同一张回复卡片。该链路不依赖腾讯云 COS，也不使用个人 dws 写接口。Claude 不挂图片工具。
+
+图片模型、key 和地址由服务端固定，工具参数不接受 URL、文件路径、模型或凭据。每轮最多执行两次、累计最多四张，失败同样占预算。改图只能选择本次上传、显式引用或本轮刚生成的图片，不自动取普通历史图。图片临时媒体 ID 不写入卡片正文回读缓存。
+
+GPT 使用 Responses 原生函数调用并调用 Images API；当前中转的 Responses 内置 `image_generation` 工具实测返回 502，不能视为已支持。Gemini 使用原生函数调用，再以原生 `generate_content` 调用配置的图片模型。`ENABLE_IMAGE_TOOLS=false` 可临时回滚旧预分析入口。
 
 ### 卡片
 

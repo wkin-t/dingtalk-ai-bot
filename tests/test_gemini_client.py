@@ -1266,3 +1266,59 @@ def test_safe_error_summary_sanitizes_known_reason_and_bounds_length():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+@pytest.mark.asyncio
+async def test_gemini_image_tool_preserves_signature_and_continues(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from google.genai import types
+    import app.gemini_client as client_module
+    import app.image_gen as image_gen
+
+    tool_part = types.Part(function_call=types.FunctionCall(id="image-call-1", name="generate_image", args={"prompt": "red apple", "number_of_images": 1}), thought_signature=b"opaque-signature")
+    first = SimpleNamespace(candidates=[SimpleNamespace(content=types.Content(role="model", parts=[tool_part]), grounding_metadata=None, finish_reason=None)], usage_metadata=None)
+    second = SimpleNamespace(candidates=[SimpleNamespace(content=types.Content(role="model", parts=[types.Part(text="图片已完成")]), grounding_metadata=None, finish_reason=None)], usage_metadata=None)
+
+    async def events(chunk):
+        yield chunk
+
+    requests = []
+
+    async def stream(**kwargs):
+        requests.append(kwargs)
+        return events(first if len(requests) == 1 else second)
+
+    monkeypatch.setattr(client_module, "client", SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=stream))))
+    monkeypatch.setattr(client_module, "fallback_client", None)
+    generate = AsyncMock(return_value=[b"final-image"])
+    monkeypatch.setattr(image_gen, "generate_image", generate)
+    result = [chunk async for chunk in client_module.call_gemini_stream([{"role": "user", "content": "画一个苹果"}], target_model="gemini-4-argon", enable_image_tools=True)]
+    assert [chunk["generated_images"] for chunk in result if "generated_images" in chunk] == [[b"final-image"]]
+    assert "图片已完成" == "".join(chunk.get("content", "") for chunk in result)
+    assert len(requests) == 2
+    model_turn = requests[1]["contents"][-2]
+    assert model_turn.parts[0].thought_signature == b"opaque-signature"
+    assert requests[1]["contents"][-1].parts[0].function_response.name == "generate_image"
+    assert requests[1]["contents"][-1].parts[0].function_response.response["ok"] is True
+    generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gemini_no_tool_mode_does_not_execute_image_calls(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import app.gemini_client as client_module
+    import app.image_gen as image_gen
+    from google.genai import types
+
+    async def stream(**kwargs):
+        assert not any(getattr(tool, "function_declarations", None) for tool in kwargs["config"].tools or [])
+        async def chunks():
+            yield SimpleNamespace(candidates=[SimpleNamespace(content=types.Content(role="model", parts=[types.Part(text="hello")]), grounding_metadata=None, finish_reason=None)], usage_metadata=None)
+        return chunks()
+    monkeypatch.setattr(client_module, "client", SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=stream))))
+    monkeypatch.setattr(client_module, "fallback_client", None)
+    generate = AsyncMock()
+    monkeypatch.setattr(image_gen, "generate_image", generate)
+    result = [chunk async for chunk in client_module.call_gemini_stream([{"role": "user", "content": "hi"}], enable_image_tools=False)]
+    assert "hello" == "".join(chunk.get("content", "") for chunk in result)
+    generate.assert_not_called()

@@ -1053,6 +1053,8 @@ async def call_openai_stream(
     temperature: float = 0.7,
     top_p: Optional[float] = None,
     conversation_id: str = "",
+    enable_image_tools: bool = False,
+    image_tool_inputs: Optional[List[bytes]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     流式调用 OPENAI_API_BASE 中转站。按 upstream 自动选择 API：
@@ -1165,6 +1167,8 @@ async def call_openai_stream(
                     start_time,
                     conversation_id=conversation_id,
                     enable_search=False,
+                    enable_image_tools=False,
+                    image_tool_inputs=None,
                 ):
                     yield evt
             return
@@ -1202,6 +1206,11 @@ async def call_openai_stream(
                 temperature, top_p, thinking_level, start_time,
                 conversation_id=conversation_id,
                 enable_search=enable_search,
+                enable_image_tools=(
+                    enable_image_tools
+                    and model_name.lower().rsplit("/", 1)[-1].startswith("gpt-")
+                ),
+                image_tool_inputs=image_tool_inputs,
             ):
                 yield evt
     except asyncio.CancelledError:
@@ -1314,6 +1323,100 @@ async def _stream_via_chat_completions(
     }
 
 
+def _image_tool_response_item_to_dict(item: Any) -> Optional[Dict[str, Any]]:
+    """保留 Responses output item 的完整可回放形态，不把签名字段重建丢失。"""
+    if isinstance(item, Mapping):
+        return dict(item)
+    for method_name in ("model_dump", "to_dict"):
+        method = getattr(item, method_name, None)
+        if callable(method):
+            try:
+                value = method(mode="json", exclude_none=True) if method_name == "model_dump" else method()
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                return value
+    value_dict = getattr(item, "__dict__", None)
+    return dict(value_dict) if isinstance(value_dict, dict) else None
+
+
+def _image_tool_complete_output(output, ledger):
+    """补齐中转省略的参数，保留原始 output 元数据并拒绝身份或参数冲突。"""
+    items = []
+    present_ids = set()
+    for raw in output:
+        item = _image_tool_response_item_to_dict(raw)
+        if item is None:
+            raise RuntimeError("图片工具输出格式无效")
+        if item.get("type") == "function_call":
+            item_id = item.get("id")
+            entry = ledger.get(item_id) or next((entry for entry in ledger.values() if entry.get("call_id") == item.get("call_id")), None)
+            if entry:
+                errors = []
+                if item_id:
+                    _bridge_record_item(ledger, item, "completed", errors)
+                if errors or entry.get("invalid"):
+                    raise RuntimeError("图片工具调用事件冲突")
+                candidates = [item.get("arguments"), entry.get("item_arguments"), entry.get("done_arguments"), "".join(entry["fragments"])]
+                candidates = [value for value in candidates if isinstance(value, str) and value]
+                if len(set(candidates)) > 1:
+                    raise RuntimeError("图片工具参数事件冲突")
+                item["arguments"] = candidates[0] if candidates else entry.get("added_arguments") or "{}"
+                item["call_id"] = item.get("call_id") or entry["call_id"]
+                item["name"] = item.get("name") or entry["name"]
+                present_ids.add(entry["item_id"])
+        items.append(item)
+    for item_id, entry in ledger.items():
+        if item_id not in present_ids:
+            if entry.get("invalid"):
+                raise RuntimeError("图片工具调用事件无效")
+            candidates = [entry.get("item_arguments"), entry.get("done_arguments"), "".join(entry["fragments"])]
+            candidates = [value for value in candidates if isinstance(value, str) and value]
+            if len(set(candidates)) > 1:
+                raise RuntimeError("图片工具参数事件冲突")
+            items.append({"type": "function_call", "id": item_id, "call_id": entry["call_id"], "name": entry["name"], "arguments": candidates[0] if candidates else entry.get("added_arguments") or "{}"})
+    unique = []
+    seen_calls = {}
+    for item in items:
+        if item.get("type") == "function_call":
+            arguments = item.get("arguments")
+            if not isinstance(arguments, str) or len(arguments.encode("utf-8")) > BRIDGE_MAX_ARGUMENT_BYTES:
+                raise RuntimeError("图片工具参数超限或格式无效")
+            call_id = item.get("call_id")
+            fingerprint = (item.get("name"), item.get("arguments"))
+            if call_id in seen_calls:
+                if seen_calls[call_id] != fingerprint:
+                    raise RuntimeError("图片工具调用标识冲突")
+                continue
+            seen_calls[call_id] = fingerprint
+        unique.append(item)
+    return unique
+
+
+def _image_tool_calls_from_output(output: Any) -> List[Dict[str, Any]]:
+    """完整输出中的调用以原始 call_id 关联；冲突或异常数量拒绝执行。"""
+    calls = []
+    seen = {}
+    for item in _response_candidates(output):
+        if _response_type(item) != "function_call":
+            continue
+        call_id = _response_field(item, "call_id")
+        name = _response_field(item, "name")
+        arguments = _response_field(item, "arguments")
+        if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not isinstance(arguments, str):
+            raise RuntimeError("图片工具调用缺少有效标识或参数")
+        fingerprint = (name, arguments)
+        if call_id in seen:
+            if seen[call_id] != fingerprint:
+                raise RuntimeError("图片工具调用标识冲突")
+            continue
+        seen[call_id] = fingerprint
+        calls.append({"call_id": call_id, "name": name, "arguments": arguments})
+        if len(calls) > 8:
+            raise RuntimeError("图片工具调用数量异常")
+    return calls
+
+
 async def _stream_via_responses(
     client,
     model_name: str,
@@ -1325,6 +1428,12 @@ async def _stream_via_responses(
     start_time: float,
     conversation_id: str = "",
     enable_search: bool = False,
+    enable_image_tools: bool = False,
+    image_tool_inputs: Optional[List[bytes]] = None,
+    _image_tool_seen_call_ids: Optional[set[str]] = None,
+    _input_items_override: Optional[List[Dict[str, Any]]] = None,
+    _image_tool_session=None,
+    _image_tool_round: int = 0,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Responses API 路径（Claude/GPT 上游）。
 
@@ -1339,6 +1448,23 @@ async def _stream_via_responses(
     Claude（store=False）走 input[0] 的 role="system" 消息，保留 cache_control，
     每轮全量重发才有机会命中 sub2api 转译层的缓存。
     """
+    image_tool_enabled = bool(
+        enable_image_tools
+        and model_name.lower().rsplit("/", 1)[-1].startswith("gpt-")
+    )
+    image_tool_seen_call_ids = _image_tool_seen_call_ids or set()
+    image_tool_session = _image_tool_session
+    image_tool_declarations: list[dict[str, Any]] = []
+    if image_tool_enabled:
+        # 延迟导入避免 image_gen/gemini_client 的模块级初始化形成循环依赖。
+        from app.image_tools import ImageToolSession, image_tool_declarations as get_image_tool_declarations
+
+        image_tool_session = image_tool_session or ImageToolSession(
+            backend="openai",
+            input_images=list(image_tool_inputs or []),
+        )
+        image_tool_declarations = get_image_tool_declarations()
+
     # Deprecated（钉钉会话）：以下续接兼容逻辑仅在其他调用方传入 conversation_id 时启用；
     # 当前钉钉传空 ID 并每轮提交 dws 可见历史，避免绕过窗口和 /clear。
     from app import responses_state
@@ -1350,10 +1476,12 @@ async def _stream_via_responses(
     full_instructions, full_input_items = _split_messages_for_responses(
         messages, config["supports_vision"], _supports_store
     )
+    if _input_items_override is not None:
+        full_input_items = list(_input_items_override)
 
     prev_response_id = (
         responses_state.get_response_id(conversation_id)
-        if (conversation_id and _supports_store)
+        if (conversation_id and _supports_store and not image_tool_enabled)
         else None
     )
 
@@ -1380,7 +1508,7 @@ async def _stream_via_responses(
             "model": model_name,
             "input": items,
             "stream": True,
-            "store": _supports_store,
+            "store": False if image_tool_enabled else _supports_store,
         }
         if full_instructions:
             kw["instructions"] = full_instructions
@@ -1397,8 +1525,21 @@ async def _stream_via_responses(
         if config["supports_reasoning"] and effort:
             kw["reasoning"] = {"effort": effort}
 
+        tools: list[dict[str, Any]] = []
         if enable_search and config.get("supports_search"):
-            kw["tools"] = [{"type": "web_search"}]
+            tools.append({"type": "web_search"})
+        if image_tool_enabled and _image_tool_round < 2 and image_tool_session.calls < image_tool_session.max_calls:
+            tools.extend(
+                {
+                    "type": "function",
+                    "name": declaration["name"],
+                    "description": declaration["description"],
+                    "parameters": declaration["parameters"],
+                }
+                for declaration in image_tool_declarations
+            )
+        if tools:
+            kw["tools"] = tools
 
         if use_prev and prev_response_id:
             kw["previous_response_id"] = prev_response_id
@@ -1438,6 +1579,9 @@ async def _stream_via_responses(
     grounding_tail = ""
     native_search = bool(enable_search and config.get("supports_search"))
     response_event_counts: Dict[str, int] = {}
+    image_tool_output_items: List[Any] = []
+    image_tool_completed_output: List[Any] = []
+    image_tool_ledger: Dict[str, Dict[str, Any]] = {}
 
     def _print_search_probe() -> None:
         """打印不含正文/URL 的 Responses 搜索事件摘要。"""
@@ -1493,6 +1637,22 @@ async def _stream_via_responses(
         if not event_type:
             continue
 
+        if image_tool_enabled:
+            item = _response_field(event, "item")
+            is_function_item = _response_type(item) == "function_call" and _response_field(item, "id")
+            if event_type in {"response.function_call_arguments.delta", "response.function_call_arguments.done"} or (event_type in {"response.output_item.added", "response.output_item.done"} and is_function_item):
+                errors = []
+                _bridge_record_event(image_tool_ledger, event, errors)
+                if errors or len(image_tool_ledger) > 8:
+                    raise RuntimeError("图片工具调用事件超限或缺少标识")
+            if event_type in {"response.output_item.added", "response.output_item.done"} and item is not None:
+                item_id = _response_field(item, "id") or _response_field(item, "call_id")
+                existing = next((index for index, prior in enumerate(image_tool_output_items) if item_id and item_id == (_response_field(prior, "id") or _response_field(prior, "call_id"))), None)
+                if existing is None:
+                    image_tool_output_items.append(item)
+                else:
+                    image_tool_output_items[existing] = item
+
         if native_search and not search_executed_sent:
             executed_reason = _responses_search_signal(event)
             if executed_reason:
@@ -1536,6 +1696,10 @@ async def _stream_via_responses(
             response = _response_field(event, "response")
             if response is None:
                 continue
+            if event_type == "response.completed":
+                output = _response_field(response, "output")
+                if isinstance(output, (list, tuple)):
+                    image_tool_completed_output = list(output)
             rid = _response_field(response, "id")
             if rid:
                 new_response_id = rid
@@ -1564,8 +1728,68 @@ async def _stream_via_responses(
             yield {"error": f"OpenAI Responses Error: {err_msg}"}
             return
 
+
     if thinking_sent:
         yield {"thinking_end": True}
+
+    if image_tool_enabled and image_tool_session:
+        output_items = _image_tool_complete_output(image_tool_completed_output or image_tool_output_items, image_tool_ledger)
+        calls = _image_tool_calls_from_output(output_items)
+        if calls:
+            continuation_items = list(full_input_items)
+            serialized_output_items = [
+                serialized
+                for item in output_items
+                if (serialized := _image_tool_response_item_to_dict(item)) is not None
+            ]
+            continuation_items.extend(serialized_output_items)
+            continuation_outputs: List[Dict[str, Any]] = []
+            generated_images: List[bytes] = []
+            if _image_tool_round >= 2:
+                yield {"image_tool": {"name": "image", "state": "failed", "error": "图片工具预算已用完。"}}
+                yield {"error": "本轮图片工具调用已结束，请在下一条消息继续。"}
+                return
+            for call in calls:
+                name, call_id = call["name"], call["call_id"]
+                yield {"image_tool": {"name": name, "state": "started"}}
+                if call_id in image_tool_seen_call_ids:
+                    tool_response = {"ok": False, "error": "图片工具调用标识重复，未重复执行。"}
+                    yield {"image_tool": {"name": name, "state": "failed", "error": tool_response["error"]}}
+                else:
+                    image_tool_seen_call_ids.add(call_id)
+                    result = await image_tool_session.execute(name, call["arguments"])
+                    tool_response = result.response
+                    if result.images:
+                        generated_images.extend(result.images)
+                    yield {"image_tool": {"name": name, "state": "completed" if tool_response.get("ok") else "failed", "error": tool_response.get("error", "")}}
+                continuation_outputs.append({"type": "function_call_output", "call_id": call_id, "output": json.dumps(tool_response, ensure_ascii=False, separators=(",", ":"))})
+            continuation_items.extend(continuation_outputs)
+            if generated_images:
+                yield {"generated_images": generated_images}
+            async for continuation in _stream_via_responses(
+                client,
+                model_name,
+                config,
+                messages,
+                temperature,
+                top_p,
+                thinking_level,
+                start_time,
+                conversation_id="",
+                enable_search=enable_search,
+                enable_image_tools=True,
+                image_tool_inputs=None,
+                _image_tool_session=image_tool_session,
+                _image_tool_round=_image_tool_round + 1,
+                _image_tool_seen_call_ids=image_tool_seen_call_ids,
+                _input_items_override=continuation_items,
+            ):
+                if "usage" in continuation:
+                    continuation["usage"]["input_tokens"] += input_tokens
+                    continuation["usage"]["output_tokens"] += output_tokens
+                    continuation["usage"]["cached_tokens"] = continuation["usage"].get("cached_tokens", 0) + cached_tokens
+                yield continuation
+            return
 
     latency_ms = int((time.time() - start_time) * 1000)
     print(f"✅ [OpenAI/responses] 响应结束 | 输入: {input_tokens}, 输出: {output_tokens}, 字符: {content_chars}, 延迟: {latency_ms}ms")
@@ -1578,7 +1802,7 @@ async def _stream_via_responses(
         return
 
     # 成功响应：存 response.id 给下一轮 previous_response_id 用
-    if _supports_store and new_response_id and conversation_id:
+    if _supports_store and new_response_id and conversation_id and not image_tool_enabled:
         responses_state.set_response_id(conversation_id, new_response_id)
 
     yield {
@@ -1714,6 +1938,7 @@ async def analyze_complexity_with_openai(
                 backend="openai",
             )
             result.setdefault("need_search", False)
+            # Deprecated：图片意图字段只供 ENABLE_IMAGE_TOOLS=false 的预分析回滚分支。
             result.setdefault("need_image_gen", False)
             result.setdefault("need_image_edit", False)
             result.setdefault("temperature", "balanced")

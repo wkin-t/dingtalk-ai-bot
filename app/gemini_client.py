@@ -402,6 +402,7 @@ async def analyze_complexity_with_model(content: str, has_images: bool = False, 
             result = _normalize_route_result(result, has_images=has_images)
             if "need_search" not in result:
                 result["need_search"] = False
+            # Deprecated：图片意图字段只供 ENABLE_IMAGE_TOOLS=false 的预分析回滚分支。
             if "need_image_gen" not in result:
                 result["need_image_gen"] = False
             if "need_image_edit" not in result:
@@ -510,6 +511,8 @@ async def call_gemini_stream(
     temperature: float = 0.7,
     top_p: Optional[float] = None,
     route_slot: Optional[str] = None,
+    enable_image_tools: bool = False,
+    image_tool_inputs=None,
 ) -> AsyncGenerator[Dict[str, str], None]:
     """
     调用 Gemini API 进行流式生成
@@ -537,6 +540,11 @@ async def call_gemini_stream(
         # 转换消息格式
         system_instruction, contents = _convert_openai_to_gemini(messages)
 
+        image_session = None
+        if enable_image_tools:
+            from app.image_tools import ImageToolSession, image_tool_declarations
+            image_session = ImageToolSession("gemini", image_tool_inputs)
+
         # 配置工具 (Google Search 由智能路由决定)
         tools = []
         if enable_search:
@@ -551,6 +559,10 @@ async def call_gemini_stream(
                     "reason": "native" if tools else "not_requested",
                 }
             }
+
+        if image_session is not None:
+            declarations = [types.FunctionDeclaration(name=item["name"], description=item["description"], parameters_json_schema=item["parameters"]) for item in image_tool_declarations()]
+            tools.append(types.Tool(function_declarations=declarations))
 
         # 配置生成参数
         config_kwargs = {
@@ -577,6 +589,10 @@ async def call_gemini_stream(
                 ),
             ],
         }
+        if image_session is not None:
+            config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+            config_kwargs["system_instruction"] = (system_instruction or "") + "\nYou can actually generate and edit images using the provided functions. Use them when requested; do not claim image tools are unavailable. Editable images are current uploads or explicit quotes only. After success the application displays real images in the same card; never invent image URLs."
+
         # 应用 per-provider clamp（Gemini 限 [0, 2.0]）
         from app.ai.sampling_clamp import clamp_temperature
         clamped_temp = clamp_temperature(temperature, "gemini")
@@ -637,23 +653,23 @@ async def call_gemini_stream(
             search_executed_sent = False
             actual_model = active_model
 
-            try:
-                response = await active_client.aio.models.generate_content_stream(
-                    model=active_model,
-                    contents=contents,
-                    config=_build_generation_config(active_model),
-                )
-                iterator = response.__aiter__()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                raise _ProviderPreOutputError(error) from None
-
-            while True:
+            request_contents = list(contents)
+            seen_calls = {}
+            for tool_round in range(3):
+                model_parts = []
+                previous_usage = (input_tokens, output_tokens, cached_tokens)
+                input_tokens = output_tokens = cached_tokens = 0
+                round_config = _build_generation_config(active_model)
+                if image_session is not None and (tool_round == 2 or image_session.calls >= image_session.max_calls):
+                    round_config.tools = [tool for tool in tools if not getattr(tool, "function_declarations", None)] or None
+                # 每轮保留完整 provider parts，其中包含不可重建的 thought_signature。
                 try:
-                    chunk = await iterator.__anext__()
-                except StopAsyncIteration:
-                    break
+                    response = await active_client.aio.models.generate_content_stream(
+                        model=active_model,
+                        contents=list(request_contents),
+                        config=round_config,
+                    )
+                    iterator = response.__aiter__()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -661,79 +677,123 @@ async def call_gemini_stream(
                         raise _ProviderStreamError(error) from None
                     raise _ProviderPreOutputError(error) from None
 
-                try:
-                    model_version = getattr(chunk, "model_version", None)
-                    if isinstance(model_version, str) and model_version.strip():
-                        actual_model = safe_model_name(model_version.strip())
+                while True:
+                    try:
+                        chunk = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        if state["output_started"]:
+                            raise _ProviderStreamError(error) from None
+                        raise _ProviderPreOutputError(error) from None
 
-                    if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                        usage = chunk.usage_metadata
-                        if hasattr(usage, "prompt_token_count"):
-                            input_tokens = usage.prompt_token_count or 0
-                        if hasattr(usage, "candidates_token_count"):
-                            output_tokens = usage.candidates_token_count or 0
-                        if hasattr(usage, "cached_content_token_count"):
-                            cached = usage.cached_content_token_count or 0
-                            cached_tokens = cached if isinstance(cached, int) else 0
+                    try:
+                        model_version = getattr(chunk, "model_version", None)
+                        if isinstance(model_version, str) and model_version.strip():
+                            actual_model = safe_model_name(model_version.strip())
 
-                    if not chunk.candidates:
-                        continue
+                        if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                            usage = chunk.usage_metadata
+                            if hasattr(usage, "prompt_token_count"):
+                                input_tokens = usage.prompt_token_count or 0
+                            if hasattr(usage, "candidates_token_count"):
+                                output_tokens = usage.candidates_token_count or 0
+                            if hasattr(usage, "cached_content_token_count"):
+                                cached = usage.cached_content_token_count or 0
+                                cached_tokens = cached if isinstance(cached, int) else 0
 
-                    candidate = chunk.candidates[0]
-                    if not search_executed_sent and getattr(candidate, "grounding_metadata", None):
-                        search_executed_sent = True
-                        print("🌐 [搜索执行] Gemini grounding_metadata 回流，本次真实联网")
-                        yield {"search": {"executed": True}}
-
-                    if getattr(candidate, "finish_reason", None):
-                        # candidate.finish_reason 是 str 子类枚举，但 str() 会走自定义
-                        # __str__ 返回 "FinishReason.STOP" 而非纯值 "STOP"，用 .name 取真正的
-                        # 枚举名，否则下面的 in 判断永远不匹配，每次正常结束都会误报"异常"。
-                        finish_reason = getattr(candidate.finish_reason, "name", None) or str(candidate.finish_reason)
-                        if "SAFETY" in finish_reason:
-                            yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
-                            return
-                        if finish_reason not in ["STOP", "MAX_TOKENS", ""]:
-                            print(f"⚠️ 异常的 finish_reason: {finish_reason}")
-
-                    if not candidate.content or not candidate.content.parts:
-                        continue
-
-                    for part in candidate.content.parts:
-                        is_thought = getattr(part, "thought", False)
-                        text_content = getattr(part, "text", "")
-                        if not text_content:
+                        if not chunk.candidates:
                             continue
 
-                        if is_thought:
-                            if ENABLE_THINKING and not thinking_sent:
-                                yield {"thinking_start": True}
-                                thinking_sent = True
-                            if ENABLE_THINKING:
+                        candidate = chunk.candidates[0]
+                        if not search_executed_sent and getattr(candidate, "grounding_metadata", None):
+                            search_executed_sent = True
+                            print("🌐 [搜索执行] Gemini grounding_metadata 回流，本次真实联网")
+                            yield {"search": {"executed": True}}
+
+                        if getattr(candidate, "finish_reason", None):
+                            # candidate.finish_reason 是 str 子类枚举，但 str() 会走自定义
+                            # __str__ 返回 "FinishReason.STOP" 而非纯值 "STOP"，用 .name 取真正的
+                            # 枚举名，否则下面的 in 判断永远不匹配，每次正常结束都会误报"异常"。
+                            finish_reason = getattr(candidate.finish_reason, "name", None) or str(candidate.finish_reason)
+                            if "SAFETY" in finish_reason:
+                                yield {"error": "⚠️ 内容被安全过滤器阻止。可能是图片包含敏感内容，或提示词触发了安全限制。请尝试其他图片或调整提问方式。"}
+                                return
+                            if finish_reason not in ["STOP", "MAX_TOKENS", ""]:
+                                print(f"⚠️ 异常的 finish_reason: {finish_reason}")
+
+                        if not candidate.content or not candidate.content.parts:
+                            continue
+
+                        model_parts.extend(candidate.content.parts)
+                        for part in candidate.content.parts:
+                            if image_session is not None and getattr(part, "function_call", None):
                                 state["output_started"] = True
-                                yield {"thinking": text_content}
-                        else:
-                            if thinking_sent:
-                                yield {"thinking_end": True}
-                                thinking_sent = False
-                            state["output_started"] = True
-                            yield {"content": text_content}
+                            is_thought = getattr(part, "thought", False)
+                            text_content = getattr(part, "text", "")
+                            if not text_content:
+                                continue
 
-                except asyncio.CancelledError:
-                    raise
-                except ValueError as error:
-                    print(f"⚠️ Chunk 处理警告: {safe_error_summary(error, 'stream')}")
-                except Exception as error:
-                    print(f"⚠️ 处理 chunk 异常: {safe_error_summary(error, 'stream')}")
+                            if is_thought:
+                                if ENABLE_THINKING and not thinking_sent:
+                                    yield {"thinking_start": True}
+                                    thinking_sent = True
+                                if ENABLE_THINKING:
+                                    state["output_started"] = True
+                                    yield {"thinking": text_content}
+                            else:
+                                if thinking_sent:
+                                    yield {"thinking_end": True}
+                                    thinking_sent = False
+                                state["output_started"] = True
+                                yield {"content": text_content}
 
-            latency_ms = int((time.time() - start_time) * 1000)
-            print(f"✅ 流式响应结束 | 请求模型: {safe_model_name(target_model)}, 实际模型: {safe_model_name(actual_model)}, 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
-            cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
-            print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({cache_pct}%)")
+                    except asyncio.CancelledError:
+                        raise
+                    except ValueError as error:
+                        print(f"⚠️ Chunk 处理警告: {safe_error_summary(error, 'stream')}")
+                    except Exception as error:
+                        print(f"⚠️ 处理 chunk 异常: {safe_error_summary(error, 'stream')}")
 
-            if output_tokens == 0 and not state["output_started"]:
-                yield {"error": "⚠️ Gemini API 没有返回任何内容。可能原因：\n1. 图片内容触发了安全过滤器\n2. 图片格式不支持或损坏\n3. API 遇到内部错误\n\n请尝试：\n- 更换其他图片\n- 添加文字描述一起发送\n- 稍后重试"}
-                return
+                latency_ms = int((time.time() - start_time) * 1000)
+                print(f"✅ 流式响应结束 | 请求模型: {safe_model_name(target_model)}, 实际模型: {safe_model_name(actual_model)}, 输入: {input_tokens} tokens, 输出: {output_tokens} tokens, 延迟: {latency_ms}ms")
+                cache_pct = round(cached_tokens / input_tokens * 100) if input_tokens else 0
+                print(f"💾 [Cache] Gemini | cached={cached_tokens}/{input_tokens} ({cache_pct}%)")
+
+                if output_tokens == 0 and not state["output_started"]:
+                    yield {"error": "⚠️ Gemini API 没有返回任何内容。可能原因：\n1. 图片内容触发了安全过滤器\n2. 图片格式不支持或损坏\n3. API 遇到内部错误\n\n请尝试：\n- 更换其他图片\n- 添加文字描述一起发送\n- 稍后重试"}
+                    return
+
+                input_tokens += previous_usage[0]
+                output_tokens += previous_usage[1]
+                cached_tokens += previous_usage[2]
+                calls = [part.function_call for part in model_parts if getattr(part, "function_call", None)]
+                if not calls or image_session is None:
+                    break
+                if tool_round == 2:
+                    yield {"error": "本轮图片工具调用已结束，请在下一条消息继续。"}
+                    return
+                responses = []
+                for call in calls:
+                    import json
+                    fingerprint = json.dumps({"name": call.name, "args": call.args}, sort_keys=True, ensure_ascii=False)
+                    call_key = getattr(call, "id", None) or fingerprint
+                    if call_key in seen_calls:
+                        old_fingerprint, result = seen_calls[call_key]
+                        if old_fingerprint != fingerprint:
+                            yield {"error": "图片工具调用标识冲突，请重试。"}
+                            return
+                    else:
+                        yield {"image_tool": {"name": call.name, "state": "started"}}
+                        result = await image_session.execute(call.name, call.args)
+                        seen_calls[call_key] = (fingerprint, result)
+                        if result.images:
+                            yield {"generated_images": result.images}
+                        yield {"image_tool": {"name": call.name, "state": "completed" if result.response.get("ok") else "failed", "error": result.response.get("error", "")}}
+                    responses.append(types.Part(function_response=types.FunctionResponse(id=getattr(call, "id", None), name=call.name, response=result.response)))
+                request_contents.extend([types.Content(role="model", parts=model_parts), types.Content(role="user", parts=responses)])
 
             usage_payload = {
                 "model": safe_model_name(actual_model),

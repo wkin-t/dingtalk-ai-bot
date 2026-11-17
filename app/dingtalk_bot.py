@@ -20,6 +20,7 @@ from app.config import (
     AVAILABLE_MODELS,
     AI_BACKEND,
     IMAGE_BACKEND,
+    ENABLE_IMAGE_TOOLS,
     BOT_ID,
     OPENCLAW_CONTEXT_MESSAGES,
     OPENCLAW_TOOLS_URL,
@@ -140,7 +141,7 @@ MESSAGE_ID_TTL = 300  # 消息 ID 缓存 5 分钟
 
 def _extract_image_gen_json_block(text: str) -> tuple[str, dict | None]:
     """
-    Extract an image generation result JSON block from model output.
+    Deprecated：旧 OpenClaw 生图 JSON 协议，仅保留旧后端兼容。
 
     Expected marker: "【生图结果JSON】"
     Supported formats:
@@ -840,6 +841,7 @@ async def _enrich_image_prompt(
     soul_text: str = "",
 ) -> str:
     """
+    Deprecated：旧预分析生图分支的 Prompt 增强，仅供 ENABLE_IMAGE_TOOLS=false 回滚。
     用轻量模型 + 聊天记录 + Soul 生成精细的生图 prompt
     返回增强后的英文图片描述；失败时降级为 raw_prompt
     """
@@ -1382,6 +1384,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 f"显式引用 {quoted_img_count} 张，本次上传 {user_uploaded_count} 张；历史图片不是本次上传]\n"
                 + router_content
             )
+        if router_content != raw_user_content:
+            router_content = (
+                f"[当前用户消息]\n{raw_user_content}\n"
+                f"[辅助上下文]\n{router_content}"
+            )
         soul_text = _load_soul(conversation_id)
         complexity = {}
         route_slot = None
@@ -1412,7 +1419,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(raw_user_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         elif AI_BACKEND == "openrouter":
@@ -1436,7 +1443,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", "fast")
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(raw_user_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
         else:
@@ -1459,14 +1466,14 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             target_model = complexity.get("model", GEMINI_MODEL_FAST)
             thinking_level = complexity.get("thinking_level", "low")
             route_slot = _resolve_main_route_slot(complexity, thinking_level)
-            need_search = bool(complexity.get("need_search", False)) or should_force_search(router_content)
+            need_search = bool(complexity.get("need_search", False)) or should_force_search(raw_user_content)
             temperature = _resolve_temperature(complexity.get("temperature", "balanced"))
             print(f"🎯 智能路由: {complexity.get('reason', '默认')} → 模型={target_model}, thinking={thinking_level}, search={need_search}, temp={temperature}")
 
         from app.ai.backend import resolve_thinking_for_route
         thinking_level = resolve_thinking_for_route(AI_BACKEND, target_model, thinking_level)
 
-        if not image_data_list:
+        if not effective_image_list:
             complexity["need_image_edit"] = False
 
         # 初始化 AI 卡片（路由已完成，thinkingText 使用模型生成的思考文字）
@@ -1495,8 +1502,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
         print(f"✅ 卡片创建成功，ID: {out_track_id}")
 
-        # ===== 生图分支 =====
-        need_image_gen = complexity.get("need_image_gen", False) if AI_BACKEND != "openclaw" else False
+        # Deprecated：仅 ENABLE_IMAGE_TOOLS=false 时保留预分析生图入口供回滚。
+        use_image_tools = ENABLE_IMAGE_TOOLS and AI_BACKEND in {"gemini", "openai"}
+        need_image_gen = bool(complexity.get("need_image_gen", False)) and AI_BACKEND != "openclaw" and not ENABLE_IMAGE_TOOLS
         if need_image_gen:
             params = complexity.get("image_gen_params", {})
             raw_prompt = params.get("prompt", content)
@@ -1583,13 +1591,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             return  # 跳过正常 AI 流
         # ===== 生图分支结束 =====
 
-        # ===== 改图分支 =====
+        # Deprecated：旧预分析改图分支，仅供 ENABLE_IMAGE_TOOLS=false 回滚。
         # content 为空（只发图片无文字）时，无论路由怎么判断都不触发改图
         need_image_edit = (
-            complexity.get("need_image_edit", False) and bool(content.strip())
+            complexity.get("need_image_edit", False) and bool(raw_user_content.strip()) and not use_image_tools
             if AI_BACKEND not in ("openclaw", "openrouter") else False
         )
-        if need_image_edit and image_data_list:
+        if need_image_edit and effective_image_list:
             edit_prompt = complexity.get("image_gen_params", {}).get("prompt", content) or content
             aspect_ratio = complexity.get("image_gen_params", {}).get("aspect_ratio", "1:1")
             print(f"✏️ [改图] prompt={edit_prompt[:80]}, ratio={aspect_ratio}, backend={IMAGE_BACKEND}")
@@ -1602,7 +1610,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                     content_key="thinkingText",
                 )
                 edited = await edit_image(
-                    image_bytes=image_data_list[0],
+                    image_bytes=effective_image_list[0],
                     prompt=edit_prompt,
                     backend=IMAGE_BACKEND,
                     aspect_ratio=aspect_ratio,
@@ -1643,6 +1651,10 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
         # ===== 改图分支结束 =====
 
         full_response = ""
+        generated_media = []
+        image_tools_used = False
+        image_tool_failed = False
+        image_cancelled = False
         full_thinking = ""  # 真实的 thinking 内容
         last_update_time = time.time()
         is_first_chunk = True
@@ -1705,9 +1717,32 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 sender_id=incoming_message.sender_id,
                 sender_nick=sender_name,
                 image_data_list=effective_image_list or None,
+                enable_image_tools=use_image_tools,
+                image_tool_inputs=effective_image_list or None,
             )
 
             async for chunk in stream:
+                if "image_tool" in chunk:
+                    image_tools_used = True
+                    state = chunk["image_tool"].get("state")
+                    if state == "started":
+                        await self.card_helper.stream_update(out_track_id, "正在生成或修改图片…", content_key="thinkingText")
+                    elif state == "failed":
+                        image_tool_failed = True
+                    continue
+                if "generated_images" in chunk:
+                    image_tools_used = True
+                    for image in chunk["generated_images"]:
+                        try:
+                            media = await self.card_helper.upload_generated_image(image)
+                            if not isinstance(media, str) or not media.startswith("@"):
+                                raise RuntimeError("钉钉媒体上传失败")
+                            generated_media.append(media)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            image_tool_failed = True
+                    continue
                 # 处理使用统计
                 if "usage" in chunk:
                     usage_info = chunk["usage"]
@@ -1730,7 +1765,13 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         keep_newlines=True,
                     )
                     print(f"❌ {error_text}")
-                    await self.card_helper.stream_update(out_track_id, f"❌ **API 请求失败**\n\n{error_text}", is_finalize=True, content_key="msgContent")
+                    error_body = f"❌ **API 请求失败**\n\n{error_text}"
+                    if generated_media:
+                        image_markdown = "\n\n".join(f"![生成图片{index}]({media_id})" for index, media_id in enumerate(generated_media, 1))
+                        error_body = f"图片已生成，但后续回复失败：{error_text}\n\n{image_markdown}"
+                    await self.card_helper.stream_update(out_track_id, error_body, is_finalize=True, content_key="msgContent")
+                    if image_tools_used:
+                        final_status_written = bool(await self.card_helper.update_card(out_track_id, {"msgContent": error_body, "thinkingText": "", "flowStatus": "3", "isError": "true"}))
                     return
 
                 # 处理 thinking 开始/结束标记
@@ -1801,7 +1842,8 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             # If the model produced an image generation result block, send image back to the same
             # conversation (single chat or group) as a native picture message.
-            cleaned_text, image_gen_payload = _extract_image_gen_json_block(clean_response)
+            # Deprecated：旧 OpenClaw JSON 图片协议，不再解析 GPT/Gemini 自由文本为本地文件操作。
+            cleaned_text, image_gen_payload = _extract_image_gen_json_block(clean_response) if use_openclaw_backend else (clean_response, None)
             sent_image_ok = False
             image_send_error = ""
             if image_gen_payload and isinstance(image_gen_payload.get("images"), list):
@@ -1885,6 +1927,11 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
 
             card_response, _ = resolve_mentions(card_response, dws_bundle.members, card=True)
             history_response, _ = resolve_mentions(history_response, dws_bundle.members)
+            if generated_media:
+                card_response += "\n\n" + "\n\n".join(f"![生成图片{index}]({media})" for index, media in enumerate(generated_media, 1))
+            if image_tool_failed:
+                failure_text = "图片生成、修改或上传失败，请稍后重试。"
+                card_response = (card_response + "\n\n" + failure_text) if generated_media else failure_text
 
             if AI_BACKEND in {"gemini", "openrouter"} and usage_info and usage_info.get("thinking_level"):
                 thinking_level = usage_info["thinking_level"]
@@ -1919,7 +1966,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                 status_text += f"\n\n<font color='#808080' size='2'>{model_status} | 🧠 {thinking_level} | t={_display_temp:.1f}{_temp_marker}{_top_p_part} {search_icon}</font>"
 
             final_content = card_response
-            card_body_draft = prepare_card_body(
+            card_body_draft = None if image_tools_used else prepare_card_body(
                 corp_id=dws_bundle.corp_id, conversation_id=conversation_id,
                 sender_id=dws_bundle.bot_sender_id,
                 out_track_id=out_track_id, body=history_response,
@@ -1933,18 +1980,20 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as error:
                 print(f"⚠️ [Soul进化] 调度失败: {safe_error_summary(error, 'soul')}")
             
-            await self.card_helper.stream_update(
+            stream_final_ok = await self.card_helper.stream_update(
                 out_track_id,
                 final_content,
                 is_finalize=True,
                 content_key="msgContent"
             )
+            if image_tools_used and stream_final_ok is False:
+                raise RuntimeError("钉钉卡片更新失败")
             
             update_data = {
                 "msgTitle": {"gemini": "Gem AI", "openclaw": "Claw AI", "openai": "AI"}.get(AI_BACKEND, "AI"),
                 "thinkingText": "",
                 "msgContent": final_content,
-                "isError": "false",
+                "isError": "true" if image_tool_failed else "false",
                 "statusText": status_text,
                 "msgButtons": [],
                 "flowStatus": "3",
@@ -1974,6 +2023,9 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
             print(f"✅ [DingTalk Stream] AI 卡片流式响应完成")
 
         except asyncio.CancelledError:
+            if image_tools_used:
+                image_cancelled = True
+                await _finalize_cancelled_image(self.card_helper, out_track_id, "图片处理已取消")
             raise
         except Exception as error:
             error_msg = f"系统异常: {safe_error_summary(error, 'provider')}"
@@ -1997,7 +2049,7 @@ class GeminiBotHandler(dingtalk_stream.ChatbotHandler):
                         pass
             finally:
                 # 成功卡片保留正式状态栏；取消动画等待也必须尝试清理未完成状态。
-                if not final_status_written:
+                if not final_status_written and not image_cancelled:
                     try:
                         await self.card_helper.stream_update(
                             out_track_id,
