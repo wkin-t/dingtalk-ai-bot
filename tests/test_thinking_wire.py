@@ -6,7 +6,15 @@ import pytest
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model,requested,expected", [("gemini-4-hydrogen-low", "xhigh", "xhigh"), ("gemini-4-argon-high", "xhigh", "high")])
+@pytest.mark.parametrize(
+    "model,requested,expected",
+    [
+        ("gemini-4-hydrogen-low", "xhigh", "xhigh"),
+        ("gemini-4-neon", "xhigh", "xhigh"),
+        ("gemini-4-carbon", "xhigh", "high"),
+        ("gemini-4-argon-high", "xhigh", "high"),
+    ],
+)
 async def test_gemini_sdk_wire_thinking_level_is_independent_of_alias(monkeypatch, model, requested, expected):
     from google import genai
     from google.genai import types

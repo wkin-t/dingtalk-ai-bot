@@ -7,6 +7,9 @@ import pytest
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend,model,requested,expected", [
     ("gemini", "gemini-4-hydrogen-low", "xhigh", "xhigh"),
+    ("gemini", "gemini-4-neon", "xhigh", "xhigh"),
+    ("gemini", "gemini-4-neon", "max", "xhigh"),
+    ("gemini", "gemini-4-carbon", "xhigh", "high"),
     ("gemini", "gemini-4-carbon-high", "xhigh", "high"),
     ("gemini", "gemini-4-argon-low", "max", "high"),
     ("openai", "claude-sonnet-5-5-low", "max", "max"),

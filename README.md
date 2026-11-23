@@ -34,11 +34,11 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 容器名表示接入的**模型家族**，`AI_BACKEND` 表示使用的**协议**。Claude 容器走 OpenAI 兼容中转站的 Responses API，不经过 OpenRouter。该容器 2026-08-25 前名为 `openrouter`，改名是为了消除这个误解。
 
-生产模型分工（2026-11-13 已核对，来自各 `.env*` 的显式覆盖）：
+生产模型分工（2026-11-13 已核对，Gemini 于 2026-11-23 更新，来自各 `.env*` 的显式覆盖）：
 
 | 机器人 | `MODEL_ROUTER` / `MODEL_LITE` | `MODEL_FAST` | `MODEL_PRO` |
 |---|---|---|---|
-| Gemini | `gemini-4-hydrogen-low` | `gemini-4-argon-high` | `gemini-4-carbon-high` |
+| Gemini | `gemini-4-hydrogen` | `gemini-4-neon` | `gemini-4-carbon` |
 | GPT | `gpt-6-luna` | `gpt-6.1-terra` | `gpt-6.1-sol` |
 | Claude | `claude-sonnet-5-5-low` | `claude-sonnet-5-5-low` | `claude-opus-5-5-low` |
 
@@ -61,7 +61,7 @@ LiteLLM 已完全移除，所有 OpenAI 兼容路径统一走官方 `openai` SDK
 
 | 当前模型 / 通道 | 支持的深度 | 能否完全关闭思考 |
 |---|---|---|
-| Gemini 4 Hydrogen | `low / medium / high / xhigh` | 不支持，最低 `low` |
+| Gemini 4 Hydrogen / Neon | `low / medium / high / xhigh` | 不支持，最低 `low` |
 | Gemini 4 Argon / Carbon | `low / medium / high` | 不支持，最低 `low` |
 | Claude Sonnet / Opus 5.5，中转 Responses | `low / medium / high / xhigh / max` | 不支持完全关闭 |
 | GPT-6 Luna、GPT-6 Sol、GPT-6.1 Terra，中转 Responses | `none / low / medium / high / xhigh / max` | 支持请求 `none` |

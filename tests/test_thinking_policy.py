@@ -8,24 +8,32 @@ from app.ai import thinking_policy
 @pytest.mark.parametrize(
     "model",
     [
+        "gemini-4-hydrogen",
         "gemini-4-hydrogen-low",
         "gemini-4-hydrogen-medium",
         "gemini-4-hydrogen-high",
         "gemini-4-hydrogen-xhigh",
         "google/gemini-4-hydrogen-low",
+        "gemini-4-neon",
+        "gemini-4-neon-low",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-high",
+        "gemini-4-neon-xhigh",
+        "google/gemini-4-neon-low",
     ],
 )
-def test_hydrogen_support_is_independent_of_alias_suffix(model):
+def test_hydrogen_and_neon_support_is_independent_of_alias_suffix(model):
     assert thinking_policy.supported_thinking_levels(model, "gemini") == ("low", "medium", "high", "xhigh")
 
 
-@pytest.mark.parametrize("model", ["gemini-4-argon-high", "gemini-4-carbon-low", "google/gemini-4-carbon-xhigh"])
+@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-argon-high", "gemini-4-carbon", "gemini-4-carbon-low", "google/gemini-4-carbon-xhigh"])
 def test_other_gemini4_models_do_not_gain_xhigh_from_alias(model):
     assert thinking_policy.supported_thinking_levels(model, "gemini") == ("low", "medium", "high")
 
 
-def test_gemini_family_boundary_does_not_match_hydrogenated_alias():
-    assert thinking_policy.supported_thinking_levels("gemini-4-hydrogenated-low", "gemini") == ("low", "medium", "high")
+@pytest.mark.parametrize("model", ["gemini-4-hydrogenated-low", "gemini-4-neonatal-low"])
+def test_gemini_family_boundary_does_not_match_prefix_collisions(model):
+    assert thinking_policy.supported_thinking_levels(model, "gemini") == ("low", "medium", "high")
 
 
 def test_openai_modern_families_and_legacy_capabilities():
@@ -54,6 +62,7 @@ def test_openrouter_does_not_inherit_relay_max_or_xhigh():
     assert thinking_policy.supported_thinking_levels("claude-sonnet-5-5-low", "openrouter") == ("low", "medium", "high")
     assert thinking_policy.supported_thinking_levels("gpt-6.1-terra", "openrouter") == ("low", "medium", "high")
     assert thinking_policy.supported_thinking_levels("google/gemini-4-hydrogen-low", "openrouter") == ("low", "medium", "high")
+    assert thinking_policy.supported_thinking_levels("google/gemini-4-neon", "openrouter") == ("low", "medium", "high")
 
 
 def test_unknown_model_is_conservative():
@@ -76,12 +85,17 @@ def test_off_support_is_per_model_not_per_gpt_family(model, off):
     [
         ("xhigh", "gemini-4-argon-low", "gemini", "high"),
         ("xhigh", "gemini-4-hydrogen-low", "gemini", "xhigh"),
+        ("xhigh", "gemini-4-neon", "gemini", "xhigh"),
         ("max", "gemini-4-hydrogen-low", "gemini", "xhigh"),
+        ("max", "gemini-4-neon", "gemini", "xhigh"),
+        ("xhigh", "gemini-4-carbon", "gemini", "high"),
         ("max", "gemini-4-carbon-high", "gemini", "high"),
         ("max", "claude-sonnet-5-5-low", "openai", "max"),
         ("xhigh", "claude-sonnet-5-5-low", "openai", "xhigh"),
         ("max", "claude-sonnet-5-5-low", "openrouter", "high"),
         ("minimal", "gemini-4-hydrogen-low", "gemini", "low"),
+        ("minimal", "gemini-4-neon", "gemini", "low"),
+        ("none", "gemini-4-neon", "gemini", "low"),
         ("minimal", "gpt-6-luna", "openai", "none"),
         ("none", "gpt-6-luna", "openai", "none"),
         ("none", "gpt-6.1-sol", "openai", "low"),
@@ -132,10 +146,10 @@ def test_invalid_override_is_not_silently_ignored(monkeypatch, override):
 def test_capability_prompt_describes_independent_thinking_field():
     prompt = thinking_policy.thinking_capabilities_prompt(
         "gemini",
-        {"lite": "gemini-4-hydrogen-low", "fast": "gemini-4-argon-high", "pro": "gemini-4-carbon-high"},
+        {"lite": "gemini-4-hydrogen", "fast": "gemini-4-neon", "pro": "gemini-4-carbon"},
     )
     assert "独立字段 thinking_level" in prompt
     assert "minimal" in prompt
-    assert "gemini-4-hydrogen-low → low, medium, high, xhigh" in prompt
-    assert "gemini-4-argon-high → low, medium, high" in prompt
-    assert "gemini-4-carbon-high → low, medium, high" in prompt
+    assert "gemini-4-hydrogen → low, medium, high, xhigh" in prompt
+    assert "gemini-4-neon → low, medium, high, xhigh" in prompt
+    assert "gemini-4-carbon → low, medium, high" in prompt

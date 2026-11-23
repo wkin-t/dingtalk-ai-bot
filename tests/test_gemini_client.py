@@ -389,6 +389,40 @@ class TestAnalyzeComplexity:
         assert result["thinking_level"] == "xhigh"
 
     @pytest.mark.asyncio
+    async def test_route_preserves_neon_xhigh_and_downgrades_carbon_xhigh(self):
+        """Neon 支持 xhigh；Carbon 不支持 xhigh，降到 high。"""
+        from app import gemini_client
+
+        with patch.object(gemini_client, "MODEL_LITE", "gemini-4-hydrogen"), \
+             patch.object(gemini_client, "GEMINI_MODEL_FAST", "gemini-4-neon"), \
+             patch.object(gemini_client, "DEFAULT_MODEL", "gemini-4-carbon"), \
+             patch.object(gemini_client, "client") as mock_client:
+            neon_chunk = _make_analysis_chunk(
+                '{"model":"gemini-4-neon","route_slot":"fast","thinking_level":"xhigh",'
+                '"need_search":false,"reason":"Neon xhigh"}'
+            )
+            mock_client.aio.models.generate_content_stream = AsyncMock(
+                return_value=_async_iter([neon_chunk])
+            )
+            neon_result = await gemini_client.analyze_complexity_with_model("较难代码问题")
+
+            carbon_chunk = _make_analysis_chunk(
+                '{"model":"gemini-4-carbon","route_slot":"pro","thinking_level":"xhigh",'
+                '"need_search":false,"reason":"Carbon xhigh"}'
+            )
+            mock_client.aio.models.generate_content_stream = AsyncMock(
+                return_value=_async_iter([carbon_chunk])
+            )
+            carbon_result = await gemini_client.analyze_complexity_with_model("复杂数学证明")
+
+        assert neon_result["model"] == "gemini-4-neon"
+        assert neon_result["route_slot"] == "fast"
+        assert neon_result["thinking_level"] == "xhigh"
+        assert carbon_result["model"] == "gemini-4-carbon"
+        assert carbon_result["route_slot"] == "pro"
+        assert carbon_result["thinking_level"] == "high"
+
+    @pytest.mark.asyncio
     async def test_route_downgrades_xhigh_for_non_hydrogen_model_to_high(self):
         """Argon/Carbon 不支持 xhigh 时降到该模型最高档 high，而非 low。"""
         from app import gemini_client

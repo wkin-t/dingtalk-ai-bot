@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 THINKING_LEVEL_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 _LEVEL_INDEX = {level: index for index, level in enumerate(THINKING_LEVEL_ORDER)}
 _GEMINI_4_LEVELS = ("low", "medium", "high")
-_GEMINI_4_HYDROGEN_LEVELS = ("low", "medium", "high", "xhigh")
+_GEMINI_4_XHIGH_LEVELS = ("low", "medium", "high", "xhigh")
 _GEMINI_LEGACY_LEVELS = ("low", "medium", "high")
 _OPENAI_LEGACY_LEVELS = ("low", "medium", "high", "xhigh")
 _CLAUDE_5_LEVELS = ("low", "medium", "high", "xhigh", "max")
@@ -58,11 +58,11 @@ def _model_override(model_name: str, backend: str) -> tuple[str, ...] | None:
 
 
 def _is_gemini_4(model_name: str) -> bool:
-    return bool(re.search(r"gemini-4-(?:argon|carbon|hydrogen)(?:[-.]|$)", model_name))
+    return bool(re.search(r"gemini-4-(?:argon|carbon|hydrogen|neon)(?:[-.]|$)", model_name))
 
 
-def _is_hydrogen(model_name: str) -> bool:
-    return bool(re.search(r"gemini-4-hydrogen(?:[-.]|$)", model_name))
+def _supports_gemini_4_xhigh(model_name: str) -> bool:
+    return bool(re.search(r"gemini-4-(?:hydrogen|neon)(?:[-.]|$)", model_name))
 
 
 def _supported_openai_model(model_name: str, backend: str) -> tuple[str, ...] | None:
@@ -96,7 +96,7 @@ def supported_thinking_levels(model_name: str, backend: str = "openai") -> tuple
     if normalized_backend == "openrouter":
         return ("low", "medium", "high")
     if _is_gemini_4(name):
-        return _GEMINI_4_HYDROGEN_LEVELS if _is_hydrogen(name) else _GEMINI_4_LEVELS
+        return _GEMINI_4_XHIGH_LEVELS if _supports_gemini_4_xhigh(name) else _GEMINI_4_LEVELS
     openai_levels = _supported_openai_model(name, normalized_backend)
     if openai_levels is not None:
         return openai_levels
