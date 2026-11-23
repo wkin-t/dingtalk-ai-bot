@@ -42,6 +42,6 @@ cos-python-sdk-v5==1.9.44
 # 图像处理 (ChineseBQB 表情包静图与 GIF 动图等比缩放)
 Pillow>=10.0.0
 # PDF 纯内存只读文本提取 (dws 引用群文件 PDF 解析)
-pypdf>=5.0.0
+pypdf>=7.1.1
 # 法定工作日/调休数据，支持至 2027 年；未知年份时主动群聊暂停。
 chinesecalendar==1.12.1
